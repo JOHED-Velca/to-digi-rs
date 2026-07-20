@@ -1,0 +1,22 @@
+[digiweb]
+base_url = "https://192.168.0.150"
+client_id = "digi"
+token_url = "REPLACE_WITH_CONFIRMED_OPENID_TOKEN_ENDPOINT"
+store_number = 1
+allow_invalid_certificates = false
+plu_upsert_path = "REPLACE_WITH_CONFIRMED_PLU_WRITE_OR_UPSERT_PATH"
+request_status_path_template = "REPLACE_WITH_CONFIRMED_STATUS_PATH_CONTAINING_{request_id}"
+
+[timeouts]
+request_seconds = 30
+poll_interval_seconds = 2
+poll_timeout_seconds = 120
+
+[import]
+continue_after_record_failure = true
+send_only_first_plu = false
+
+[mapping]
+main_plu_table = "Pludata"
+ingredient_table = "PluIng"
+nutrition_table = "PluNut"
