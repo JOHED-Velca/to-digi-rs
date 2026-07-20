@@ -50,11 +50,21 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         logger.warning("TLS certificate validation is disabled.")?;
     }
 
-    let client_secret = load_client_secret()?;
-    logger.kv(
-        "Client secret",
-        "loaded from DIGIWEB_CLIENT_SECRET (redacted)",
-    )?;
+    let client_secret = load_client_secret(&config)?;
+    if config.digiweb.log_credentials_for_testing {
+        use secrecy::ExposeSecret;
+
+        logger.warning("Testing credential logging is enabled. Client credentials will be written to logs.txt in plain text.")?;
+        logger.kv("DIGIweb Client ID", &config.digiweb.client_id)?;
+        logger.kv("DIGIweb Client Secret", client_secret.expose_secret())?;
+    } else if config.digiweb.client_secret.trim().is_empty() {
+        logger.kv(
+            "Client secret",
+            "loaded from DIGIWEB_CLIENT_SECRET (redacted)",
+        )?;
+    } else {
+        logger.kv("Client secret", "loaded from config.toml (redacted)")?;
+    }
 
     let source_path = Path::new(FIXED_SOURCE_FILE);
     logger.kv("Path checked for source file", "./plu.mdb")?;

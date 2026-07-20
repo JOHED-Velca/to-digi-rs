@@ -30,11 +30,27 @@ config.toml
 plu.mdb
 ```
 
+For testing, you can hard-code the Client ID and password directly in `config.toml`:
+
+```toml
+[digiweb]
+client_id = "digi"
+client_secret = "REPLACE_WITH_TEST_CLIENT_PASSWORD"
+log_credentials_for_testing = true
+```
+
+When `log_credentials_for_testing` is `true`, `logs.txt` prints both the Client ID and Client Secret in plain text so you can confirm the connection identity.
+
 Then run:
 
 ```bash
-export DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator'
 ./to-digi-rs
+```
+
+If `client_secret` is blank in `config.toml`, the app falls back to:
+
+```bash
+export DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator'
 ```
 
 During development:
@@ -53,16 +69,37 @@ The importer checks exactly:
 
 It does not search recursively, accept alternate filenames, rename, delete, move, or write to the MDB. Symbolic links are rejected. The source file is opened read-only.
 
-## DIGIweb Endpoints
+## DIGIweb API Settings
 
-The public DIGIweb Third-Party API endpoint paths were not available in the repository, and they should not be guessed. Set these in `config.toml` from confirmed DIGIweb documentation, the existing `ToDIGIweb` code, the OpenID Connect discovery document, or a known working API request:
+The local API PDF `DIGIweb_ThirdParty_API_20260607.pdf` documents the Third-Party URL shape:
+
+```text
+https://{server_ip or server name}:{port_number}/api/v1/third-party/{function}
+```
+
+For PLU create-or-update, the documented function is:
+
+```text
+plus/write
+```
+
+`config.toml` therefore defaults to:
 
 ```toml
 [digiweb]
-token_url = "https://192.168.0.150/CONFIRMED/TOKEN/PATH"
-plu_upsert_path = "/CONFIRMED/PLU/UPSERT/PATH"
-request_status_path_template = "/CONFIRMED/STATUS/PATH/{request_id}"
+base_url = "https://192.168.0.150"
+plu_upsert_path = "/api/v1/third-party/plus/write"
 ```
+
+Include the port in `base_url` if the installation does not use the default HTTPS port.
+
+The PDF says clients request a token with client ID and secret, but the token URL itself is not visible in the extracted text. Fill this from the DIGIweb SSO/OpenID Connect configuration or a known working request:
+
+```toml
+token_url = "REPLACE_WITH_CONFIRMED_OPENID_TOKEN_ENDPOINT"
+```
+
+POST requests are expected to return `201 Created` with a `Location` header. The importer polls that `Location` for `TODO`, `PROCESSING`, `SUCCESS`, or `FAIL`. `request_status_path_template` is only a fallback for non-standard responses that return an ID without a Location.
 
 If a DIGIweb installation uses a self-signed certificate, this can be enabled explicitly:
 
@@ -90,6 +127,36 @@ PluNut
 
 Column mappings are intentionally limited to documented code constants. Unknown or missing required PLU values are not replaced with fabricated defaults.
 
+## DIGIweb PLU Payload
+
+The importer serializes DIGIweb field names from the PDF, including:
+
+```text
+storeno
+pluno
+pludepartmentno
+plugroupno
+plubarcodedata
+plucommname
+plutexts
+pluingredients
+plupricemode
+pluunitprice
+pluusingdateprint
+pluusingdateterm
+pluadditionaldatas.keylabel
+plunft.data
+```
+
+The PDF notes that JSON `null` values are not supported, so optional values are omitted rather than serialized as `null`.
+
+`plubarcodetype` and `plubarcoderefno` depend on the barcode setup for the DIGIweb installation. Leave them blank to omit them, or fill them when the site requires a specific barcode type/reference:
+
+```toml
+plu_barcode_type = ""
+plu_barcode_ref_no = ""
+```
+
 ## Exit Codes
 
 ```text
@@ -104,4 +171,4 @@ Column mappings are intentionally limited to documented code constants. Unknown 
 
 `logs.txt` is created or overwritten as early as possible. It records startup details, MDB tables and columns, validation findings, authentication result, per-record failures, counts, timestamps, and final status.
 
-Secrets, full access tokens, authorization headers, passwords, and secret-bearing request bodies are not logged.
+By default, secrets, full access tokens, authorization headers, passwords, and secret-bearing request bodies are not logged. During testing, setting `log_credentials_for_testing = true` intentionally logs the configured Client ID and Client Secret.

@@ -24,11 +24,15 @@ pub struct AppConfig {
 pub struct DigiwebConfig {
     pub base_url: String,
     pub client_id: String,
+    pub client_secret: String,
+    pub log_credentials_for_testing: bool,
     pub token_url: String,
     pub store_number: u32,
     pub allow_invalid_certificates: bool,
     pub plu_upsert_path: String,
     pub request_status_path_template: String,
+    pub plu_barcode_type: String,
+    pub plu_barcode_ref_no: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -70,11 +74,15 @@ impl Default for DigiwebConfig {
         Self {
             base_url: DEFAULT_BASE_URL.to_string(),
             client_id: DEFAULT_CLIENT_ID.to_string(),
+            client_secret: String::new(),
+            log_credentials_for_testing: false,
             token_url: String::new(),
             store_number: 1,
             allow_invalid_certificates: false,
-            plu_upsert_path: String::new(),
+            plu_upsert_path: "/api/v1/third-party/plus/write".to_string(),
             request_status_path_template: String::new(),
+            plu_barcode_type: String::new(),
+            plu_barcode_ref_no: String::new(),
         }
     }
 }
@@ -133,6 +141,11 @@ impl AppConfig {
                 "digiweb.store_number must be greater than zero".to_string(),
             ));
         }
+        if self.digiweb.store_number > 999_999 {
+            return Err(AppError::Config(
+                "digiweb.store_number must be in DIGIweb range 1..999999".to_string(),
+            ));
+        }
         if self.timeouts.request_seconds == 0 {
             return Err(AppError::Config(
                 "timeouts.request_seconds must be greater than zero".to_string(),
@@ -155,7 +168,12 @@ impl AppConfig {
     }
 }
 
-pub fn load_client_secret() -> Result<SecretString, AppError> {
+pub fn load_client_secret(config: &AppConfig) -> Result<SecretString, AppError> {
+    let configured = config.digiweb.client_secret.trim();
+    if !configured.is_empty() && !configured.contains("REPLACE_WITH") {
+        return Ok(SecretString::new(configured.to_string()));
+    }
+
     let value = env::var("DIGIWEB_CLIENT_SECRET")
         .map_err(|_| AppError::MissingEnv("DIGIWEB_CLIENT_SECRET"))?;
     if value.is_empty() {
@@ -195,5 +213,18 @@ mod tests {
     fn default_config_keeps_token_endpoint_unconfirmed() {
         let config = AppConfig::default();
         assert!(config.token_url().is_err());
+    }
+
+    #[test]
+    fn client_secret_can_come_from_config() {
+        let mut config = AppConfig::default();
+        config.digiweb.client_secret = "hard-coded-test-password".to_string();
+
+        let secret = load_client_secret(&config).expect("secret");
+
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&secret),
+            "hard-coded-test-password"
+        );
     }
 }

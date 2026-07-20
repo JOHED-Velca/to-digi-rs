@@ -21,6 +21,8 @@ pub enum AppError {
     Csv(#[from] csv::Error),
     #[error("validation failed: {0} blocking error(s)")]
     Validation(usize),
+    #[error("payload validation error: {0}")]
+    ValidationPayload(String),
     #[error("authentication error: {0}")]
     Auth(String),
     #[error("network error: {0}")]
@@ -46,7 +48,7 @@ impl AppError {
             Self::MdbToolsUnavailable(_) => "mdbtools verification",
             Self::MdbSchema(_) => "MDB schema inspection",
             Self::MdbExport(_) | Self::Csv(_) => "MDB export parsing",
-            Self::Validation(_) => "validation",
+            Self::Validation(_) | Self::ValidationPayload(_) => "validation",
             Self::Auth(_) => "DIGIweb authentication",
             Self::Network(_) | Self::Http(_) => "DIGIweb connection",
             Self::DigiwebProcessing(_) | Self::PollingTimeout(_) => "DIGIweb processing",

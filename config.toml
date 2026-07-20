@@ -1,11 +1,15 @@
 [digiweb]
 base_url = "https://192.168.0.150"
 client_id = "digi"
-token_url = "REPLACE_WITH_CONFIRMED_OPENID_TOKEN_ENDPOINT"
+client_secret = "xNvdrVAqurJPg96gTSIUtiS62N0YOoBh"
+log_credentials_for_testing = true
+token_url = "https://192.168.0.150/auth/realms/skypro/protocol/openid-connect/token"
 store_number = 1
-allow_invalid_certificates = false
-plu_upsert_path = "REPLACE_WITH_CONFIRMED_PLU_WRITE_OR_UPSERT_PATH"
-request_status_path_template = "REPLACE_WITH_CONFIRMED_STATUS_PATH_CONTAINING_{request_id}"
+allow_invalid_certificates = true
+plu_upsert_path = "/api/v1/third-party/plus/write"
+request_status_path_template = ""
+plu_barcode_type = ""
+plu_barcode_ref_no = ""
 
 [timeouts]
 request_seconds = 30

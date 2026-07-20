@@ -22,15 +22,6 @@ impl PriceMode {
             _ => Self::Unknown,
         }
     }
-
-    pub fn as_api_code(self) -> &'static str {
-        match self {
-            Self::ByWeight => "BY_WEIGHT",
-            Self::ByEach => "BY_EACH",
-            Self::FixedWeight => "FIXED_WEIGHT",
-            Self::Unknown => "UNKNOWN",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

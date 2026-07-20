@@ -47,7 +47,7 @@ pub async fn run_import(
         let started_at = Local::now();
         let timer = std::time::Instant::now();
         logger.kv("Importing PLU", &plu.plu_number.to_string())?;
-        let payload = DigiwebPluPayload::from(plu);
+        let payload = DigiwebPluPayload::from_plu(plu, &config.digiweb)?;
         match client.upsert_plu(&token, &payload).await {
             Ok((request_id, final_status, message))
                 if final_status == ProcessingStatus::Success =>
