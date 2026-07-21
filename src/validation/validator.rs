@@ -104,11 +104,11 @@ pub fn validate_plus(plus: &[Plu]) -> ValidationReport {
             )),
         }
         match plu.group_number {
-            Some(group) if (1..=99).contains(&group) => {}
+            Some(group) if group > 0 => {}
             Some(_) => issues.push(ValidationIssue::error(
                 Some(plu.plu_number),
                 "group_number",
-                "DIGIweb plugroupno must be in range 1..99",
+                "DIGIweb plugroupno must be a positive integer",
             )),
             None => issues.push(ValidationIssue::error(
                 Some(plu.plu_number),
@@ -189,6 +189,19 @@ pub fn validate_plus(plus: &[Plu]) -> ValidationReport {
     ValidationReport { issues }
 }
 
+pub fn valid_plu_candidates(plus: &[Plu], report: &ValidationReport) -> Vec<Plu> {
+    let invalid_plu_numbers = report
+        .issues
+        .iter()
+        .filter(|issue| issue.severity == Severity::Error)
+        .filter_map(|issue| issue.plu_number)
+        .collect::<HashSet<_>>();
+    plus.iter()
+        .filter(|plu| !invalid_plu_numbers.contains(&plu.plu_number))
+        .cloned()
+        .collect()
+}
+
 fn validate_commodity_name(plu: &Plu) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
     let lines = split_html_lines(&plu.name);
@@ -228,6 +241,9 @@ mod tests {
             store_number: 1,
             department_number: Some(1),
             group_number: Some(1),
+            source_department: Some("0001".to_string()),
+            source_group: Some("1".to_string()),
+            group_default_applied: false,
             name: "Apples".to_string(),
             barcode: None,
             price: Decimal::new(199, 2),
@@ -275,5 +291,92 @@ mod tests {
                 .iter()
                 .any(|issue| issue.field == "group_number" && issue.severity == Severity::Error)
         );
+    }
+
+    #[test]
+    fn group_reference_1_passes_local_validation() {
+        let mut plu = valid_plu(100);
+        plu.group_number = Some(1);
+        assert!(
+            !validate_plus(&[plu])
+                .issues
+                .iter()
+                .any(|issue| issue.field == "group_number")
+        );
+    }
+
+    #[test]
+    fn group_reference_99_passes_local_validation() {
+        let mut plu = valid_plu(100);
+        plu.group_number = Some(99);
+        assert!(
+            !validate_plus(&[plu])
+                .issues
+                .iter()
+                .any(|issue| issue.field == "group_number")
+        );
+    }
+
+    #[test]
+    fn group_reference_100_passes_local_validation() {
+        let mut plu = valid_plu(100);
+        plu.group_number = Some(100);
+        assert!(
+            !validate_plus(&[plu])
+                .issues
+                .iter()
+                .any(|issue| issue.field == "group_number")
+        );
+    }
+
+    #[test]
+    fn group_reference_997_passes_local_validation() {
+        let mut plu = valid_plu(100);
+        plu.group_number = Some(997);
+        assert!(
+            !validate_plus(&[plu])
+                .issues
+                .iter()
+                .any(|issue| issue.field == "group_number")
+        );
+    }
+
+    #[test]
+    fn group_reference_0_fails_local_validation() {
+        let mut plu = valid_plu(100);
+        plu.group_number = Some(0);
+
+        let report = validate_plus(&[plu]);
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.field == "group_number" && issue.severity == Severity::Error)
+        );
+    }
+
+    #[test]
+    fn price_mode_validation_remains_unchanged() {
+        let mut plu = valid_plu(100);
+        plu.price_mode = PriceMode::Unknown;
+
+        let report = validate_plus(&[plu]);
+
+        assert!(report.issues.iter().any(|issue| {
+            issue.field == "price_mode" && issue.message == "unsupported or missing price mode"
+        }));
+    }
+
+    #[test]
+    fn blocking_validation_errors_leave_no_api_candidates_when_all_plus_invalid() {
+        let mut plu = valid_plu(100);
+        plu.price_mode = PriceMode::Unknown;
+        let plus = vec![plu];
+        let report = validate_plus(&plus);
+
+        let candidates = valid_plu_candidates(&plus, &report);
+
+        assert!(candidates.is_empty());
     }
 }

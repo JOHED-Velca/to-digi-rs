@@ -20,7 +20,7 @@ The image does not contain `plu.mdb`, customer data, real `config.toml`, credent
 Build locally:
 
 ```bash
-docker build -t to-digi-rs:latest .
+docker build -t to-digi-rs:0.1.3 .
 ```
 
 Prepare a host work directory containing:
@@ -36,7 +36,7 @@ Run the container with that directory mounted as `/work`:
 docker run --rm \
   -v "$PWD/work:/work" \
   -e DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator' \
-  to-digi-rs:latest
+  to-digi-rs:0.1.3
 ```
 
 The program reads `/work/plu.mdb`, reads `/work/config.toml`, writes `/work/logs.txt`, and exits with the application exit code.
@@ -55,7 +55,7 @@ continue_after_record_failure = false
 Then run:
 
 ```bash
-docker run --rm -v "$PWD/work:/work" to-digi-rs:latest
+docker run --rm -v "$PWD/work:/work" to-digi-rs:0.1.3
 ```
 
 This verifies that the container starts, `mdb-tables`, `mdb-schema`, and `mdb-export` are available, `/work/plu.mdb` is the exact source file, MDB tables can be read, `Pludata` can be exported, `PluIng` can be exported when present, counts are logged, and `/work/logs.txt` can be written. No authentication or API request is attempted.
@@ -65,14 +65,14 @@ This verifies that the container starts, `mdb-tables`, `mdb-schema`, and `mdb-ex
 Build and save the image without using a public registry:
 
 ```bash
-docker build -t to-digi-rs:latest .
-docker save to-digi-rs:latest -o to-digi-rs-image.tar
+docker build -t to-digi-rs:0.1.3 .
+docker save to-digi-rs:0.1.3 -o to-digi-rs-image-0.1.3.tar
 ```
 
-Transfer `to-digi-rs-image.tar` to the remote Ubuntu device, then load it:
+Transfer `to-digi-rs-image-0.1.3.tar` to the remote Ubuntu device, then load it:
 
 ```bash
-docker load -i to-digi-rs-image.tar
+docker load -i to-digi-rs-image-0.1.3.tar
 ```
 
 On the remote device, create a work directory containing the real `plu.mdb` and deployment `config.toml`, then run:
@@ -82,7 +82,7 @@ docker run --rm \
   --network host \
   -v "$PWD/work:/work" \
   -e DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator' \
-  to-digi-rs:latest
+  to-digi-rs:0.1.3
 ```
 
 `--network host` is recommended for the first remote test so the container uses the Ubuntu host network path to `https://192.168.0.150`.
@@ -100,6 +100,16 @@ write_payload_preview = true
 ```
 
 This sends only the first normalized PLU, stops after a record failure, logs the selected PLU number, logs the generated payload preview, and never logs credentials or tokens.
+
+For the current test source, keep:
+
+```toml
+[import]
+dry_run_inspect_only = false
+send_only_first_plu = true
+continue_after_record_failure = false
+write_payload_preview = true
+```
 
 ## Configuration
 
@@ -126,6 +136,43 @@ export DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator'
 ```
 
 `DIGIWEB_CLIENT_SECRET` takes precedence over `digiweb.client_secret`. The config value remains as a development fallback only. The application does not log client secrets, full access tokens, authorization headers, passwords, or secret-bearing request bodies.
+
+## DIGIweb Prerequisites
+
+Before running a PLU import, DIGIweb must already contain:
+
+```text
+referenced store
+referenced department
+each referenced group under the correct department
+```
+
+For the current test source:
+
+```text
+Department reference: 1
+Group reference: 997
+```
+
+must exist and be active in DIGIweb, and group reference `997` must belong to department reference `1`.
+
+The importer treats the group identity as:
+
+```text
+department reference number + group reference number
+```
+
+It does not assume group references are globally unique. It does not create groups, invent group names, or invent internal DIGIweb UUIDs. The DIGIweb API is expected to resolve:
+
+```text
+department reference + group reference -> internal DIGIweb group UUID
+```
+
+The source `Main Group Code` field is treated as the external DIGIweb group reference number. Values such as `997` are accepted by local validation as positive integers; DIGIweb remains responsible for final existence and business validation. The importer does not query PostgreSQL directly.
+
+When `Main Group Code` is empty or whitespace only, the importer assigns group reference `997` and logs `Group default applied: yes`. Explicit values are trimmed and parsed, so `"0001"` becomes group `1`, `"25   "` becomes group `25`, and explicit `"997"` remains group `997` with `Group default applied: no`. Malformed non-empty values such as `ABC`, `-1`, `0`, `1.5`, or `99X` are rejected as row-level issues and are not defaulted.
+
+Department references are also trimmed and parsed numerically before joins and payload generation. For example, source departments `"0001"` and `"1"` both normalize to department reference `1`, so `Pludata` and `PluIng` rows are matched by normalized `Plucode + Department` rather than raw department strings.
 
 ## Source File Safety
 

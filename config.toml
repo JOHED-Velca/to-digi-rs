@@ -17,7 +17,7 @@ poll_interval_seconds = 2
 poll_timeout_seconds = 120
 
 [import]
-continue_after_record_failure = true
+continue_after_record_failure = false
 send_only_first_plu = true
 dry_run_inspect_only = true
 write_payload_preview = true

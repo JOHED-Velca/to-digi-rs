@@ -7,10 +7,10 @@ mod models;
 mod source;
 mod validation;
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use config::{AppConfig, client_secret_log_message, load_client_secret};
+use digiweb::preflight::collect_required_references;
 use error::AppError;
 use import::runner::run_import;
 use logging::AuditLogger;
@@ -18,7 +18,7 @@ use source::mapping::{normalize_dataset, validate_source_schema};
 use source::mdb_tools::MdbTools;
 use source::{FIXED_SOURCE_FILE, VerifiedSourceFile};
 use validation::issue::Severity;
-use validation::validator::validate_plus;
+use validation::validator::{valid_plu_candidates, validate_plus};
 
 #[tokio::main]
 async fn main() {
@@ -127,8 +127,74 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         "Unmatched PluIng rows",
         &normalization_report.orphan_pluing_rows.to_string(),
     )?;
+    logger.kv(
+        "PLUs using explicit group references",
+        &normalization_report.explicit_group_references.to_string(),
+    )?;
+    logger.kv(
+        "PLUs defaulted to group 997",
+        &normalization_report.defaulted_group_references.to_string(),
+    )?;
+    logger.kv(
+        "PLUs with invalid group values",
+        &normalization_report.invalid_group_values.to_string(),
+    )?;
     let plus = normalization_report.plus;
     logger.kv("Normalized PLU records", &plus.len().to_string())?;
+    for plu in &plus {
+        logger.line(format!("PLU: {}", plu.plu_number))?;
+        logger.kv(
+            "Raw department",
+            &format!("{:?}", plu.source_department.as_deref().unwrap_or("")),
+        )?;
+        logger.kv(
+            "Normalized department reference",
+            &plu.department_number
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "missing".to_string()),
+        )?;
+        logger.kv(
+            "Raw Main Group Code",
+            &format!("{:?}", plu.source_group.as_deref().unwrap_or("")),
+        )?;
+        logger.kv(
+            "Normalized group reference",
+            &plu.group_number
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "missing".to_string()),
+        )?;
+        logger.kv(
+            "Group default applied",
+            if plu.group_default_applied {
+                "yes"
+            } else {
+                "no"
+            },
+        )?;
+        if let Some(group) = plu.group_number {
+            logger.line(format!(
+                "PLU {} group reference: {} - local validation passed",
+                plu.plu_number, group
+            ))?;
+            logger.line(format!("Source Main Group Code: {}", group))?;
+            logger.line(format!("DIGIweb group reference number: {}", group))?;
+            logger.line("Internal DIGIweb group UUID: resolved by DIGIweb")?;
+            logger.kv("Group validation", "accepted as positive integer")?;
+        }
+    }
+    let required_references = collect_required_references(&plus);
+    for reference in &required_references {
+        logger.line(format!(
+            "Required DIGIweb reference: department {} + group {} from PLUs {:?} => {}",
+            reference.department_number,
+            reference.group_number,
+            reference.source_plu_numbers,
+            reference.status.as_str()
+        ))?;
+    }
+    if !required_references.is_empty() {
+        logger.line("DIGIweb group preflight lookup is not configured in this version; PLU submission will rely on the supported PLU API response for final group resolution.")?;
+    }
 
     let validation_report = validate_plus(&plus);
     logger.kv(
@@ -152,12 +218,6 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
             issue.message
         ))?;
     }
-    let invalid_plu_numbers = validation_report
-        .issues
-        .iter()
-        .filter(|issue| issue.severity == Severity::Error)
-        .filter_map(|issue| issue.plu_number)
-        .collect::<HashSet<_>>();
     if validation_report
         .issues
         .iter()
@@ -173,12 +233,13 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         )?;
         return Ok(2);
     }
-    let mut valid_plus = Vec::new();
-    for plu in plus {
-        if invalid_plu_numbers.contains(&plu.plu_number) {
+    let valid_plus = valid_plu_candidates(&plus, &validation_report);
+    for plu in &plus {
+        if !valid_plus
+            .iter()
+            .any(|candidate| candidate.plu_number == plu.plu_number)
+        {
             logger.line(format!("PLU {} skipped: validation errors", plu.plu_number))?;
-        } else {
-            valid_plus.push(plu);
         }
     }
     logger.kv("Valid PLUs available", &valid_plus.len().to_string())?;

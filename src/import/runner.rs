@@ -40,6 +40,14 @@ pub async fn run_import(
             "Matching PluIng rows for selected PLU",
             &first.source_pluing_row_count.to_string(),
         )?;
+        logger.kv(
+            "Selected PLU group default applied",
+            if first.group_default_applied {
+                "yes"
+            } else {
+                "no"
+            },
+        )?;
     }
 
     logger.line("Authenticating with DIGIweb.")?;
@@ -142,6 +150,9 @@ mod tests {
             store_number: 1,
             department_number: Some(1),
             group_number: Some(1),
+            source_department: Some("0001".to_string()),
+            source_group: Some("1".to_string()),
+            group_default_applied: false,
             name: format!("PLU {plu_number}"),
             barcode: None,
             price: Decimal::new(100, 2),

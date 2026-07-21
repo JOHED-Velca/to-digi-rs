@@ -20,7 +20,6 @@ const DEPARTMENT_COLUMNS: &[&str] = &[
     "department_number",
 ];
 const GROUP_COLUMNS: &[&str] = &[
-    "Category",
     "Main Group Code",
     "GroupNo",
     "GrpNo",
@@ -99,6 +98,7 @@ const PLUING_NUTRITION_COLUMNS: &[(&str, &str, Option<&str>)] = &[
     ("Vitamin C", "Vitamin C", None),
     ("Trans fat", "Trans Fat", Some("g")),
 ];
+const DEFAULT_GROUP_REFERENCE: u32 = 997;
 
 /// Source mapping assumptions:
 ///
@@ -107,6 +107,7 @@ const PLUING_NUTRITION_COLUMNS: &[(&str, &str, Option<&str>)] = &[
 /// - Column mappings are intentionally limited to observed/common DCA-style names listed in the constants above.
 /// - If required PLU number, name, or price columns are absent/empty, the row is not given a fabricated default.
 /// - `Pludata` names are assembled from non-empty `Name 1` through `Name 4` values with DIGIweb `<br>` line breaks.
+/// - `Pludata`.`Main Group Code` is the preferred external DIGIweb group reference. Empty values default to group reference 997.
 /// - `PluIng` ingredients are assembled from non-empty `Ing Name 1` through `Ing Name 99` values in numeric order.
 /// - `PluIng` nutrition values are text in the inspected MDB and may contain zero padding. They are parsed as written with no unit conversion or decimal scaling.
 /// - Unknown DIGIweb-specific field limits are enforced in validation with conservative defaults only where documented in code.
@@ -115,6 +116,9 @@ pub struct NormalizationReport {
     pub plus: Vec<Plu>,
     pub row_issues: Vec<ValidationIssue>,
     pub orphan_pluing_rows: usize,
+    pub explicit_group_references: usize,
+    pub defaulted_group_references: usize,
+    pub invalid_group_values: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -132,6 +136,7 @@ pub fn validate_source_schema(schema: &MdbSchema, mapping: &MappingConfig) -> Re
     })?;
     require_source_column(columns, "Plucode", &mapping.main_plu_table)?;
     require_source_column(columns, "Department", &mapping.main_plu_table)?;
+    require_source_column(columns, "Main Group Code", &mapping.main_plu_table)?;
     require_source_column(columns, "Name 1", &mapping.main_plu_table)?;
     require_source_column(columns, "Price", &mapping.main_plu_table)?;
     Ok(())
@@ -174,10 +179,19 @@ pub fn normalize_dataset(
         .iter()
         .filter(|row| row_join_key(row).is_none_or(|key| !active_keys.contains(&key)))
         .count();
+    let explicit_group_references = plus.iter().filter(|plu| !plu.group_default_applied).count();
+    let defaulted_group_references = plus.iter().filter(|plu| plu.group_default_applied).count();
+    let invalid_group_values = row_issues
+        .iter()
+        .filter(|issue| issue.field == "group_number")
+        .count();
     Ok(NormalizationReport {
         plus,
         row_issues,
         orphan_pluing_rows,
+        explicit_group_references,
+        defaulted_group_references,
+        invalid_group_values,
     })
 }
 
@@ -197,16 +211,18 @@ fn normalize_plu(
             format!("invalid PLU number: {err}"),
         )
     })?;
-    let department_number = parse_optional_u32(row, DEPARTMENT_COLUMNS, "department number")
-        .map_err(|err| {
-            row_issue(
-                row,
-                Some(plu_number),
-                "department_number",
-                format!("invalid department: {err}"),
-            )
-        })?;
-    let key = department_number.map(|department_number| JoinKey {
+    let department_number =
+        parse_required_positive_u32(row, DEPARTMENT_COLUMNS, "department number").map_err(
+            |err| {
+                row_issue(
+                    row,
+                    Some(plu_number),
+                    "department_number",
+                    format!("invalid department: {err}"),
+                )
+            },
+        )?;
+    let key = Some(JoinKey {
         plu_number,
         department_number,
     });
@@ -221,18 +237,22 @@ fn normalize_plu(
     let price_mode = PriceMode::from_source(find_value(row, PRICE_MODE_COLUMNS));
     let name = required_name(row)
         .ok_or_else(|| row_issue(row, Some(plu_number), "name", "missing product name"))?;
+    let normalized_group = normalize_main_group(row).map_err(|err| {
+        row_issue(
+            row,
+            Some(plu_number),
+            "group_number",
+            format!("invalid group: {err}"),
+        )
+    })?;
     Ok(Plu {
         plu_number,
         store_number,
-        department_number,
-        group_number: parse_optional_u32(row, GROUP_COLUMNS, "group number").map_err(|err| {
-            row_issue(
-                row,
-                Some(plu_number),
-                "group_number",
-                format!("invalid group: {err}"),
-            )
-        })?,
+        department_number: Some(department_number),
+        group_number: Some(normalized_group.value),
+        source_department: optional_raw_text(row, DEPARTMENT_COLUMNS),
+        source_group: optional_raw_text(row, GROUP_COLUMNS),
+        group_default_applied: normalized_group.default_applied,
         name,
         barcode: optional_text(row, BARCODE_COLUMNS),
         price,
@@ -264,9 +284,8 @@ fn require_source_column(columns: &[String], column: &str, table: &str) -> Resul
 
 fn row_join_key(row: &SourceRow) -> Option<JoinKey> {
     let plu_number = parse_required_u64(row, PLU_NUMBER_COLUMNS, "PLU number").ok()?;
-    let department_number = parse_optional_u32(row, DEPARTMENT_COLUMNS, "department number")
-        .ok()
-        .flatten()?;
+    let department_number =
+        parse_required_positive_u32(row, DEPARTMENT_COLUMNS, "department number").ok()?;
     Some(JoinKey {
         plu_number,
         department_number,
@@ -296,6 +315,35 @@ fn row_issue(
         field,
         format!("{}; Department={department}", message.into()),
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NormalizedGroup {
+    value: u32,
+    default_applied: bool,
+}
+
+fn normalize_main_group(row: &SourceRow) -> Result<NormalizedGroup, AppError> {
+    let Some(raw) = optional_raw_text(row, GROUP_COLUMNS) else {
+        return Ok(NormalizedGroup {
+            value: DEFAULT_GROUP_REFERENCE,
+            default_applied: true,
+        });
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(NormalizedGroup {
+            value: DEFAULT_GROUP_REFERENCE,
+            default_applied: true,
+        });
+    }
+    let value = parse_positive_u32(trimmed, "Main Group Code").map_err(|_| {
+        AppError::MdbExport(format!("invalid non-numeric Main Group Code {:?}", trimmed))
+    })?;
+    Ok(NormalizedGroup {
+        value,
+        default_applied: false,
+    })
 }
 
 fn normalize_ingredients(rows: &[SourceRow]) -> Result<HashMap<JoinKey, String>, AppError> {
@@ -409,6 +457,13 @@ fn optional_text(row: &SourceRow, candidates: &[&str]) -> Option<String> {
     find_value(row, candidates).map(ToOwned::to_owned)
 }
 
+fn optional_raw_text(row: &SourceRow, candidates: &[&str]) -> Option<String> {
+    candidates
+        .iter()
+        .find_map(|candidate| row.get(candidate))
+        .map(ToOwned::to_owned)
+}
+
 fn parse_required_u64(row: &SourceRow, candidates: &[&str], field: &str) -> Result<u64, AppError> {
     let value = required_text(row, candidates, field)?;
     value.parse::<u64>().map_err(|err| {
@@ -433,6 +488,29 @@ fn parse_optional_u32(
         }),
         None => Ok(None),
     }
+}
+
+fn parse_required_positive_u32(
+    row: &SourceRow,
+    candidates: &[&str],
+    field: &str,
+) -> Result<u32, AppError> {
+    let value = required_text(row, candidates, field)?;
+    parse_positive_u32(&value, field)
+}
+
+fn parse_positive_u32(value: &str, field: &str) -> Result<u32, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::MdbExport(format!("{field} is empty")));
+    }
+    let parsed = trimmed.parse::<u32>().map_err(|err| {
+        AppError::MdbExport(format!("{field} value '{trimmed}' is invalid: {err}"))
+    })?;
+    if parsed == 0 {
+        return Err(AppError::MdbExport(format!("{field} must be positive")));
+    }
+    Ok(parsed)
 }
 
 fn parse_required_decimal(
@@ -460,12 +538,22 @@ mod tests {
     use super::*;
 
     fn pludata_row(plucode: &str, department: &str, name_1: &str) -> SourceRow {
+        pludata_row_with_group(plucode, department, "1", name_1)
+    }
+
+    fn pludata_row_with_group(
+        plucode: &str,
+        department: &str,
+        group: &str,
+        name_1: &str,
+    ) -> SourceRow {
         SourceRow {
             table: "Pludata".to_string(),
             values: BTreeMap::from([
                 ("Plucode".to_string(), plucode.to_string()),
                 ("Department".to_string(), department.to_string()),
-                ("Category".to_string(), "1".to_string()),
+                ("Main Group Code".to_string(), group.to_string()),
+                ("Category".to_string(), "0".to_string()),
                 ("Name 1".to_string(), name_1.to_string()),
                 ("Price".to_string(), "1.99".to_string()),
                 ("PriceMode".to_string(), "each".to_string()),
@@ -494,6 +582,26 @@ mod tests {
             vec![
                 "Plucode".to_string(),
                 "Department".to_string(),
+                "Main Group Code".to_string(),
+                "Price".to_string(),
+            ],
+        );
+
+        let result = validate_source_schema(&schema, &MappingConfig::default());
+
+        assert!(matches!(result, Err(AppError::MdbSchema(_))));
+    }
+
+    #[test]
+    fn missing_main_group_code_column_is_schema_failure() {
+        let mut schema = MdbSchema::default();
+        schema.tables = vec!["Pludata".to_string()];
+        schema.set_columns(
+            "Pludata",
+            vec![
+                "Plucode".to_string(),
+                "Department".to_string(),
+                "Name 1".to_string(),
                 "Price".to_string(),
             ],
         );
@@ -582,6 +690,245 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_padded_main_group_code_997_normalizes_to_997() {
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row_with_group("1", "0001", "997   ", "Apples")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(report.plus[0].group_number, Some(997));
+        assert_eq!(report.plus[0].source_group.as_deref(), Some("997   "));
+    }
+
+    #[test]
+    fn padded_department_0001_normalizes_to_1() {
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row_with_group("1", "0001", "997", "Apples")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(report.plus[0].department_number, Some(1));
+        assert_eq!(report.plus[0].source_department.as_deref(), Some("0001"));
+    }
+
+    #[test]
+    fn department_values_normalize_leading_zeroes_and_whitespace() {
+        for (raw, expected) in [
+            ("0001", 1),
+            ("0010", 10),
+            ("1", 1),
+            ("10", 10),
+            (" 0001 ", 1),
+        ] {
+            let dataset = SourceDataset {
+                plu_rows: vec![pludata_row_with_group("1", raw, "997", "Apples")],
+                ingredient_rows: Vec::new(),
+                nutrition_rows: Vec::new(),
+            };
+
+            let report =
+                normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+            assert_eq!(report.plus[0].department_number, Some(expected), "{raw}");
+        }
+    }
+
+    #[test]
+    fn invalid_department_values_create_row_issues() {
+        for raw in ["", "   ", "ABC", "0", "-1"] {
+            let dataset = SourceDataset {
+                plu_rows: vec![pludata_row_with_group("1", raw, "997", "Apples")],
+                ingredient_rows: Vec::new(),
+                nutrition_rows: Vec::new(),
+            };
+
+            let report =
+                normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+            assert!(report.plus.is_empty(), "{raw}");
+            assert!(
+                report
+                    .row_issues
+                    .iter()
+                    .any(|issue| issue.field == "department_number"),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn main_group_values_normalize_and_empty_values_default_to_997() {
+        for (raw, expected, default_applied) in [
+            ("", 997, true),
+            ("   ", 997, true),
+            ("997", 997, false),
+            ("997   ", 997, false),
+            ("0001", 1, false),
+            ("1", 1, false),
+            ("25", 25, false),
+            ("995", 995, false),
+            ("100", 100, false),
+        ] {
+            let dataset = SourceDataset {
+                plu_rows: vec![pludata_row_with_group("1", "0001", raw, "Apples")],
+                ingredient_rows: Vec::new(),
+                nutrition_rows: Vec::new(),
+            };
+
+            let report =
+                normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+            assert_eq!(report.plus[0].group_number, Some(expected), "{raw}");
+            assert_eq!(
+                report.plus[0].group_default_applied, default_applied,
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_group_values_are_not_counted_as_defaults() {
+        let dataset = SourceDataset {
+            plu_rows: vec![
+                pludata_row_with_group("1", "0001", "", "Defaulted"),
+                pludata_row_with_group("2", "0001", "997", "Explicit 997"),
+                pludata_row_with_group("3", "0001", "1", "Explicit 1"),
+            ],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(report.defaulted_group_references, 1);
+        assert_eq!(report.explicit_group_references, 2);
+        assert_eq!(report.invalid_group_values, 0);
+        assert_eq!(report.plus[0].group_number, Some(997));
+        assert!(report.plus[0].group_default_applied);
+        assert_eq!(report.plus[1].group_number, Some(997));
+        assert!(!report.plus[1].group_default_applied);
+        assert_eq!(report.plus[2].group_number, Some(1));
+    }
+
+    #[test]
+    fn invalid_non_empty_group_values_do_not_default_to_997() {
+        for raw in ["ABC", "-1", "0", "1.5", "99X"] {
+            let dataset = SourceDataset {
+                plu_rows: vec![pludata_row_with_group("1", "0001", raw, "Apples")],
+                ingredient_rows: Vec::new(),
+                nutrition_rows: Vec::new(),
+            };
+
+            let report =
+                normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+            assert!(report.plus.is_empty(), "{raw}");
+            assert_eq!(report.invalid_group_values, 1, "{raw}");
+            assert!(
+                report
+                    .row_issues
+                    .iter()
+                    .any(|issue| issue.field == "group_number"),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_numeric_group_source_value_creates_row_issue() {
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row_with_group("1", "0001", "ABC", "Apples")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert!(report.plus.is_empty());
+        assert!(
+            report
+                .row_issues
+                .iter()
+                .any(|issue| issue.field == "group_number")
+        );
+    }
+
+    #[test]
+    fn negative_group_source_value_creates_row_issue() {
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row_with_group("1", "0001", "-1", "Apples")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert!(report.plus.is_empty());
+        assert!(
+            report
+                .row_issues
+                .iter()
+                .any(|issue| issue.field == "group_number")
+        );
+    }
+
+    #[test]
+    fn normalized_department_values_are_used_for_pluing_join() {
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("1", "0001", "Apples")],
+            ingredient_rows: vec![pluing_row("1", "1", "Matched")],
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(report.plus[0].ingredients.as_deref(), Some("Matched"));
+        assert_eq!(report.plus[0].source_pluing_row_count, 1);
+        assert_eq!(report.orphan_pluing_rows, 0);
+    }
+
+    #[test]
+    fn different_normalized_department_values_do_not_join() {
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("1", "0001", "Apples")],
+            ingredient_rows: vec![pluing_row("1", "2", "Wrong department")],
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(report.plus[0].ingredients, None);
+        assert_eq!(report.plus[0].source_pluing_row_count, 0);
+        assert_eq!(report.orphan_pluing_rows, 1);
+    }
+
+    #[test]
+    fn group_summary_counts_invalid_non_empty_values_without_defaulting() {
+        let dataset = SourceDataset {
+            plu_rows: vec![
+                pludata_row_with_group("1", "0001", "", "Defaulted"),
+                pludata_row_with_group("2", "0001", "25", "Explicit"),
+                pludata_row_with_group("3", "0001", "99X", "Invalid"),
+            ],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(report.defaulted_group_references, 1);
+        assert_eq!(report.explicit_group_references, 1);
+        assert_eq!(report.invalid_group_values, 1);
+        assert_eq!(report.plus.len(), 2);
+    }
+
+    #[test]
     fn normalizes_source_row() {
         let row = SourceRow {
             table: "Pludata".to_string(),
@@ -614,7 +961,7 @@ mod tests {
             values: BTreeMap::from([
                 ("Plucode".to_string(), "1001".to_string()),
                 ("Department".to_string(), "2".to_string()),
-                ("Category".to_string(), "3".to_string()),
+                ("Main Group Code".to_string(), "3".to_string()),
                 ("Name 1".to_string(), "Apple".to_string()),
                 ("Name 2".to_string(), "Slices".to_string()),
                 ("Price".to_string(), "1.99".to_string()),
