@@ -90,7 +90,8 @@ pub struct DigiwebClient {
 impl DigiwebClient {
     pub fn new(config: AppConfig) -> Result<Self, AppError> {
         let mut builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(config.timeouts.request_seconds));
+            .timeout(Duration::from_secs(config.timeouts.request_seconds))
+            .redirect(reqwest::redirect::Policy::none());
         if config.digiweb.allow_invalid_certificates {
             builder = builder.danger_accept_invalid_certs(true);
         }
@@ -119,8 +120,15 @@ impl DigiwebClient {
             .send()
             .await
             .map_err(|err| AppError::Network(err.to_string()))?;
-        let captured =
-            capture_response("PLU submission response", "POST", &url, response, logger).await?;
+        let captured = capture_response(
+            "PLU submission response",
+            "POST",
+            &url,
+            true,
+            response,
+            logger,
+        )
+        .await?;
 
         if !captured.status.is_success() {
             return Err(http_error("PLU submission", &captured));
@@ -138,7 +146,7 @@ impl DigiwebClient {
                 message,
             } => {
                 if self.has_configured_status_path() {
-                    return match self.poll_request_status(&request_id, logger).await {
+                    return match self.poll_request_status(token, &request_id, logger).await {
                         Ok(final_status) => {
                             Ok((Some(request_id), final_status.status, final_status.message))
                         }
@@ -151,7 +159,7 @@ impl DigiwebClient {
                     };
                 }
                 if let Some(path) = status_path.or_else(|| captured.location.clone()) {
-                    return match self.poll_location(&path, logger).await {
+                    return match self.poll_location(token, &path, logger).await {
                         Ok(final_status) => {
                             Ok((Some(request_id), final_status.status, final_status.message))
                         }
@@ -186,6 +194,7 @@ impl DigiwebClient {
     #[allow(dead_code)]
     pub async fn poll_request_status(
         &self,
+        token: &AccessToken,
         request_id: &str,
         logger: &mut AuditLogger,
     ) -> Result<DigiwebStatusResponse, AppError> {
@@ -198,20 +207,22 @@ impl DigiwebClient {
         }
         let path = template.replace("{request_id}", request_id);
         let url = self.join_base_path(&path)?;
-        self.poll_url(&url, request_id, logger).await
+        self.poll_url(token, &url, request_id, logger).await
     }
 
     pub async fn poll_location(
         &self,
+        token: &AccessToken,
         location: &str,
         logger: &mut AuditLogger,
     ) -> Result<DigiwebStatusResponse, AppError> {
         let url = self.resolve_location(location)?;
-        self.poll_url(&url, location, logger).await
+        self.poll_url(token, &url, location, logger).await
     }
 
     async fn poll_url(
         &self,
+        token: &AccessToken,
         url: &str,
         status_reference: &str,
         logger: &mut AuditLogger,
@@ -222,6 +233,7 @@ impl DigiwebClient {
             let response = self
                 .http
                 .get(url)
+                .header("Authorization", token.bearer_value())
                 .send()
                 .await
                 .map_err(|err| AppError::Network(err.to_string()))?;
@@ -229,6 +241,7 @@ impl DigiwebClient {
                 "Asynchronous request-status response",
                 "GET",
                 url,
+                true,
                 response,
                 logger,
             )
@@ -305,6 +318,7 @@ async fn capture_response(
     label: &str,
     method: &str,
     url: &str,
+    bearer_auth_attached: bool,
     response: reqwest::Response,
     logger: &mut AuditLogger,
 ) -> Result<CapturedHttpResponse, AppError> {
@@ -330,7 +344,7 @@ async fn capture_response(
         body,
         body_empty,
     };
-    log_captured_response(label, method, url, &captured, logger)?;
+    log_captured_response(label, method, url, bearer_auth_attached, &captured, logger)?;
     Ok(captured)
 }
 
@@ -338,12 +352,17 @@ fn log_captured_response(
     label: &str,
     method: &str,
     url: &str,
+    bearer_auth_attached: bool,
     response: &CapturedHttpResponse,
     logger: &mut AuditLogger,
 ) -> Result<(), AppError> {
     logger.line(format!("{label}:"))?;
     logger.kv("HTTP method", method)?;
     logger.kv("Request URL/path", &sanitized_url_path(url))?;
+    logger.kv(
+        "Bearer authentication attached",
+        if bearer_auth_attached { "yes" } else { "no" },
+    )?;
     logger.kv("HTTP status", &format_status(response.status))?;
     logger.kv(
         "Content-Type",
@@ -946,6 +965,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_and_status_get_receive_same_bearer_token() {
+        let server = TestServer::start(vec![
+            raw_response(
+                201,
+                "Created",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"auth-check","status":"TODO"}"#,
+            ),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"auth-check","status":"SUCCESS"}"#,
+            ),
+        ])
+        .await;
+        let client =
+            DigiwebClient::new(test_config(&server.base_url, "/status/{request_id}", 1, 5))
+                .expect("client");
+        let mut logger = test_logger();
+
+        let (_request_id, status, _message) = client
+            .upsert_plu(
+                &AccessToken::for_tests("same-access-token"),
+                &test_payload(),
+                &mut logger,
+            )
+            .await
+            .expect("upsert");
+
+        let requests = server.request_texts().await;
+        assert_eq!(status, ProcessingStatus::Success);
+        assert_eq!(requests.len(), 2);
+        assert!(request_has_authorization(
+            &requests[0],
+            "Bearer same-access-token"
+        ));
+        assert!(request_has_authorization(
+            &requests[1],
+            "Bearer same-access-token"
+        ));
+    }
+
+    #[tokio::test]
     async fn html_from_incorrect_status_route_is_unknown_not_plu_failure() {
         let html = format!(
             "<!doctype html><html><body><app-root></app-root>{}</body></html>",
@@ -979,6 +1042,66 @@ mod tests {
         let message = message.unwrap_or_default();
         assert!(message.contains("routing/status-endpoint error"));
         assert!(message.contains("may have been accepted"));
+    }
+
+    #[tokio::test]
+    async fn unauthorized_status_polling_is_unknown_not_confirmed_plu_failure() {
+        let server = TestServer::start(vec![
+            raw_response(
+                201,
+                "Created",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"abc","status":"TODO"}"#,
+            ),
+            raw_response(401, "Unauthorized", &[], ""),
+        ])
+        .await;
+        let client =
+            DigiwebClient::new(test_config(&server.base_url, "/status/{request_id}", 1, 5))
+                .expect("client");
+        let mut logger = test_logger();
+
+        let (request_id, status, message) = client
+            .upsert_plu(&test_token(), &test_payload(), &mut logger)
+            .await
+            .expect("upsert");
+
+        assert_eq!(request_id.as_deref(), Some("abc"));
+        assert_eq!(status, ProcessingStatus::SubmittedStatusUnknown);
+        assert_ne!(status, ProcessingStatus::Fail);
+        let message = message.unwrap_or_default();
+        assert!(message.contains("HTTP 401 Unauthorized"));
+        assert!(message.contains("may have been accepted"));
+    }
+
+    #[tokio::test]
+    async fn tokens_are_absent_from_response_logs() {
+        let server = TestServer::start(vec![raw_response(
+            200,
+            "OK",
+            &[("Content-Type", "application/json")],
+            r#"{"status":"SUCCESS"}"#,
+        )])
+        .await;
+        let client = DigiwebClient::new(test_config(&server.base_url, "", 1, 5)).expect("client");
+        let (_dir, path, mut logger) = test_logger_with_path();
+
+        let (_request_id, status, _message) = client
+            .upsert_plu(
+                &AccessToken::for_tests("very-secret-access-token"),
+                &test_payload(),
+                &mut logger,
+            )
+            .await
+            .expect("upsert");
+        logger.flush().expect("flush");
+        let contents = std::fs::read_to_string(path).expect("read log");
+
+        assert_eq!(status, ProcessingStatus::Success);
+        assert!(contents.contains("Bearer authentication attached: yes"));
+        assert!(!contents.contains("very-secret-access-token"));
+        assert!(!contents.contains("Authorization"));
+        assert!(!contents.contains("Bearer very-secret"));
     }
 
     #[tokio::test]
@@ -1177,7 +1300,7 @@ mod tests {
         let mut logger = test_logger();
 
         let response = client
-            .poll_request_status("abc", &mut logger)
+            .poll_request_status(&test_token(), "abc", &mut logger)
             .await
             .expect("poll");
 
@@ -1200,7 +1323,7 @@ mod tests {
         let mut logger = test_logger();
 
         let response = client
-            .poll_request_status("abc", &mut logger)
+            .poll_request_status(&test_token(), "abc", &mut logger)
             .await
             .expect("poll");
 
@@ -1223,7 +1346,7 @@ mod tests {
         let mut logger = test_logger();
 
         let response = client
-            .poll_request_status("abc", &mut logger)
+            .poll_request_status(&test_token(), "abc", &mut logger)
             .await
             .expect("poll");
 
@@ -1308,6 +1431,13 @@ mod tests {
         AuditLogger::create(&path).expect("logger")
     }
 
+    fn test_logger_with_path() -> (tempfile::TempDir, std::path::PathBuf, AuditLogger) {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("logs.txt");
+        let logger = AuditLogger::create(&path).expect("logger");
+        (dir, path, logger)
+    }
+
     #[test]
     fn html_response_body_logging_is_bounded() {
         let body = format!(
@@ -1347,6 +1477,7 @@ mod tests {
         base_url: String,
         handled_requests: std::sync::Arc<tokio::sync::Mutex<usize>>,
         request_lines: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+        request_texts: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
     }
 
     impl TestServer {
@@ -1358,8 +1489,10 @@ mod tests {
             let addr = listener.local_addr().expect("addr");
             let handled_requests = std::sync::Arc::new(tokio::sync::Mutex::new(0));
             let request_lines = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            let request_texts = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
             let handled_requests_task = handled_requests.clone();
             let request_lines_task = request_lines.clone();
+            let request_texts_task = request_texts.clone();
             tokio::spawn(async move {
                 for response in responses {
                     let Ok((mut stream, _peer)) = listener.accept().await else {
@@ -1371,6 +1504,10 @@ mod tests {
                     let request_text = String::from_utf8_lossy(&buffer[..bytes_read]);
                     let request_line = request_text.lines().next().unwrap_or_default().to_string();
                     request_lines_task.lock().await.push(request_line);
+                    request_texts_task
+                        .lock()
+                        .await
+                        .push(request_text.to_string());
                     let _ = stream.write_all(response.as_bytes()).await;
                 }
             });
@@ -1378,6 +1515,7 @@ mod tests {
                 base_url: format!("http://{addr}"),
                 handled_requests,
                 request_lines,
+                request_texts,
             }
         }
 
@@ -1388,5 +1526,18 @@ mod tests {
         async fn request_lines(&self) -> Vec<String> {
             self.request_lines.lock().await.clone()
         }
+
+        async fn request_texts(&self) -> Vec<String> {
+            self.request_texts.lock().await.clone()
+        }
+    }
+
+    fn request_has_authorization(request: &str, expected_value: &str) -> bool {
+        request.lines().any(|line| {
+            let Some((name, value)) = line.split_once(':') else {
+                return false;
+            };
+            name.eq_ignore_ascii_case("authorization") && value.trim() == expected_value
+        })
     }
 }

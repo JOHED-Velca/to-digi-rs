@@ -20,7 +20,7 @@ The image does not contain `plu.mdb`, customer data, real `config.toml`, credent
 Build locally:
 
 ```bash
-docker build -t to-digi-rs:0.1.7 .
+docker build -t to-digi-rs:0.1.8 .
 ```
 
 Prepare a host work directory containing:
@@ -36,7 +36,7 @@ Run the container with that directory mounted as `/work`:
 docker run --rm \
   -v "$PWD/work:/work" \
   -e DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator' \
-  to-digi-rs:0.1.7
+  to-digi-rs:0.1.8
 ```
 
 The program reads `/work/plu.mdb`, reads `/work/config.toml`, writes `/work/logs.txt`, and exits with the application exit code.
@@ -55,7 +55,7 @@ continue_after_record_failure = false
 Then run:
 
 ```bash
-docker run --rm -v "$PWD/work:/work" to-digi-rs:0.1.7
+docker run --rm -v "$PWD/work:/work" to-digi-rs:0.1.8
 ```
 
 This verifies that the container starts, `mdb-tables`, `mdb-schema`, and `mdb-export` are available, `/work/plu.mdb` is the exact source file, MDB tables can be read, `Pludata` can be exported, `PluIng` can be exported when present, counts are logged, and `/work/logs.txt` can be written. No authentication or API request is attempted.
@@ -65,14 +65,14 @@ This verifies that the container starts, `mdb-tables`, `mdb-schema`, and `mdb-ex
 Build and save the image without using a public registry:
 
 ```bash
-docker build -t to-digi-rs:0.1.7 .
-docker save to-digi-rs:0.1.7 -o to-digi-rs-image-0.1.7.tar
+docker build -t to-digi-rs:0.1.8 .
+docker save to-digi-rs:0.1.8 -o to-digi-rs-image-0.1.8.tar
 ```
 
-Transfer `to-digi-rs-image-0.1.7.tar` to the remote Ubuntu device, then load it:
+Transfer `to-digi-rs-image-0.1.8.tar` to the remote Ubuntu device, then load it:
 
 ```bash
-docker load -i to-digi-rs-image-0.1.7.tar
+docker load -i to-digi-rs-image-0.1.8.tar
 ```
 
 On the remote device, create a work directory containing the real `plu.mdb` and deployment `config.toml`, then run:
@@ -82,7 +82,7 @@ docker run --rm \
   --network host \
   -v "$PWD/work:/work" \
   -e DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator' \
-  to-digi-rs:0.1.7
+  to-digi-rs:0.1.8
 ```
 
 `--network host` is recommended for the first remote test so the container uses the Ubuntu host network path to `https://192.168.0.150`.
