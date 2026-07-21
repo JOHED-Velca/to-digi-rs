@@ -145,7 +145,7 @@ fn optional_nft(facts: &[NutritionFact]) -> Option<DigiwebPluNftPayload> {
             .enumerate()
             .map(|(index, fact)| DigiwebPluNftDataPayload {
                 row: (index + 1) as u32,
-                data1: fact.amount.map(|amount| amount.to_string()),
+                data1: fact.amount.clone(),
                 data2: fact.unit.clone(),
                 name: fact.name.clone(),
             })
@@ -185,7 +185,7 @@ mod tests {
             ingredients: Some("Apples".to_string()),
             nutrition_facts: vec![NutritionFact {
                 name: "Sugar".to_string(),
-                amount: Some(Decimal::new(10, 1)),
+                amount: Some("1.0".to_string()),
                 unit: Some("g".to_string()),
             }],
         };

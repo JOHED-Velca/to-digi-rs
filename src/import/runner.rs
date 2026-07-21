@@ -29,11 +29,7 @@ pub async fn run_import(
         discovered: plus.len(),
         ..ImportSummary::default()
     };
-    let records_to_send = if config.import.send_only_first_plu {
-        plus.iter().take(1).collect::<Vec<_>>()
-    } else {
-        plus.iter().collect::<Vec<_>>()
-    };
+    let records_to_send = select_records_to_send(plus, config.import.send_only_first_plu);
 
     if config.import.send_only_first_plu && plus.len() > 1 {
         summary.skipped += plus.len() - 1;
@@ -42,12 +38,27 @@ pub async fn run_import(
             plus.len() - 1
         ))?;
     }
+    if let Some(first) = records_to_send.first() {
+        logger.kv(
+            "Selected first PLU for API send",
+            &first.plu_number.to_string(),
+        )?;
+    }
 
     for plu in records_to_send {
         let started_at = Local::now();
         let timer = std::time::Instant::now();
         logger.kv("Importing PLU", &plu.plu_number.to_string())?;
         let payload = DigiwebPluPayload::from_plu(plu, &config.digiweb)?;
+        if config.import.write_payload_preview {
+            let preview = serde_json::to_string_pretty(&payload)
+                .map_err(|err| AppError::Internal(format!("payload preview failed: {err}")))?;
+            logger.line(format!(
+                "Sanitized payload preview for PLU {}:",
+                plu.plu_number
+            ))?;
+            logger.line(preview)?;
+        }
         match client.upsert_plu(&token, &payload).await {
             Ok((request_id, final_status, message))
                 if final_status == ProcessingStatus::Success =>
@@ -107,4 +118,48 @@ pub async fn run_import(
         }
     }
     Ok(summary)
+}
+
+pub fn select_records_to_send(plus: &[Plu], send_only_first_plu: bool) -> Vec<&Plu> {
+    if send_only_first_plu {
+        plus.iter().take(1).collect()
+    } else {
+        plus.iter().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal::Decimal;
+
+    use super::*;
+    use crate::models::plu::PriceMode;
+
+    fn plu(plu_number: u64) -> Plu {
+        Plu {
+            plu_number,
+            store_number: 1,
+            department_number: Some(1),
+            group_number: Some(1),
+            name: format!("PLU {plu_number}"),
+            barcode: None,
+            price: Decimal::new(100, 2),
+            price_mode: PriceMode::ByEach,
+            short_description: None,
+            key_label: None,
+            expiration_days: None,
+            ingredients: None,
+            nutrition_facts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn send_only_first_plu_limits_selection_to_one_record() {
+        let records = vec![plu(1), plu(2), plu(3)];
+
+        let selected = select_records_to_send(&records, true);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].plu_number, 1);
+    }
 }

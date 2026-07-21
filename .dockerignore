@@ -1,0 +1,14 @@
+target/
+logs.txt
+*.mdb
+*.accdb
+plu.mdb
+pludb_original.mdb
+config.toml
+*.log
+.git/
+.gitignore
+README.md
+.vscode/
+.idea/
+**/*.rs.bk

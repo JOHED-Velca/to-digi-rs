@@ -48,6 +48,8 @@ pub struct TimeoutConfig {
 pub struct ImportConfig {
     pub continue_after_record_failure: bool,
     pub send_only_first_plu: bool,
+    pub dry_run_inspect_only: bool,
+    pub write_payload_preview: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -102,6 +104,8 @@ impl Default for ImportConfig {
         Self {
             continue_after_record_failure: true,
             send_only_first_plu: false,
+            dry_run_inspect_only: false,
+            write_payload_preview: true,
         }
     }
 }
@@ -111,7 +115,7 @@ impl Default for MappingConfig {
         Self {
             main_plu_table: "Pludata".to_string(),
             ingredient_table: "PluIng".to_string(),
-            nutrition_table: "PluNut".to_string(),
+            nutrition_table: String::new(),
         }
     }
 }
@@ -169,17 +173,32 @@ impl AppConfig {
 }
 
 pub fn load_client_secret(config: &AppConfig) -> Result<SecretString, AppError> {
+    resolve_client_secret(config, env::var("DIGIWEB_CLIENT_SECRET").ok())
+}
+
+fn resolve_client_secret(
+    config: &AppConfig,
+    env_secret: Option<String>,
+) -> Result<SecretString, AppError> {
+    if let Some(value) = env_secret.filter(|value| !value.is_empty()) {
+        return Ok(SecretString::new(value));
+    }
     let configured = config.digiweb.client_secret.trim();
     if !configured.is_empty() && !configured.contains("REPLACE_WITH") {
         return Ok(SecretString::new(configured.to_string()));
     }
 
-    let value = env::var("DIGIWEB_CLIENT_SECRET")
-        .map_err(|_| AppError::MissingEnv("DIGIWEB_CLIENT_SECRET"))?;
-    if value.is_empty() {
-        return Err(AppError::MissingEnv("DIGIWEB_CLIENT_SECRET"));
+    Err(AppError::MissingEnv("DIGIWEB_CLIENT_SECRET"))
+}
+
+pub fn client_secret_log_message(config: &AppConfig, env_secret_present: bool) -> &'static str {
+    if env_secret_present {
+        "loaded from DIGIWEB_CLIENT_SECRET (redacted)"
+    } else if config.digiweb.client_secret.trim().is_empty() {
+        "not configured"
+    } else {
+        "loaded from config.toml (redacted)"
     }
-    Ok(SecretString::new(value))
 }
 
 fn required_configured_url<'a>(name: &str, value: &'a str) -> Result<&'a str, AppError> {
@@ -216,15 +235,48 @@ mod tests {
     }
 
     #[test]
-    fn client_secret_can_come_from_config() {
+    fn client_secret_can_come_from_config_when_env_is_absent() {
         let mut config = AppConfig::default();
         config.digiweb.client_secret = "hard-coded-test-password".to_string();
 
-        let secret = load_client_secret(&config).expect("secret");
+        let secret = resolve_client_secret(&config, None).expect("secret");
 
         assert_eq!(
             secrecy::ExposeSecret::expose_secret(&secret),
             "hard-coded-test-password"
+        );
+    }
+
+    #[test]
+    fn default_mapping_does_not_require_plunut() {
+        let config = AppConfig::default();
+        assert_eq!(config.mapping.main_plu_table, "Pludata");
+        assert_eq!(config.mapping.ingredient_table, "PluIng");
+        assert!(config.mapping.nutrition_table.is_empty());
+    }
+
+    #[test]
+    fn secret_log_message_does_not_include_secret_value() {
+        let mut config = AppConfig::default();
+        config.digiweb.client_secret = "super-secret-password".to_string();
+
+        let message = client_secret_log_message(&config, false);
+
+        assert!(!message.contains("super-secret-password"));
+        assert_eq!(message, "loaded from config.toml (redacted)");
+    }
+
+    #[test]
+    fn env_secret_takes_precedence_over_config_secret() {
+        let mut config = AppConfig::default();
+        config.digiweb.client_secret = "config-password".to_string();
+
+        let secret =
+            resolve_client_secret(&config, Some("env-password".to_string())).expect("secret");
+
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&secret),
+            "env-password"
         );
     }
 }

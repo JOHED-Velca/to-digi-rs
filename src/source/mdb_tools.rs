@@ -13,8 +13,12 @@ const REQUIRED_COMMANDS: &[&str] = &["mdb-tables", "mdb-schema", "mdb-export"];
 pub struct MdbTools;
 
 impl MdbTools {
+    pub fn required_commands() -> &'static [&'static str] {
+        REQUIRED_COMMANDS
+    }
+
     pub fn verify_required_commands() -> Result<(), AppError> {
-        for command in REQUIRED_COMMANDS {
+        for command in Self::required_commands() {
             match Command::new(command).arg("--help").output() {
                 Ok(_) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -124,13 +128,19 @@ impl MdbTools {
             Vec::new()
         };
 
-        let nutrition_rows = if schema.has_table(&mapping.nutrition_table) {
-            let (columns, rows) = Self::export_table(path, &mapping.nutrition_table)?;
-            schema.set_columns(&mapping.nutrition_table, columns.clone());
-            logger.kv(
-                &format!("Columns in {}", mapping.nutrition_table),
-                &columns.join(", "),
+        let nutrition_table_to_export = nutrition_table_to_export(mapping, &schema);
+        let nutrition_rows = if mapping.nutrition_table.trim().is_empty() {
+            logger.line("Nutrition table setting is empty; nutrition will be extracted from PluIng when available.")?;
+            ingredient_rows.clone()
+        } else if mapping.nutrition_table == mapping.ingredient_table {
+            logger.line(
+                "Nutrition table matches ingredient table; reusing ingredient rows for nutrition.",
             )?;
+            ingredient_rows.clone()
+        } else if let Some(table) = nutrition_table_to_export {
+            let (columns, rows) = Self::export_table(path, table)?;
+            schema.set_columns(table, columns.clone());
+            logger.kv(&format!("Columns in {}", table), &columns.join(", "))?;
             rows
         } else {
             logger.warning(format!(
@@ -148,6 +158,53 @@ impl MdbTools {
                 nutrition_rows,
             },
         ))
+    }
+}
+
+pub fn nutrition_table_to_export<'a>(
+    mapping: &'a MappingConfig,
+    schema: &MdbSchema,
+) -> Option<&'a str> {
+    let table = mapping.nutrition_table.trim();
+    if table.is_empty() || table == mapping.ingredient_table {
+        None
+    } else if schema.has_table(table) {
+        Some(table)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn required_mdbtools_commands_are_declared_for_container_runtime() {
+        assert_eq!(
+            MdbTools::required_commands(),
+            &["mdb-tables", "mdb-schema", "mdb-export"]
+        );
+    }
+
+    #[test]
+    fn empty_nutrition_table_does_not_request_plunut_export() {
+        let mapping = MappingConfig::default();
+        let schema = MdbSchema {
+            tables: vec!["Pludata".to_string(), "PluIng".to_string()],
+            columns: BTreeMap::new(),
+        };
+
+        assert_eq!(nutrition_table_to_export(&mapping, &schema), None);
+    }
+
+    #[test]
+    fn mdbtools_commands_are_available_when_container_test_is_enabled() {
+        if std::env::var("TO_DIGI_RS_REQUIRE_MDBTOOLS").is_err() {
+            return;
+        }
+
+        MdbTools::verify_required_commands().expect("mdbtools commands should be available");
     }
 }
 

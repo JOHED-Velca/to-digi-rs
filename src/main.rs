@@ -9,7 +9,7 @@ mod validation;
 
 use std::path::Path;
 
-use config::{AppConfig, load_client_secret};
+use config::{AppConfig, client_secret_log_message, load_client_secret};
 use error::AppError;
 use import::runner::run_import;
 use logging::AuditLogger;
@@ -50,20 +50,26 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         logger.warning("TLS certificate validation is disabled.")?;
     }
 
-    let client_secret = load_client_secret(&config)?;
     if config.digiweb.log_credentials_for_testing {
-        use secrecy::ExposeSecret;
-
-        logger.warning("Testing credential logging is enabled. Client credentials will be written to logs.txt in plain text.")?;
+        logger.warning("Testing credential logging is enabled. Only the Client ID is written; client secrets are never logged.")?;
         logger.kv("DIGIweb Client ID", &config.digiweb.client_id)?;
-        logger.kv("DIGIweb Client Secret", client_secret.expose_secret())?;
-    } else if config.digiweb.client_secret.trim().is_empty() {
+    }
+
+    let client_secret = if config.import.dry_run_inspect_only {
+        None
+    } else {
+        Some(load_client_secret(&config)?)
+    };
+    if client_secret.is_some() {
         logger.kv(
             "Client secret",
-            "loaded from DIGIWEB_CLIENT_SECRET (redacted)",
+            client_secret_log_message(&config, std::env::var("DIGIWEB_CLIENT_SECRET").is_ok()),
         )?;
     } else {
-        logger.kv("Client secret", "loaded from config.toml (redacted)")?;
+        logger.kv(
+            "Client secret",
+            "not loaded because dry_run_inspect_only is enabled",
+        )?;
     }
 
     let source_path = Path::new(FIXED_SOURCE_FILE);
@@ -93,6 +99,18 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         "Number of nutrition records discovered",
         &dataset.nutrition_rows.len().to_string(),
     )?;
+
+    if config.import.dry_run_inspect_only {
+        logger.line("Dry-run inspection mode is enabled; MDB inspection completed and no normalization, validation, authentication, or API requests will be attempted.")?;
+        logger.final_success(
+            dataset.plu_rows.len(),
+            0,
+            0,
+            dataset.plu_rows.len(),
+            "SUCCESS",
+        )?;
+        return Ok(0);
+    }
 
     let plus = normalize_dataset(&dataset, &config.mapping, config.digiweb.store_number)?;
     logger.kv("Normalized PLU records", &plus.len().to_string())?;
@@ -138,6 +156,7 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         logger.line("Validation warnings are present; continuing because no blocking validation errors were found.")?;
     }
 
+    let client_secret = client_secret.ok_or(AppError::MissingEnv("DIGIWEB_CLIENT_SECRET"))?;
     let summary = run_import(config, client_secret, &plus, logger).await?;
     for record in &summary.records {
         if record.final_status != digiweb::status::ProcessingStatus::Success {

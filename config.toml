@@ -1,8 +1,8 @@
 [digiweb]
 base_url = "https://192.168.0.150"
 client_id = "digi"
-client_secret = "xNvdrVAqurJPg96gTSIUtiS62N0YOoBh"
-log_credentials_for_testing = true
+client_secret = ""
+log_credentials_for_testing = false
 token_url = "https://192.168.0.150/auth/realms/skypro/protocol/openid-connect/token"
 store_number = 1
 allow_invalid_certificates = true
@@ -18,9 +18,11 @@ poll_timeout_seconds = 120
 
 [import]
 continue_after_record_failure = true
-send_only_first_plu = false
+send_only_first_plu = true
+dry_run_inspect_only = true
+write_payload_preview = true
 
 [mapping]
 main_plu_table = "Pludata"
 ingredient_table = "PluIng"
-nutrition_table = "PluNut"
+nutrition_table = ""
