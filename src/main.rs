@@ -109,6 +109,7 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
             0,
             0,
             dataset.plu_rows.len(),
+            0,
             "SUCCESS",
         )?;
         return Ok(0);
@@ -258,7 +259,18 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
     let client_secret = client_secret.ok_or(AppError::MissingEnv("DIGIWEB_CLIENT_SECRET"))?;
     let summary = run_import(config, client_secret, &valid_plus, logger).await?;
     for record in &summary.records {
-        if record.final_status != digiweb::status::ProcessingStatus::Success {
+        if record.final_status == digiweb::status::ProcessingStatus::SubmittedStatusUnknown {
+            logger.line(format!(
+                "UNKNOWN RECORD: PLU {} started={} request_id={} http_result={} status={} duration_ms={} message={}",
+                record.plu_number,
+                record.started_at.to_rfc3339(),
+                record.api_request_id.as_deref().unwrap_or("n/a"),
+                record.http_result,
+                record.final_status.as_str(),
+                record.duration_ms,
+                record.failure_message.as_deref().unwrap_or("n/a")
+            ))?;
+        } else if record.final_status != digiweb::status::ProcessingStatus::Success {
             logger.line(format!(
                 "FAILED RECORD: PLU {} started={} request_id={} http_result={} status={} duration_ms={} message={}",
                 record.plu_number,
@@ -277,6 +289,7 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         summary.succeeded,
         summary.failed,
         summary.skipped,
+        summary.unknown,
         final_status.as_str(),
     )?;
     Ok(final_status.exit_code())

@@ -13,6 +13,13 @@ impl AccessToken {
     pub fn bearer_value(&self) -> String {
         format!("Bearer {}", self.token.expose_secret())
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests(value: &str) -> Self {
+        Self {
+            token: SecretString::new(value.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

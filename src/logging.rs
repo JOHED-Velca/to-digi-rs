@@ -49,6 +49,7 @@ impl AuditLogger {
         succeeded: usize,
         failed: usize,
         skipped: usize,
+        unknown: usize,
         status: &str,
     ) -> Result<(), AppError> {
         let finished = Local::now();
@@ -58,6 +59,7 @@ impl AuditLogger {
         self.kv("PLUs successfully imported", &succeeded.to_string())?;
         self.kv("PLUs failed", &failed.to_string())?;
         self.kv("PLUs skipped", &skipped.to_string())?;
+        self.kv("PLUs submitted with unknown status", &unknown.to_string())?;
         self.kv("Started", &self.started_at.to_rfc3339())?;
         self.kv("Finished", &finished.to_rfc3339())?;
         self.line("==================================================")?;
@@ -120,7 +122,9 @@ mod tests {
         let path = dir.path().join("logs.txt");
         let mut logger = AuditLogger::create(&path).expect("logger");
 
-        logger.final_success(1, 1, 0, 0, "SUCCESS").expect("final");
+        logger
+            .final_success(1, 1, 0, 0, 0, "SUCCESS")
+            .expect("final");
 
         let contents = fs::read_to_string(path).expect("read");
         assert!(contents.contains("FINAL STATUS: SUCCESS"));

@@ -5,6 +5,7 @@ pub enum ProcessingStatus {
     Success,
     Fail,
     Processing,
+    SubmittedStatusUnknown,
     UnknownOrTimeout,
 }
 
@@ -14,6 +15,7 @@ impl ProcessingStatus {
             Self::Success => "SUCCESS",
             Self::Fail => "FAIL",
             Self::Processing => "PROCESSING",
+            Self::SubmittedStatusUnknown => "SUBMITTED_STATUS_UNKNOWN",
             Self::UnknownOrTimeout => "UNKNOWN_OR_TIMEOUT",
         }
     }
@@ -38,6 +40,7 @@ impl<'de> Deserialize<'de> for ProcessingStatus {
             "SUCCESS" | "SUCCEEDED" | "OK" => Self::Success,
             "FAIL" | "FAILED" | "ERROR" => Self::Fail,
             "PROCESSING" | "PENDING" | "RUNNING" => Self::Processing,
+            "SUBMITTED_STATUS_UNKNOWN" => Self::SubmittedStatusUnknown,
             "UNKNOWN_OR_TIMEOUT" => Self::UnknownOrTimeout,
             _ => Self::Fail,
         })

@@ -45,12 +45,13 @@ pub struct ImportSummary {
     pub succeeded: usize,
     pub failed: usize,
     pub skipped: usize,
+    pub unknown: usize,
     pub records: Vec<RecordImportResult>,
 }
 
 impl ImportSummary {
     pub fn final_status(&self) -> FinalStatus {
-        if self.failed == 0 && self.skipped == 0 {
+        if self.failed == 0 && self.skipped == 0 && self.unknown == 0 {
             FinalStatus::Success
         } else {
             FinalStatus::CompletedWithErrors
@@ -69,6 +70,7 @@ mod tests {
             succeeded: 1,
             failed: 0,
             skipped: 0,
+            unknown: 0,
             records: Vec::new(),
         };
 
@@ -83,6 +85,22 @@ mod tests {
             succeeded: 1,
             failed: 1,
             skipped: 0,
+            unknown: 0,
+            records: Vec::new(),
+        };
+
+        assert_eq!(summary.final_status(), FinalStatus::CompletedWithErrors);
+        assert_eq!(summary.final_status().exit_code(), 1);
+    }
+
+    #[test]
+    fn final_status_unknown_exit_one() {
+        let summary = ImportSummary {
+            discovered: 1,
+            succeeded: 0,
+            failed: 0,
+            skipped: 0,
+            unknown: 1,
             records: Vec::new(),
         };
 

@@ -68,7 +68,7 @@ pub async fn run_import(
             ))?;
             logger.line(preview)?;
         }
-        match client.upsert_plu(&token, &payload).await {
+        match client.upsert_plu(&token, &payload, logger).await {
             Ok((request_id, final_status, message))
                 if final_status == ProcessingStatus::Success =>
             {
@@ -83,6 +83,33 @@ pub async fn run_import(
                     failure_message: message,
                     duration_ms: timer.elapsed().as_millis(),
                 });
+            }
+            Ok((request_id, final_status, message))
+                if final_status == ProcessingStatus::SubmittedStatusUnknown =>
+            {
+                summary.unknown += 1;
+                let unknown_message = message.unwrap_or_else(|| {
+                    "DIGIweb accepted the submission but the final status is unknown".to_string()
+                });
+                logger.warning(format!(
+                    "PLU {} submitted with unknown final status: {}",
+                    plu.plu_number, unknown_message
+                ))?;
+                summary.records.push(RecordImportResult {
+                    plu_number: plu.plu_number,
+                    started_at,
+                    api_request_id: request_id,
+                    http_result: "2xx".to_string(),
+                    final_status,
+                    failure_message: Some(unknown_message),
+                    duration_ms: timer.elapsed().as_millis(),
+                });
+                if !config.import.continue_after_record_failure {
+                    summary.skipped += plus
+                        .len()
+                        .saturating_sub(summary.succeeded + summary.failed + summary.unknown);
+                    break;
+                }
             }
             Ok((request_id, final_status, message)) => {
                 summary.failed += 1;
@@ -101,7 +128,7 @@ pub async fn run_import(
                 if !config.import.continue_after_record_failure {
                     summary.skipped += plus
                         .len()
-                        .saturating_sub(summary.succeeded + summary.failed);
+                        .saturating_sub(summary.succeeded + summary.failed + summary.unknown);
                     break;
                 }
             }
@@ -120,7 +147,7 @@ pub async fn run_import(
                 if !config.import.continue_after_record_failure {
                     summary.skipped += plus
                         .len()
-                        .saturating_sub(summary.succeeded + summary.failed);
+                        .saturating_sub(summary.succeeded + summary.failed + summary.unknown);
                     break;
                 }
             }
