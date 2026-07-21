@@ -570,7 +570,7 @@ fn parse_processing_status(value: &str) -> Option<ProcessingStatus> {
     Some(match value.trim().to_ascii_uppercase().as_str() {
         "SUCCESS" | "SUCCEEDED" | "OK" => ProcessingStatus::Success,
         "FAIL" | "FAILED" | "ERROR" => ProcessingStatus::Fail,
-        "PROCESSING" | "PENDING" | "RUNNING" | "ACCEPTED" => ProcessingStatus::Processing,
+        "PROCESSING" | "PENDING" | "RUNNING" | "ACCEPTED" | "TODO" => ProcessingStatus::Processing,
         "SUBMITTED_STATUS_UNKNOWN" => ProcessingStatus::SubmittedStatusUnknown,
         "UNKNOWN_OR_TIMEOUT" => ProcessingStatus::UnknownOrTimeout,
         _ => return None,
@@ -807,6 +807,42 @@ mod tests {
 
         assert_eq!(request_id.as_deref(), Some("hdr-123"));
         assert_eq!(status, ProcessingStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn old_vb_successful_response_shape_todo_is_polled() {
+        let server = TestServer::start(vec![
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"019f85f5","status":"TODO","path":"write","method":"WRITE","type":"Plu"}"#,
+            ),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"019f85f5","status":"SUCCESS","message":null}"#,
+            ),
+        ])
+        .await;
+        let client = DigiwebClient::new(test_config(
+            &server.base_url,
+            "/api/thirdpartylinker/api/v1/requests/{request_id}",
+            1,
+            5,
+        ))
+        .expect("client");
+        let mut logger = test_logger();
+
+        let (request_id, status, _message) = client
+            .upsert_plu(&test_token(), &test_payload(), &mut logger)
+            .await
+            .expect("upsert");
+
+        assert_eq!(request_id.as_deref(), Some("019f85f5"));
+        assert_eq!(status, ProcessingStatus::Success);
+        assert_eq!(server.handled_requests().await, 2);
     }
 
     #[tokio::test]
@@ -1063,6 +1099,14 @@ mod tests {
                 price_calc_method: None,
                 quantity: None,
                 quantity_symbol: None,
+                tare: None,
+                discount_type: None,
+                packing_date_print: None,
+                packing_time_print: None,
+                selling_date_print: None,
+                selling_date_term: None,
+                label_format: None,
+                traceability: None,
                 short_description: None,
                 key_label: None,
                 expiration_days: None,

@@ -32,12 +32,33 @@ pub struct DigiwebPluPayload {
     pub pluquantity: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pluquantitysymbol: Option<u32>,
+    #[serde(
+        with = "optional_decimal_float",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub plutare: Option<Decimal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pludiscounttype: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plupackingdateprint: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plupackingtimeprint: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plusellingdateprint: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plusellingdateterm: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pluusingdateprint: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pluusingdateterm: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub plulabelformat: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plutraceability: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pluadditionaldatas: Option<DigiwebPluAdditionalDataPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pluimages: Option<DigiwebPluImagesPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plunft: Option<DigiwebPluNftPayload>,
 }
@@ -54,19 +75,58 @@ pub struct DigiwebPluAdditionalDataPayload {
     pub keylabel: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct DigiwebPluImagesPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pluimage1: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pluimage2: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pluimage3: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pluimage4: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pluimage5: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pluimage6: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pluimage7: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pluimage8: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pluimage9: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pluimage10: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DigiwebPluNftPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text1: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text2: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text3: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text4: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text5: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub data: Vec<DigiwebPluNftDataPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DigiwebPluNftDataPayload {
-    pub row: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data1: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data2: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data3: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data4: Option<String>,
     pub name: String,
 }
 
@@ -106,9 +166,18 @@ impl DigiwebPluPayload {
             pluunitprice: plu.price,
             pluquantity: plu.quantity,
             pluquantitysymbol: plu.quantity_symbol,
+            plutare: plu.tare,
+            pludiscounttype: plu.discount_type,
+            plupackingdateprint: plu.packing_date_print,
+            plupackingtimeprint: plu.packing_time_print,
+            plusellingdateprint: plu.selling_date_print,
+            plusellingdateterm: plu.selling_date_term,
             pluusingdateprint: plu.expiration_days.map(|_| 1),
             pluusingdateterm: plu.expiration_days,
+            plulabelformat: plu.label_format,
+            plutraceability: plu.traceability,
             pluadditionaldatas,
+            pluimages: Some(DigiwebPluImagesPayload::default()),
             plunft,
         })
     }
@@ -137,11 +206,9 @@ fn optional_texts(plu: &Plu) -> Vec<DigiwebPluTextPayload> {
 }
 
 fn optional_additional_data(plu: &Plu) -> Option<DigiwebPluAdditionalDataPayload> {
-    plu.key_label
-        .as_ref()
-        .map(|key_label| DigiwebPluAdditionalDataPayload {
-            keylabel: Some(key_label.clone()),
-        })
+    Some(DigiwebPluAdditionalDataPayload {
+        keylabel: Some(plu.key_label.clone().unwrap_or_else(|| ".".to_string())),
+    })
 }
 
 fn optional_nft(facts: &[NutritionFact]) -> Option<DigiwebPluNftPayload> {
@@ -149,17 +216,49 @@ fn optional_nft(facts: &[NutritionFact]) -> Option<DigiwebPluNftPayload> {
         return None;
     }
     Some(DigiwebPluNftPayload {
+        image: Some(String::new()),
+        text1: Some(String::new()),
+        text2: Some(String::new()),
+        text3: Some(String::new()),
+        text4: Some(String::new()),
+        text5: Some(String::new()),
         data: facts
             .iter()
-            .enumerate()
-            .map(|(index, fact)| DigiwebPluNftDataPayload {
-                row: (index + 1) as u32,
+            .map(|fact| DigiwebPluNftDataPayload {
                 data1: fact.amount.clone(),
                 data2: fact.unit.clone(),
+                data3: None,
+                data4: None,
                 name: fact.name.clone(),
             })
             .collect(),
     })
+}
+
+mod optional_decimal_float {
+    use rust_decimal::Decimal;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Option<Decimal>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(value) => rust_decimal::serde::float::serialize(value, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Decimal>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<f64>::deserialize(deserializer)?
+            .map(|value| {
+                Decimal::try_from(value).map_err(|err| serde::de::Error::custom(err.to_string()))
+            })
+            .transpose()
+    }
 }
 
 fn optional_config_text(value: &str) -> Option<String> {
@@ -194,6 +293,14 @@ mod tests {
             price_calc_method: Some(0),
             quantity: Some(2),
             quantity_symbol: Some(1),
+            tare: Some(Decimal::ZERO),
+            discount_type: Some(0),
+            packing_date_print: Some(1),
+            packing_time_print: Some(1),
+            selling_date_print: Some(1),
+            selling_date_term: Some(5),
+            label_format: Some(4),
+            traceability: Some(0),
             short_description: Some("Fresh".to_string()),
             key_label: Some("APPLE".to_string()),
             expiration_days: Some(5),
@@ -222,8 +329,76 @@ mod tests {
         assert!(json.contains("\"pluunitprice\":1.99"));
         assert!(json.contains("\"pluquantity\":2"));
         assert!(json.contains("\"pluquantitysymbol\":1"));
+        assert!(json.contains("\"plutare\":0.0"));
+        assert!(json.contains("\"pludiscounttype\":0"));
+        assert!(json.contains("\"plupackingdateprint\":1"));
+        assert!(json.contains("\"plupackingtimeprint\":1"));
+        assert!(json.contains("\"plusellingdateprint\":1"));
+        assert!(json.contains("\"plusellingdateterm\":5"));
+        assert!(json.contains("\"plulabelformat\":4"));
+        assert!(json.contains("\"plutraceability\":0"));
         assert!(json.contains("\"pluingredients\":\"Apples\""));
         assert!(json.contains("\"plubarcoderefno\":\"29\""));
+        assert!(json.contains("\"pluadditionaldatas\":{\"keylabel\":\"APPLE\"}"));
+        assert!(json.contains("\"pluimages\":{}"));
+        assert!(json.contains("\"plunft\":{\"image\":\"\",\"text1\":\"\""));
+        assert!(!json.contains("\"row\""));
         assert!(!json.contains("null"));
+    }
+
+    #[test]
+    fn payload_top_level_shape_matches_vb_plu_object_without_wrapper() {
+        let plu = Plu {
+            plu_number: 1,
+            store_number: 1,
+            department_number: Some(1),
+            group_number: Some(997),
+            source_department: Some("0001".to_string()),
+            source_group: Some("997".to_string()),
+            group_default_applied: false,
+            name: "BALERON".to_string(),
+            barcode: Some("0200001".to_string()),
+            price: Decimal::new(1690, 2),
+            price_mode: PriceMode::ByWeight,
+            price_calc_method: Some(0),
+            quantity: Some(0),
+            quantity_symbol: Some(0),
+            tare: Some(Decimal::ZERO),
+            discount_type: Some(0),
+            packing_date_print: Some(0),
+            packing_time_print: Some(0),
+            selling_date_print: Some(0),
+            selling_date_term: Some(0),
+            label_format: None,
+            traceability: Some(0),
+            short_description: None,
+            key_label: None,
+            expiration_days: Some(0),
+            ingredients: Some("<b>Ingredient</b> pork".to_string()),
+            nutrition_facts: vec![NutritionFact {
+                name: "sodium".to_string(),
+                amount: Some("690".to_string()),
+                unit: Some("29".to_string()),
+            }],
+            source_pluing_row_count: 1,
+        };
+        let config = DigiwebConfig {
+            plu_barcode_type: "1".to_string(),
+            plu_barcode_ref_no: "1".to_string(),
+            ..DigiwebConfig::default()
+        };
+
+        let value =
+            serde_json::to_value(DigiwebPluPayload::from_plu(&plu, &config).expect("payload"))
+                .expect("json value");
+
+        assert!(value.get("data").is_none());
+        assert!(value.as_array().is_none());
+        assert_eq!(value["plucommname"], "BALERON");
+        assert_eq!(value["plunft"]["data"][0]["name"], "sodium");
+        assert_eq!(value["plunft"]["data"][0]["data1"], "690");
+        assert_eq!(value["plunft"]["data"][0]["data2"], "29");
+        assert!(value["plunft"]["data"][0].get("row").is_none());
+        assert_eq!(value["pluadditionaldatas"]["keylabel"], ".");
     }
 }

@@ -26,6 +26,7 @@ pub async fn run_import(
         ..ImportSummary::default()
     };
     let records_to_send = select_records_to_send(plus, config.import.send_only_first_plu);
+    let selected_count = records_to_send.len();
 
     if config.import.send_only_first_plu && plus.len() > 1 {
         summary.skipped += plus.len() - 1;
@@ -105,9 +106,12 @@ pub async fn run_import(
                     duration_ms: timer.elapsed().as_millis(),
                 });
                 if !config.import.continue_after_record_failure {
-                    summary.skipped += plus
-                        .len()
-                        .saturating_sub(summary.succeeded + summary.failed + summary.unknown);
+                    summary.skipped += skipped_after_stop(
+                        selected_count,
+                        summary.succeeded,
+                        summary.failed,
+                        summary.unknown,
+                    );
                     break;
                 }
             }
@@ -126,9 +130,12 @@ pub async fn run_import(
                     duration_ms: timer.elapsed().as_millis(),
                 });
                 if !config.import.continue_after_record_failure {
-                    summary.skipped += plus
-                        .len()
-                        .saturating_sub(summary.succeeded + summary.failed + summary.unknown);
+                    summary.skipped += skipped_after_stop(
+                        selected_count,
+                        summary.succeeded,
+                        summary.failed,
+                        summary.unknown,
+                    );
                     break;
                 }
             }
@@ -145,9 +152,12 @@ pub async fn run_import(
                     duration_ms: timer.elapsed().as_millis(),
                 });
                 if !config.import.continue_after_record_failure {
-                    summary.skipped += plus
-                        .len()
-                        .saturating_sub(summary.succeeded + summary.failed + summary.unknown);
+                    summary.skipped += skipped_after_stop(
+                        selected_count,
+                        summary.succeeded,
+                        summary.failed,
+                        summary.unknown,
+                    );
                     break;
                 }
             }
@@ -162,6 +172,15 @@ pub fn select_records_to_send(plus: &[Plu], send_only_first_plu: bool) -> Vec<&P
     } else {
         plus.iter().collect()
     }
+}
+
+pub fn skipped_after_stop(
+    selected_count: usize,
+    succeeded: usize,
+    failed: usize,
+    unknown: usize,
+) -> usize {
+    selected_count.saturating_sub(succeeded + failed + unknown)
 }
 
 #[cfg(test)]
@@ -187,6 +206,14 @@ mod tests {
             price_calc_method: None,
             quantity: None,
             quantity_symbol: None,
+            tare: None,
+            discount_type: None,
+            packing_date_print: None,
+            packing_time_print: None,
+            selling_date_print: None,
+            selling_date_term: None,
+            label_format: None,
+            traceability: None,
             short_description: None,
             key_label: None,
             expiration_days: None,
@@ -214,5 +241,16 @@ mod tests {
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].plu_number, 1);
+    }
+
+    #[test]
+    fn stop_after_first_selected_failure_does_not_double_count_unselected_plus() {
+        let all_valid = vec![plu(1), plu(2), plu(3), plu(4)];
+        let selected = select_records_to_send(&all_valid, true);
+        let skipped_by_first_plu_mode = all_valid.len() - selected.len();
+        let skipped_after_failure = skipped_after_stop(selected.len(), 0, 1, 0);
+
+        assert_eq!(skipped_by_first_plu_mode, 3);
+        assert_eq!(skipped_after_failure, 0);
     }
 }

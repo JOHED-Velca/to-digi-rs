@@ -9,6 +9,8 @@ use crate::error::AppError;
 
 const DEFAULT_BASE_URL: &str = "https://192.168.0.150";
 const DEFAULT_CLIENT_ID: &str = "digi";
+const DEFAULT_REQUEST_STATUS_PATH_TEMPLATE: &str =
+    "/api/thirdpartylinker/api/v1/requests/{request_id}";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -82,7 +84,7 @@ impl Default for DigiwebConfig {
             store_number: 1,
             allow_invalid_certificates: false,
             plu_upsert_path: "/api/v1/third-party/plus/write".to_string(),
-            request_status_path_template: String::new(),
+            request_status_path_template: DEFAULT_REQUEST_STATUS_PATH_TEMPLATE.to_string(),
             plu_barcode_type: String::new(),
             plu_barcode_ref_no: String::new(),
         }

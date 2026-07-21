@@ -7,7 +7,7 @@ token_url = "https://192.168.0.150/auth/realms/skypro/protocol/openid-connect/to
 store_number = 1
 allow_invalid_certificates = true
 plu_upsert_path = "/api/v1/third-party/plus/write"
-request_status_path_template = ""
+request_status_path_template = "/api/thirdpartylinker/api/v1/requests/{request_id}"
 plu_barcode_type = ""
 plu_barcode_ref_no = ""
 

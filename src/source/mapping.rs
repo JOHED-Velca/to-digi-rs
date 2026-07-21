@@ -39,6 +39,17 @@ const QUANTITY_SYMBOL_COLUMNS: &[&str] = &[
     "QUANTITY_SYMBOL",
     "quantity_symbol",
 ];
+const TARE_COLUMNS: &[&str] = &["TARE", "Tare", "tare"];
+const DISCOUNT_COLUMNS: &[&str] = &["DISCOUNT", "Discount", "discount"];
+const PACK_DATE_FLAG_COLUMNS: &[&str] = &["PACK DATE FLAG", "PACK_DATE_FLAG", "PackDateFlag"];
+const BEST_BEFORE_COLUMNS: &[&str] = &["BEST BEFORE", "BEST_BEFORE", "Best Before"];
+const BEST_BEFORE_FLAG_COLUMNS: &[&str] =
+    &["BEST BEFORE FLAG", "BEST_BEFORE_FLAG", "Best Before Flag"];
+const PRINT_FORMAT_COLUMNS: &[&str] = &[
+    "PRINT FORMAT CODE",
+    "PRINT_FORMAT_CODE",
+    "Print Format Code",
+];
 const PRICE_MODE_COLUMNS: &[&str] = &[
     "PriceMode",
     "Price Mode",
@@ -72,40 +83,34 @@ const NUTRITION_NAME_COLUMNS: &[&str] = &["Name", "Nutrient", "NutritionName", "
 const NUTRITION_AMOUNT_COLUMNS: &[&str] = &["Amount", "Value", "Qty", "amount"];
 const NUTRITION_UNIT_COLUMNS: &[&str] = &["Unit", "Uom", "unit"];
 const PLUING_NUTRITION_COLUMNS: &[(&str, &str, Option<&str>)] = &[
-    ("Serving Size", "Serving Size", None),
-    ("Servings Per Container", "Serving Container", None),
-    ("Calories", "Calories", None),
-    ("Calories From Fat", "Calories Fat", None),
-    ("Total Fat", "Total Fat", Some("g")),
-    ("Percent Total Fat", "Total Fat Daily Value", Some("%")),
-    ("Saturated Fat", "Saturated Fat", Some("g")),
+    ("calories", "Calories", None),
+    ("calories fat", "Calories From Fat", None),
+    ("total fat", "Total Fat", Some("Percent Total Fat")),
     (
-        "Percent Saturated Fat",
-        "Saturated Fat Daily Value",
-        Some("%"),
+        "saturated fat",
+        "Saturated Fat",
+        Some("Percent Saturated Fat"),
     ),
-    ("Cholesterol", "Cholesterol", Some("mg")),
-    ("Percent Cholesterol", "Cholesterol Daily Value", Some("%")),
-    ("Sodium", "Sodium", Some("mg")),
-    ("Percent Sodium", "Sodium Daily Value", Some("%")),
-    ("Total Carbohydrate", "Carbohydrate", Some("g")),
+    ("cholesterol", "Cholesterol", Some("Percent Cholesterol")),
+    ("sodium", "Sodium", Some("Percent Sodium")),
     (
-        "Percent Total Carbohydrate",
-        "Carbohydrate Daily Value",
-        Some("%"),
+        "carbohydrate",
+        "Total Carbohydrate",
+        Some("Percent Total Carbohydrate"),
     ),
-    ("Dietary Fiber", "Fiber", Some("g")),
-    ("Percent Dietary Fiber", "Fiber Daily Value", Some("%")),
-    ("Sugar", "Sugar", Some("g")),
-    ("Protein", "Protein", Some("g")),
-    ("Iron", "Iron", None),
-    ("Niacin", "Niacin", None),
-    ("Riboflavin", "Riboflavin", None),
-    ("Thiamin", "Thiamin", None),
-    ("Calcium", "Calcium", None),
-    ("Vitamin A", "Vitamin A", None),
-    ("Vitamin C", "Vitamin C", None),
-    ("Trans fat", "Trans Fat", Some("g")),
+    ("fiber", "Dietary Fiber", Some("Percent Dietary Fiber")),
+    ("sugar", "Sugar", None),
+    ("iron", "Iron", None),
+    ("protein", "Protein", None),
+    ("niacin", "Niacin", None),
+    ("riboflavin", "Riboflavin", None),
+    ("thiamin", "Thiamin", None),
+    ("calcium", "Calcium", None),
+    ("vitamin a", "Vitamin A", None),
+    ("vitamin c", "Vitamin C", None),
+    ("serving size", "Serving Size", None),
+    ("serving container", "Servings Per Container", None),
+    ("trans fat", "Trans fat", None),
 ];
 const DEFAULT_GROUP_REFERENCE: u32 = 997;
 
@@ -285,6 +290,50 @@ fn normalize_plu(
         price_calc_method: normalized_price_mode.price_calc_method,
         quantity: normalized_price_mode.quantity,
         quantity_symbol: normalized_price_mode.quantity_symbol,
+        tare: parse_optional_decimal_default_zero(row, TARE_COLUMNS, "TARE").map_err(|err| {
+            row_issue(
+                row,
+                Some(plu_number),
+                "tare",
+                format!("invalid tare: {err}"),
+            )
+        })?,
+        discount_type: Some(
+            parse_optional_u32_default_zero(row, DISCOUNT_COLUMNS, "DISCOUNT").map_err(|err| {
+                row_issue(
+                    row,
+                    Some(plu_number),
+                    "discount_type",
+                    format!("invalid discount: {err}"),
+                )
+            })?,
+        ),
+        packing_date_print: Some(flag_to_print_value(row, PACK_DATE_FLAG_COLUMNS)),
+        packing_time_print: Some(flag_to_print_value(row, PACK_DATE_FLAG_COLUMNS)),
+        selling_date_print: Some(flag_to_print_value(row, BEST_BEFORE_FLAG_COLUMNS)),
+        selling_date_term: Some(
+            parse_optional_u32_default_zero(row, BEST_BEFORE_COLUMNS, "BEST BEFORE").map_err(
+                |err| {
+                    row_issue(
+                        row,
+                        Some(plu_number),
+                        "selling_date_term",
+                        format!("invalid best-before value: {err}"),
+                    )
+                },
+            )?,
+        ),
+        label_format: parse_optional_u32(row, PRINT_FORMAT_COLUMNS, "PRINT FORMAT CODE").map_err(
+            |err| {
+                row_issue(
+                    row,
+                    Some(plu_number),
+                    "label_format",
+                    format!("invalid print format: {err}"),
+                )
+            },
+        )?,
+        traceability: Some(0),
         short_description: optional_text(row, SHORT_DESCRIPTION_COLUMNS),
         key_label: optional_text(row, KEY_LABEL_COLUMNS),
         expiration_days: parse_optional_u32(row, EXPIRATION_COLUMNS, "expiration days")
@@ -440,7 +489,7 @@ fn normalize_ingredients(rows: &[SourceRow]) -> Result<HashMap<JoinKey, String>,
     }
     Ok(by_plu
         .into_iter()
-        .map(|(plu, parts)| (plu, parts.join("\n")))
+        .map(|(plu, parts)| (plu, apply_dca_ingredient_markup(&parts.join(" "))))
         .collect())
 }
 
@@ -492,23 +541,69 @@ fn ordered_ingredient_parts(row: &SourceRow) -> Vec<String> {
         .collect()
 }
 
+fn apply_dca_ingredient_markup(value: &str) -> String {
+    let patterns = [
+        ("peut contenir", "<br><b>Peut contenir</b>"),
+        ("may contain", "<br><b>May contain</b>"),
+        ("ingrédients", "<b>Ingrédients</b>"),
+        ("contient", "<br><b>Contient</b>"),
+        ("ingredient", "<b>Ingredient</b>"),
+        ("contain", "<br><b>Contain</b>"),
+    ];
+    let trimmed = value.trim();
+    let lower = trimmed.to_lowercase();
+    let mut result = String::new();
+    let mut index = 0;
+    while index < trimmed.len() {
+        if let Some((matched, replacement)) = patterns
+            .iter()
+            .find(|(pattern, _)| lower[index..].starts_with(pattern))
+        {
+            result.push_str(replacement);
+            index += byte_len_for_chars(&trimmed[index..], matched.chars().count());
+        } else {
+            let next = trimmed[index..]
+                .chars()
+                .next()
+                .expect("index is on a char boundary");
+            result.push(next);
+            index += next.len_utf8();
+        }
+    }
+    result
+}
+
+fn byte_len_for_chars(value: &str, chars: usize) -> usize {
+    value.chars().take(chars).map(char::len_utf8).sum()
+}
+
 fn nutrition_from_pluing(row: &SourceRow) -> Result<Vec<NutritionFact>, AppError> {
     let mut facts = Vec::new();
-    for (column, name, unit) in PLUING_NUTRITION_COLUMNS {
-        let Some(value) = row
-            .get(column)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
+    for (name, amount_column, data2_column) in PLUING_NUTRITION_COLUMNS {
+        let Some(amount) = row.get(*amount_column).and_then(normalize_nutrition_value) else {
             continue;
         };
         facts.push(NutritionFact {
             name: (*name).to_string(),
-            amount: Some(value.to_string()),
-            unit: unit.map(ToOwned::to_owned),
+            amount: Some(amount),
+            unit: data2_column
+                .and_then(|column| row.get(column).and_then(normalize_nutrition_value)),
         });
     }
     Ok(facts)
+}
+
+fn normalize_nutrition_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed.contains('.') {
+        if let Ok(number) = trimmed.parse::<i64>() {
+            return Some(number.to_string());
+        }
+    }
+    Some(trimmed.to_string())
 }
 
 fn find_value<'a>(row: &'a SourceRow, candidates: &[&str]) -> Option<&'a str> {
@@ -580,6 +675,29 @@ fn parse_optional_u32_default_zero(
             ))
         }),
         None => Ok(0),
+    }
+}
+
+fn parse_optional_decimal_default_zero(
+    row: &SourceRow,
+    candidates: &[&str],
+    field: &str,
+) -> Result<Option<Decimal>, AppError> {
+    match optional_text(row, candidates) {
+        Some(value) => parse_decimal_value(&value, field).map(Some),
+        None => Ok(Some(Decimal::ZERO)),
+    }
+}
+
+fn flag_to_print_value(row: &SourceRow, candidates: &[&str]) -> u8 {
+    match optional_raw_text(row, candidates)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "Y" | "YES" | "TRUE" | "1" => 1,
+        _ => 0,
     }
 }
 
@@ -1181,6 +1299,7 @@ mod tests {
                 ("Ing Name 3".to_string(), "Water".to_string()),
                 ("Calories".to_string(), "008".to_string()),
                 ("Sodium".to_string(), "690".to_string()),
+                ("Percent Sodium".to_string(), "029".to_string()),
             ]),
         };
         let dataset = SourceDataset {
@@ -1195,19 +1314,38 @@ mod tests {
         assert_eq!(plus[0].name, "Apple<br>Slices");
         assert_eq!(plus[0].department_number, Some(2));
         assert_eq!(plus[0].group_number, Some(3));
-        assert_eq!(plus[0].ingredients.as_deref(), Some("Apples\nWater"));
+        assert_eq!(plus[0].ingredients.as_deref(), Some("Apples Water"));
         assert_eq!(plus[0].source_pluing_row_count, 1);
         assert!(
             plus[0]
                 .nutrition_facts
                 .iter()
-                .any(|fact| fact.name == "Calories" && fact.amount.is_some())
+                .any(|fact| fact.name == "calories" && fact.amount.as_deref() == Some("8"))
         );
         assert!(
             plus[0]
                 .nutrition_facts
                 .iter()
-                .any(|fact| fact.name == "Sodium" && fact.unit.as_deref() == Some("mg"))
+                .any(|fact| fact.name == "sodium"
+                    && fact.amount.as_deref() == Some("690")
+                    && fact.unit.as_deref() == Some("29"))
+        );
+    }
+
+    #[test]
+    fn dca_ingredients_use_vb_html_marker_formatting() {
+        let row = pluing_row("1", "1", "Ingredient wheat May contain milk");
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("1", "1", "Bread")],
+            ingredient_rows: vec![row],
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(
+            report.plus[0].ingredients.as_deref(),
+            Some("<b>Ingredient</b> wheat <br><b>May contain</b> milk")
         );
     }
 }

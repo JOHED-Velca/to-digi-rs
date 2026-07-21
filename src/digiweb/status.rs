@@ -39,7 +39,7 @@ impl<'de> Deserialize<'de> for ProcessingStatus {
         Ok(match value.to_ascii_uppercase().as_str() {
             "SUCCESS" | "SUCCEEDED" | "OK" => Self::Success,
             "FAIL" | "FAILED" | "ERROR" => Self::Fail,
-            "PROCESSING" | "PENDING" | "RUNNING" => Self::Processing,
+            "PROCESSING" | "PENDING" | "RUNNING" | "TODO" => Self::Processing,
             "SUBMITTED_STATUS_UNKNOWN" => Self::SubmittedStatusUnknown,
             "UNKNOWN_OR_TIMEOUT" => Self::UnknownOrTimeout,
             _ => Self::Fail,
