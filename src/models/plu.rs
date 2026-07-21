@@ -39,4 +39,5 @@ pub struct Plu {
     pub expiration_days: Option<u32>,
     pub ingredients: Option<String>,
     pub nutrition_facts: Vec<NutritionFact>,
+    pub source_pluing_row_count: usize,
 }

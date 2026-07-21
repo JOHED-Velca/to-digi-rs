@@ -21,10 +21,6 @@ pub async fn run_import(
     config.plu_upsert_path()?;
     let client = DigiwebClient::new(config.clone())?;
 
-    logger.line("Authenticating with DIGIweb.")?;
-    let token = authenticate(client.http(), &config, &client_secret).await?;
-    logger.kv("Authentication result", "SUCCESS")?;
-
     let mut summary = ImportSummary {
         discovered: plus.len(),
         ..ImportSummary::default()
@@ -39,11 +35,16 @@ pub async fn run_import(
         ))?;
     }
     if let Some(first) = records_to_send.first() {
+        logger.kv("Selected first valid PLU", &first.plu_number.to_string())?;
         logger.kv(
-            "Selected first PLU for API send",
-            &first.plu_number.to_string(),
+            "Matching PluIng rows for selected PLU",
+            &first.source_pluing_row_count.to_string(),
         )?;
     }
+
+    logger.line("Authenticating with DIGIweb.")?;
+    let token = authenticate(client.http(), &config, &client_secret).await?;
+    logger.kv("Authentication result", "SUCCESS")?;
 
     for plu in records_to_send {
         let started_at = Local::now();
@@ -150,6 +151,7 @@ mod tests {
             expiration_days: None,
             ingredients: None,
             nutrition_facts: Vec::new(),
+            source_pluing_row_count: 0,
         }
     }
 
@@ -158,6 +160,16 @@ mod tests {
         let records = vec![plu(1), plu(2), plu(3)];
 
         let selected = select_records_to_send(&records, true);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].plu_number, 1);
+    }
+
+    #[test]
+    fn send_only_first_plu_selects_first_valid_normalized_plu() {
+        let valid_after_row_skips = vec![plu(1), plu(2), plu(3)];
+
+        let selected = select_records_to_send(&valid_after_row_skips, true);
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].plu_number, 1);

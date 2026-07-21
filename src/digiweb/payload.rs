@@ -188,6 +188,7 @@ mod tests {
                 amount: Some("1.0".to_string()),
                 unit: Some("g".to_string()),
             }],
+            source_pluing_row_count: 1,
         };
         let mut config = DigiwebConfig::default();
         config.plu_barcode_ref_no = "29".to_string();

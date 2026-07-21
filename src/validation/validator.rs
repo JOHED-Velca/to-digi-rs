@@ -33,6 +33,7 @@ impl ValidationReport {
             .count()
     }
 
+    #[allow(dead_code)]
     pub fn has_blocking_errors(&self) -> bool {
         self.error_count() > 0
     }
@@ -236,6 +237,7 @@ mod tests {
             expiration_days: None,
             ingredients: None,
             nutrition_facts: Vec::new(),
+            source_pluing_row_count: 0,
         }
     }
 

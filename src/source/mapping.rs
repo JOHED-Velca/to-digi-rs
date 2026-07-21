@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use rust_decimal::Decimal;
@@ -7,7 +7,9 @@ use crate::config::MappingConfig;
 use crate::error::AppError;
 use crate::models::nutrition::NutritionFact;
 use crate::models::plu::{Plu, PriceMode};
+use crate::source::schema::MdbSchema;
 use crate::source::{SourceDataset, SourceRow};
+use crate::validation::issue::ValidationIssue;
 
 const PLU_NUMBER_COLUMNS: &[&str] = &["Plucode", "PLUNo", "PluNo", "PLU", "PLU_NO", "plu_number"];
 const DEPARTMENT_COLUMNS: &[&str] = &[
@@ -26,14 +28,7 @@ const GROUP_COLUMNS: &[&str] = &[
     "group_number",
 ];
 const BARCODE_COLUMNS: &[&str] = &["Barcode", "BarCode", "JAN", "UPC", "barcode"];
-const NAME_COLUMNS: &[&str] = &[
-    "Name 1",
-    "Name",
-    "ProductName",
-    "CommodityName",
-    "PLUName",
-    "name",
-];
+const NAME_COLUMNS: &[&str] = &["Name", "ProductName", "CommodityName", "PLUName", "name"];
 const NAME_LINE_COLUMNS: &[&str] = &["Name 1", "Name 2", "Name 3", "Name 4"];
 const PRICE_COLUMNS: &[&str] = &["Price", "UnitPrice", "SellPrice", "price"];
 const PRICE_MODE_COLUMNS: &[&str] = &[
@@ -115,64 +110,207 @@ const PLUING_NUTRITION_COLUMNS: &[(&str, &str, Option<&str>)] = &[
 /// - `PluIng` ingredients are assembled from non-empty `Ing Name 1` through `Ing Name 99` values in numeric order.
 /// - `PluIng` nutrition values are text in the inspected MDB and may contain zero padding. They are parsed as written with no unit conversion or decimal scaling.
 /// - Unknown DIGIweb-specific field limits are enforced in validation with conservative defaults only where documented in code.
+#[derive(Debug, Clone, Default)]
+pub struct NormalizationReport {
+    pub plus: Vec<Plu>,
+    pub row_issues: Vec<ValidationIssue>,
+    pub orphan_pluing_rows: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct JoinKey {
+    plu_number: u64,
+    department_number: u32,
+}
+
+pub fn validate_source_schema(schema: &MdbSchema, mapping: &MappingConfig) -> Result<(), AppError> {
+    let columns = schema.columns.get(&mapping.main_plu_table).ok_or_else(|| {
+        AppError::MdbSchema(format!(
+            "columns for main PLU table '{}' were not inspected",
+            mapping.main_plu_table
+        ))
+    })?;
+    require_source_column(columns, "Plucode", &mapping.main_plu_table)?;
+    require_source_column(columns, "Department", &mapping.main_plu_table)?;
+    require_source_column(columns, "Name 1", &mapping.main_plu_table)?;
+    require_source_column(columns, "Price", &mapping.main_plu_table)?;
+    Ok(())
+}
+
 pub fn normalize_dataset(
     dataset: &SourceDataset,
     mapping: &MappingConfig,
     store_number: u32,
-) -> Result<Vec<Plu>, AppError> {
+) -> Result<NormalizationReport, AppError> {
     let ingredients = normalize_ingredients(&dataset.ingredient_rows)?;
     let nutrition = normalize_nutrition(&dataset.nutrition_rows)?;
+    let pluing_counts = pluing_counts_by_key(&dataset.ingredient_rows);
     let mut plus = Vec::with_capacity(dataset.plu_rows.len());
+    let mut row_issues = Vec::new();
     for row in &dataset.plu_rows {
-        plus.push(normalize_plu(
+        match normalize_plu(
             row,
             mapping,
             store_number,
             &ingredients,
             &nutrition,
-        )?);
+            &pluing_counts,
+        ) {
+            Ok(plu) => plus.push(plu),
+            Err(issue) => row_issues.push(issue),
+        }
     }
-    Ok(plus)
+    let active_keys = plus
+        .iter()
+        .filter_map(|plu| {
+            plu.department_number.map(|department_number| JoinKey {
+                plu_number: plu.plu_number,
+                department_number,
+            })
+        })
+        .collect::<HashSet<_>>();
+    let orphan_pluing_rows = dataset
+        .ingredient_rows
+        .iter()
+        .filter(|row| row_join_key(row).is_none_or(|key| !active_keys.contains(&key)))
+        .count();
+    Ok(NormalizationReport {
+        plus,
+        row_issues,
+        orphan_pluing_rows,
+    })
 }
 
 fn normalize_plu(
     row: &SourceRow,
     _mapping: &MappingConfig,
     store_number: u32,
-    ingredients: &HashMap<u64, String>,
-    nutrition: &HashMap<u64, Vec<NutritionFact>>,
-) -> Result<Plu, AppError> {
-    let plu_number = parse_required_u64(row, PLU_NUMBER_COLUMNS, "PLU number")?;
-    let price = parse_required_decimal(row, PRICE_COLUMNS, "price")?;
+    ingredients: &HashMap<JoinKey, String>,
+    nutrition: &HashMap<JoinKey, Vec<NutritionFact>>,
+    pluing_counts: &HashMap<JoinKey, usize>,
+) -> Result<Plu, ValidationIssue> {
+    let plu_number = parse_required_u64(row, PLU_NUMBER_COLUMNS, "PLU number").map_err(|err| {
+        row_issue(
+            row,
+            None,
+            "plu_number",
+            format!("invalid PLU number: {err}"),
+        )
+    })?;
+    let department_number = parse_optional_u32(row, DEPARTMENT_COLUMNS, "department number")
+        .map_err(|err| {
+            row_issue(
+                row,
+                Some(plu_number),
+                "department_number",
+                format!("invalid department: {err}"),
+            )
+        })?;
+    let key = department_number.map(|department_number| JoinKey {
+        plu_number,
+        department_number,
+    });
+    let price = parse_required_decimal(row, PRICE_COLUMNS, "price").map_err(|err| {
+        row_issue(
+            row,
+            Some(plu_number),
+            "price",
+            format!("invalid price: {err}"),
+        )
+    })?;
     let price_mode = PriceMode::from_source(find_value(row, PRICE_MODE_COLUMNS));
+    let name = required_name(row)
+        .ok_or_else(|| row_issue(row, Some(plu_number), "name", "missing product name"))?;
     Ok(Plu {
         plu_number,
         store_number,
-        department_number: parse_optional_u32(row, DEPARTMENT_COLUMNS, "department number")?,
-        group_number: parse_optional_u32(row, GROUP_COLUMNS, "group number")?,
-        name: required_name(row)?,
+        department_number,
+        group_number: parse_optional_u32(row, GROUP_COLUMNS, "group number").map_err(|err| {
+            row_issue(
+                row,
+                Some(plu_number),
+                "group_number",
+                format!("invalid group: {err}"),
+            )
+        })?,
+        name,
         barcode: optional_text(row, BARCODE_COLUMNS),
         price,
         price_mode,
         short_description: optional_text(row, SHORT_DESCRIPTION_COLUMNS),
         key_label: optional_text(row, KEY_LABEL_COLUMNS),
-        expiration_days: parse_optional_u32(row, EXPIRATION_COLUMNS, "expiration days")?,
-        ingredients: ingredients.get(&plu_number).cloned(),
-        nutrition_facts: nutrition.get(&plu_number).cloned().unwrap_or_default(),
+        expiration_days: parse_optional_u32(row, EXPIRATION_COLUMNS, "expiration days")
+            .ok()
+            .flatten(),
+        ingredients: key.and_then(|key| ingredients.get(&key).cloned()),
+        nutrition_facts: key
+            .and_then(|key| nutrition.get(&key).cloned())
+            .unwrap_or_default(),
+        source_pluing_row_count: key
+            .and_then(|key| pluing_counts.get(&key).copied())
+            .unwrap_or_default(),
     })
 }
 
-fn normalize_ingredients(rows: &[SourceRow]) -> Result<HashMap<u64, String>, AppError> {
-    let mut by_plu: HashMap<u64, Vec<String>> = HashMap::new();
+fn require_source_column(columns: &[String], column: &str, table: &str) -> Result<(), AppError> {
+    if columns.iter().any(|candidate| candidate == column) {
+        Ok(())
+    } else {
+        Err(AppError::MdbSchema(format!(
+            "required source column '{column}' was not found in table '{table}'"
+        )))
+    }
+}
+
+fn row_join_key(row: &SourceRow) -> Option<JoinKey> {
+    let plu_number = parse_required_u64(row, PLU_NUMBER_COLUMNS, "PLU number").ok()?;
+    let department_number = parse_optional_u32(row, DEPARTMENT_COLUMNS, "department number")
+        .ok()
+        .flatten()?;
+    Some(JoinKey {
+        plu_number,
+        department_number,
+    })
+}
+
+fn pluing_counts_by_key(rows: &[SourceRow]) -> HashMap<JoinKey, usize> {
+    let mut counts = HashMap::new();
     for row in rows {
-        let plu_number = parse_required_u64(row, PLU_NUMBER_COLUMNS, "ingredient PLU number")?;
+        if let Some(key) = row_join_key(row) {
+            *counts.entry(key).or_default() += 1;
+        }
+    }
+    counts
+}
+
+fn row_issue(
+    row: &SourceRow,
+    plu_number: Option<u64>,
+    field: impl Into<String>,
+    message: impl Into<String>,
+) -> ValidationIssue {
+    let department =
+        optional_text(row, DEPARTMENT_COLUMNS).unwrap_or_else(|| "unknown".to_string());
+    ValidationIssue::error(
+        plu_number,
+        field,
+        format!("{}; Department={department}", message.into()),
+    )
+}
+
+fn normalize_ingredients(rows: &[SourceRow]) -> Result<HashMap<JoinKey, String>, AppError> {
+    let mut by_plu: HashMap<JoinKey, Vec<String>> = HashMap::new();
+    for row in rows {
+        let Some(key) = row_join_key(row) else {
+            continue;
+        };
         let ordered_parts = ordered_ingredient_parts(row);
         if ordered_parts.is_empty() {
             if let Some(text) = optional_text(row, INGREDIENT_TEXT_COLUMNS) {
-                by_plu.entry(plu_number).or_default().push(text);
+                by_plu.entry(key).or_default().push(text);
             }
         } else {
-            by_plu.entry(plu_number).or_default().extend(ordered_parts);
+            by_plu.entry(key).or_default().extend(ordered_parts);
         }
     }
     Ok(by_plu
@@ -181,19 +319,23 @@ fn normalize_ingredients(rows: &[SourceRow]) -> Result<HashMap<u64, String>, App
         .collect())
 }
 
-fn normalize_nutrition(rows: &[SourceRow]) -> Result<HashMap<u64, Vec<NutritionFact>>, AppError> {
-    let mut by_plu: HashMap<u64, Vec<NutritionFact>> = HashMap::new();
+fn normalize_nutrition(
+    rows: &[SourceRow],
+) -> Result<HashMap<JoinKey, Vec<NutritionFact>>, AppError> {
+    let mut by_plu: HashMap<JoinKey, Vec<NutritionFact>> = HashMap::new();
     for row in rows {
-        let plu_number = parse_required_u64(row, PLU_NUMBER_COLUMNS, "nutrition PLU number")?;
+        let Some(key) = row_join_key(row) else {
+            continue;
+        };
         let plu_ing_facts = nutrition_from_pluing(row)?;
         if !plu_ing_facts.is_empty() {
-            by_plu.entry(plu_number).or_default().extend(plu_ing_facts);
+            by_plu.entry(key).or_default().extend(plu_ing_facts);
             continue;
         }
 
         if let Some(name) = optional_text(row, NUTRITION_NAME_COLUMNS) {
             let amount = optional_text(row, NUTRITION_AMOUNT_COLUMNS);
-            by_plu.entry(plu_number).or_default().push(NutritionFact {
+            by_plu.entry(key).or_default().push(NutritionFact {
                 name,
                 amount,
                 unit: optional_text(row, NUTRITION_UNIT_COLUMNS),
@@ -203,7 +345,7 @@ fn normalize_nutrition(rows: &[SourceRow]) -> Result<HashMap<u64, Vec<NutritionF
     Ok(by_plu)
 }
 
-fn required_name(row: &SourceRow) -> Result<String, AppError> {
+fn required_name(row: &SourceRow) -> Option<String> {
     let parts = NAME_LINE_COLUMNS
         .iter()
         .filter_map(|column| row.get(column))
@@ -212,9 +354,9 @@ fn required_name(row: &SourceRow) -> Result<String, AppError> {
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     if !parts.is_empty() {
-        return Ok(parts.join("<br>"));
+        return Some(parts.join("<br>"));
     }
-    required_text(row, NAME_COLUMNS, "product name")
+    optional_text(row, NAME_COLUMNS)
 }
 
 fn ordered_ingredient_parts(row: &SourceRow) -> Vec<String> {
@@ -317,6 +459,128 @@ mod tests {
 
     use super::*;
 
+    fn pludata_row(plucode: &str, department: &str, name_1: &str) -> SourceRow {
+        SourceRow {
+            table: "Pludata".to_string(),
+            values: BTreeMap::from([
+                ("Plucode".to_string(), plucode.to_string()),
+                ("Department".to_string(), department.to_string()),
+                ("Category".to_string(), "1".to_string()),
+                ("Name 1".to_string(), name_1.to_string()),
+                ("Price".to_string(), "1.99".to_string()),
+                ("PriceMode".to_string(), "each".to_string()),
+            ]),
+        }
+    }
+
+    fn pluing_row(plucode: &str, department: &str, ingredient: &str) -> SourceRow {
+        SourceRow {
+            table: "PluIng".to_string(),
+            values: BTreeMap::from([
+                ("Plucode".to_string(), plucode.to_string()),
+                ("Department".to_string(), department.to_string()),
+                ("Ing Name 1".to_string(), ingredient.to_string()),
+                ("Calories".to_string(), "008".to_string()),
+            ]),
+        }
+    }
+
+    #[test]
+    fn missing_name_1_column_is_schema_failure() {
+        let mut schema = MdbSchema::default();
+        schema.tables = vec!["Pludata".to_string()];
+        schema.set_columns(
+            "Pludata",
+            vec![
+                "Plucode".to_string(),
+                "Department".to_string(),
+                "Price".to_string(),
+            ],
+        );
+
+        let result = validate_source_schema(&schema, &MappingConfig::default());
+
+        assert!(matches!(result, Err(AppError::MdbSchema(_))));
+    }
+
+    #[test]
+    fn present_name_1_with_empty_row_creates_row_issue_and_valid_rows_continue() {
+        let dataset = SourceDataset {
+            plu_rows: vec![
+                pludata_row("0", "0001", ""),
+                pludata_row("1", "0001", "Apples"),
+            ],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(report.plus.len(), 1);
+        assert_eq!(report.plus[0].plu_number, 1);
+        assert_eq!(report.row_issues.len(), 1);
+        assert_eq!(report.row_issues[0].plu_number, Some(0));
+        assert!(
+            report.row_issues[0]
+                .message
+                .contains("missing product name")
+        );
+        assert!(report.row_issues[0].message.contains("Department=0001"));
+    }
+
+    #[test]
+    fn plu_zero_with_empty_name_is_not_normalized_for_sending() {
+        let dataset = SourceDataset {
+            plu_rows: vec![
+                pludata_row("0", "0001", ""),
+                pludata_row("2", "0001", "Bananas"),
+            ],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert!(report.plus.iter().all(|plu| plu.plu_number != 0));
+        assert_eq!(report.plus[0].plu_number, 2);
+    }
+
+    #[test]
+    fn pluing_join_uses_plucode_and_department() {
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("1", "0001", "Apples")],
+            ingredient_rows: vec![
+                pluing_row("1", "0001", "Matched"),
+                pluing_row("1", "0002", "Wrong department"),
+            ],
+            nutrition_rows: vec![
+                pluing_row("1", "0001", "Matched"),
+                pluing_row("1", "0002", "Wrong department"),
+            ],
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(report.plus[0].ingredients.as_deref(), Some("Matched"));
+        assert_eq!(report.plus[0].source_pluing_row_count, 1);
+        assert_eq!(report.orphan_pluing_rows, 1);
+    }
+
+    #[test]
+    fn unmatched_pluing_rows_are_not_attached_to_valid_plus() {
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("3", "0001", "Oranges")],
+            ingredient_rows: vec![pluing_row("9", "0001", "Unmatched")],
+            nutrition_rows: vec![pluing_row("9", "0001", "Unmatched")],
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(report.plus[0].ingredients, None);
+        assert!(report.plus[0].nutrition_facts.is_empty());
+        assert_eq!(report.orphan_pluing_rows, 1);
+    }
+
     #[test]
     fn normalizes_source_row() {
         let row = SourceRow {
@@ -335,7 +599,8 @@ mod tests {
             nutrition_rows: Vec::new(),
         };
 
-        let plus = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let plus = report.plus;
 
         assert_eq!(plus[0].plu_number, 1001);
         assert_eq!(plus[0].department_number, Some(10));
@@ -360,6 +625,7 @@ mod tests {
             table: "PluIng".to_string(),
             values: BTreeMap::from([
                 ("Plucode".to_string(), "1001".to_string()),
+                ("Department".to_string(), "2".to_string()),
                 ("Ing Name 1".to_string(), "Apples".to_string()),
                 ("Ing Name 2".to_string(), " ".to_string()),
                 ("Ing Name 3".to_string(), "Water".to_string()),
@@ -373,12 +639,14 @@ mod tests {
             nutrition_rows: vec![pluing_row],
         };
 
-        let plus = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let plus = report.plus;
 
         assert_eq!(plus[0].name, "Apple<br>Slices");
         assert_eq!(plus[0].department_number, Some(2));
         assert_eq!(plus[0].group_number, Some(3));
         assert_eq!(plus[0].ingredients.as_deref(), Some("Apples\nWater"));
+        assert_eq!(plus[0].source_pluing_row_count, 1);
         assert!(
             plus[0]
                 .nutrition_facts

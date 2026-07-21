@@ -7,13 +7,14 @@ mod models;
 mod source;
 mod validation;
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use config::{AppConfig, client_secret_log_message, load_client_secret};
 use error::AppError;
 use import::runner::run_import;
 use logging::AuditLogger;
-use source::mapping::normalize_dataset;
+use source::mapping::{normalize_dataset, validate_source_schema};
 use source::mdb_tools::MdbTools;
 use source::{FIXED_SOURCE_FILE, VerifiedSourceFile};
 use validation::issue::Severity;
@@ -86,7 +87,8 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
     )?;
     logger.line("Confirmation: only plu.mdb was opened.")?;
 
-    let (_schema, dataset) = MdbTools::read_dataset(source_file.path(), &config.mapping, logger)?;
+    let (schema, dataset) = MdbTools::read_dataset(source_file.path(), &config.mapping, logger)?;
+    validate_source_schema(&schema, &config.mapping)?;
     logger.kv(
         "Number of PLUs discovered",
         &dataset.plu_rows.len().to_string(),
@@ -112,7 +114,20 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         return Ok(0);
     }
 
-    let plus = normalize_dataset(&dataset, &config.mapping, config.digiweb.store_number)?;
+    let normalization_report =
+        normalize_dataset(&dataset, &config.mapping, config.digiweb.store_number)?;
+    for issue in &normalization_report.row_issues {
+        let plu = issue
+            .plu_number
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        logger.line(format!("PLU {plu} skipped: {}", issue.message))?;
+    }
+    logger.kv(
+        "Unmatched PluIng rows",
+        &normalization_report.orphan_pluing_rows.to_string(),
+    )?;
+    let plus = normalization_report.plus;
     logger.kv("Normalized PLU records", &plus.len().to_string())?;
 
     let validation_report = validate_plus(&plus);
@@ -137,7 +152,17 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
             issue.message
         ))?;
     }
-    if validation_report.has_blocking_errors() {
+    let invalid_plu_numbers = validation_report
+        .issues
+        .iter()
+        .filter(|issue| issue.severity == Severity::Error)
+        .filter_map(|issue| issue.plu_number)
+        .collect::<HashSet<_>>();
+    if validation_report
+        .issues
+        .iter()
+        .any(|issue| issue.severity == Severity::Error && issue.plu_number.is_none())
+    {
         logger.final_failure(
             "validation",
             &format!(
@@ -146,6 +171,19 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
             ),
             true,
         )?;
+        return Ok(2);
+    }
+    let mut valid_plus = Vec::new();
+    for plu in plus {
+        if invalid_plu_numbers.contains(&plu.plu_number) {
+            logger.line(format!("PLU {} skipped: validation errors", plu.plu_number))?;
+        } else {
+            valid_plus.push(plu);
+        }
+    }
+    logger.kv("Valid PLUs available", &valid_plus.len().to_string())?;
+    if valid_plus.is_empty() {
+        logger.final_failure("validation", "no valid PLUs are available to send", true)?;
         return Ok(2);
     }
     if validation_report
@@ -157,7 +195,7 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
     }
 
     let client_secret = client_secret.ok_or(AppError::MissingEnv("DIGIWEB_CLIENT_SECRET"))?;
-    let summary = run_import(config, client_secret, &plus, logger).await?;
+    let summary = run_import(config, client_secret, &valid_plus, logger).await?;
     for record in &summary.records {
         if record.final_status != digiweb::status::ProcessingStatus::Success {
             logger.line(format!(
