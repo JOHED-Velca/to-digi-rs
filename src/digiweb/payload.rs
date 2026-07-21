@@ -24,8 +24,14 @@ pub struct DigiwebPluPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pluingredients: Option<String>,
     pub plupricemode: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plupricecalcmethod: Option<u8>,
     #[serde(with = "rust_decimal::serde::float")]
     pub pluunitprice: Decimal,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pluquantity: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pluquantitysymbol: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pluusingdateprint: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,7 +102,10 @@ impl DigiwebPluPayload {
             plutexts: optional_texts(plu),
             pluingredients: plu.ingredients.clone(),
             plupricemode: price_mode_to_digiweb(plu.price_mode)?,
+            plupricecalcmethod: plu.price_calc_method,
             pluunitprice: plu.price,
+            pluquantity: plu.quantity,
+            pluquantitysymbol: plu.quantity_symbol,
             pluusingdateprint: plu.expiration_days.map(|_| 1),
             pluusingdateterm: plu.expiration_days,
             pluadditionaldatas,
@@ -182,6 +191,9 @@ mod tests {
             barcode: Some("12345".to_string()),
             price: Decimal::new(199, 2),
             price_mode: PriceMode::ByEach,
+            price_calc_method: Some(0),
+            quantity: Some(2),
+            quantity_symbol: Some(1),
             short_description: Some("Fresh".to_string()),
             key_label: Some("APPLE".to_string()),
             expiration_days: Some(5),
@@ -206,7 +218,10 @@ mod tests {
         assert!(json.contains("\"plugroupno\":3"));
         assert!(json.contains("\"plucommname\":\"Apples\""));
         assert!(json.contains("\"plupricemode\":1"));
+        assert!(json.contains("\"plupricecalcmethod\":0"));
         assert!(json.contains("\"pluunitprice\":1.99"));
+        assert!(json.contains("\"pluquantity\":2"));
+        assert!(json.contains("\"pluquantitysymbol\":1"));
         assert!(json.contains("\"pluingredients\":\"Apples\""));
         assert!(json.contains("\"plubarcoderefno\":\"29\""));
         assert!(!json.contains("null"));

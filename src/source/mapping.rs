@@ -30,6 +30,15 @@ const BARCODE_COLUMNS: &[&str] = &["Barcode", "BarCode", "JAN", "UPC", "barcode"
 const NAME_COLUMNS: &[&str] = &["Name", "ProductName", "CommodityName", "PLUName", "name"];
 const NAME_LINE_COLUMNS: &[&str] = &["Name 1", "Name 2", "Name 3", "Name 4"];
 const PRICE_COLUMNS: &[&str] = &["Price", "UnitPrice", "SellPrice", "price"];
+const CATEGORY_COLUMNS: &[&str] = &["Category", "CATEGORY", "category"];
+const QUANTITY_COLUMNS: &[&str] = &["Quantity", "QUANTITY", "quantity"];
+const QUANTITY_SYMBOL_COLUMNS: &[&str] = &[
+    "Quantity Symbol",
+    "QUANTITY SYMBOL",
+    "QuantitySymbol",
+    "QUANTITY_SYMBOL",
+    "quantity_symbol",
+];
 const PRICE_MODE_COLUMNS: &[&str] = &[
     "PriceMode",
     "Price Mode",
@@ -100,6 +109,14 @@ const PLUING_NUTRITION_COLUMNS: &[(&str, &str, Option<&str>)] = &[
 ];
 const DEFAULT_GROUP_REFERENCE: u32 = 997;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NormalizedPriceMode {
+    price_mode: PriceMode,
+    price_calc_method: Option<u8>,
+    quantity: Option<u32>,
+    quantity_symbol: Option<u32>,
+}
+
 /// Source mapping assumptions:
 ///
 /// - The main table defaults to `Pludata`; `PluIng` supplies both ingredient text and nutrition values.
@@ -108,6 +125,7 @@ const DEFAULT_GROUP_REFERENCE: u32 = 997;
 /// - If required PLU number, name, or price columns are absent/empty, the row is not given a fabricated default.
 /// - `Pludata` names are assembled from non-empty `Name 1` through `Name 4` values with DIGIweb `<br>` line breaks.
 /// - `Pludata`.`Main Group Code` is the preferred external DIGIweb group reference. Empty values default to group reference 997.
+/// - DCA `Category` is the source of truth for price mode when present: 0/blank = weight per kg, 1 = fixed price, 3 = weight per 100g.
 /// - `PluIng` ingredients are assembled from non-empty `Ing Name 1` through `Ing Name 99` values in numeric order.
 /// - `PluIng` nutrition values are text in the inspected MDB and may contain zero padding. They are parsed as written with no unit conversion or decimal scaling.
 /// - Unknown DIGIweb-specific field limits are enforced in validation with conservative defaults only where documented in code.
@@ -234,7 +252,14 @@ fn normalize_plu(
             format!("invalid price: {err}"),
         )
     })?;
-    let price_mode = PriceMode::from_source(find_value(row, PRICE_MODE_COLUMNS));
+    let normalized_price_mode = normalize_price_mode(row).map_err(|err| {
+        row_issue(
+            row,
+            Some(plu_number),
+            "price_mode",
+            format!("invalid price mode fields: {err}"),
+        )
+    })?;
     let name = required_name(row)
         .ok_or_else(|| row_issue(row, Some(plu_number), "name", "missing product name"))?;
     let normalized_group = normalize_main_group(row).map_err(|err| {
@@ -256,7 +281,10 @@ fn normalize_plu(
         name,
         barcode: optional_text(row, BARCODE_COLUMNS),
         price,
-        price_mode,
+        price_mode: normalized_price_mode.price_mode,
+        price_calc_method: normalized_price_mode.price_calc_method,
+        quantity: normalized_price_mode.quantity,
+        quantity_symbol: normalized_price_mode.quantity_symbol,
         short_description: optional_text(row, SHORT_DESCRIPTION_COLUMNS),
         key_label: optional_text(row, KEY_LABEL_COLUMNS),
         expiration_days: parse_optional_u32(row, EXPIRATION_COLUMNS, "expiration days")
@@ -269,6 +297,55 @@ fn normalize_plu(
         source_pluing_row_count: key
             .and_then(|key| pluing_counts.get(&key).copied())
             .unwrap_or_default(),
+    })
+}
+
+fn normalize_price_mode(row: &SourceRow) -> Result<NormalizedPriceMode, AppError> {
+    if let Some(category) = optional_raw_text(row, CATEGORY_COLUMNS) {
+        let category = category.trim();
+        let category = if category.is_empty() { "0" } else { category };
+        let quantity_symbol = Some(parse_optional_u32_default_zero(
+            row,
+            QUANTITY_SYMBOL_COLUMNS,
+            "Quantity Symbol",
+        )?);
+        return match category {
+            "0" => Ok(NormalizedPriceMode {
+                price_mode: PriceMode::ByWeight,
+                price_calc_method: Some(0),
+                quantity: Some(0),
+                quantity_symbol,
+            }),
+            "1" => Ok(NormalizedPriceMode {
+                price_mode: PriceMode::ByEach,
+                price_calc_method: Some(0),
+                quantity: Some(parse_optional_u32_default_zero(
+                    row,
+                    QUANTITY_COLUMNS,
+                    "Quantity",
+                )?),
+                quantity_symbol,
+            }),
+            "3" => Ok(NormalizedPriceMode {
+                price_mode: PriceMode::ByWeight,
+                price_calc_method: Some(1),
+                quantity: Some(0),
+                quantity_symbol,
+            }),
+            _ => Ok(NormalizedPriceMode {
+                price_mode: PriceMode::Unknown,
+                price_calc_method: None,
+                quantity: None,
+                quantity_symbol,
+            }),
+        };
+    }
+
+    Ok(NormalizedPriceMode {
+        price_mode: PriceMode::from_source(find_value(row, PRICE_MODE_COLUMNS)),
+        price_calc_method: None,
+        quantity: None,
+        quantity_symbol: None,
     })
 }
 
@@ -490,6 +567,22 @@ fn parse_optional_u32(
     }
 }
 
+fn parse_optional_u32_default_zero(
+    row: &SourceRow,
+    candidates: &[&str],
+    field: &str,
+) -> Result<u32, AppError> {
+    match optional_text(row, candidates) {
+        Some(value) => value.parse::<u32>().map_err(|err| {
+            AppError::MdbExport(format!(
+                "{} value '{}' in table '{}' is invalid: {}",
+                field, value, row.table, err
+            ))
+        }),
+        None => Ok(0),
+    }
+}
+
 fn parse_required_positive_u32(
     row: &SourceRow,
     candidates: &[&str],
@@ -536,6 +629,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::validation::validator::validate_plus;
 
     fn pludata_row(plucode: &str, department: &str, name_1: &str) -> SourceRow {
         pludata_row_with_group(plucode, department, "1", name_1)
@@ -553,10 +647,32 @@ mod tests {
                 ("Plucode".to_string(), plucode.to_string()),
                 ("Department".to_string(), department.to_string()),
                 ("Main Group Code".to_string(), group.to_string()),
-                ("Category".to_string(), "0".to_string()),
                 ("Name 1".to_string(), name_1.to_string()),
                 ("Price".to_string(), "1.99".to_string()),
                 ("PriceMode".to_string(), "each".to_string()),
+            ]),
+        }
+    }
+
+    fn dca_pludata_row(
+        plucode: &str,
+        category: &str,
+        price: &str,
+        quantity: &str,
+        quantity_symbol: &str,
+    ) -> SourceRow {
+        SourceRow {
+            table: "Pludata".to_string(),
+            values: BTreeMap::from([
+                ("Plucode".to_string(), plucode.to_string()),
+                ("Department".to_string(), "1".to_string()),
+                ("Main Group Code".to_string(), "1".to_string()),
+                ("Category".to_string(), category.to_string()),
+                ("Name 1".to_string(), format!("PLU {plucode}")),
+                ("Price".to_string(), price.to_string()),
+                ("Quantity".to_string(), quantity.to_string()),
+                ("Quantity Symbol".to_string(), quantity_symbol.to_string()),
+                ("Barcode Format".to_string(), "05".to_string()),
             ]),
         }
     }
@@ -952,6 +1068,93 @@ mod tests {
         assert_eq!(plus[0].plu_number, 1001);
         assert_eq!(plus[0].department_number, Some(10));
         assert_eq!(plus[0].price_mode, PriceMode::ByWeight);
+    }
+
+    #[test]
+    fn dca_category_0_maps_to_weight_price_per_kg() {
+        let dataset = SourceDataset {
+            plu_rows: vec![dca_pludata_row("1001", "0", "16.9", "0", "")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let plu = &report.plus[0];
+
+        assert_eq!(plu.price, Decimal::new(169, 1));
+        assert_eq!(plu.price_mode, PriceMode::ByWeight);
+        assert_eq!(plu.price_calc_method, Some(0));
+        assert_eq!(plu.quantity, Some(0));
+        assert_eq!(plu.quantity_symbol, Some(0));
+    }
+
+    #[test]
+    fn dca_category_1_maps_to_fixed_price_with_source_quantity() {
+        let dataset = SourceDataset {
+            plu_rows: vec![dca_pludata_row("1002", "1", "2.50", "6", "1")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let plu = &report.plus[0];
+
+        assert_eq!(plu.price_mode, PriceMode::ByEach);
+        assert_eq!(plu.price_calc_method, Some(0));
+        assert_eq!(plu.quantity, Some(6));
+        assert_eq!(plu.quantity_symbol, Some(1));
+    }
+
+    #[test]
+    fn dca_category_3_maps_to_weight_price_per_100g() {
+        let dataset = SourceDataset {
+            plu_rows: vec![dca_pludata_row("1003", "3", "1.49", "9", "5")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let plu = &report.plus[0];
+
+        assert_eq!(plu.price_mode, PriceMode::ByWeight);
+        assert_eq!(plu.price_calc_method, Some(1));
+        assert_eq!(plu.quantity, Some(0));
+        assert_eq!(plu.quantity_symbol, Some(5));
+    }
+
+    #[test]
+    fn blank_dca_category_defaults_to_category_0_weight_mode() {
+        let dataset = SourceDataset {
+            plu_rows: vec![dca_pludata_row("1004", "", "3.25", "", "")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let plu = &report.plus[0];
+
+        assert_eq!(plu.price_mode, PriceMode::ByWeight);
+        assert_eq!(plu.price_calc_method, Some(0));
+        assert_eq!(plu.quantity, Some(0));
+        assert_eq!(plu.quantity_symbol, Some(0));
+    }
+
+    #[test]
+    fn unsupported_dca_category_still_fails_price_mode_validation() {
+        let dataset = SourceDataset {
+            plu_rows: vec![dca_pludata_row("1005", "2", "3.25", "", "")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let validation_report = validate_plus(&report.plus);
+
+        assert_eq!(report.plus[0].price_mode, PriceMode::Unknown);
+        assert_eq!(report.plus[0].price_calc_method, None);
+        assert!(validation_report.issues.iter().any(|issue| {
+            issue.field == "price_mode" && issue.message == "unsupported or missing price mode"
+        }));
     }
 
     #[test]
