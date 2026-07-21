@@ -258,6 +258,16 @@ mod tests {
     }
 
     #[test]
+    fn default_request_status_path_matches_working_vb_contract() {
+        let config = AppConfig::default();
+
+        assert_eq!(
+            config.digiweb.request_status_path_template,
+            "/api/thirdpartylinker/api/v1/requests/{request_id}"
+        );
+    }
+
+    #[test]
     fn secret_log_message_does_not_include_secret_value() {
         let mut config = AppConfig::default();
         config.digiweb.client_secret = "super-secret-password".to_string();

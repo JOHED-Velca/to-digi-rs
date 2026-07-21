@@ -73,6 +73,7 @@ pub async fn run_import(
             Ok((request_id, final_status, message))
                 if final_status == ProcessingStatus::Success =>
             {
+                summary.submitted += 1;
                 summary.succeeded += 1;
                 logger.kv("PLU result", &format!("{} SUCCESS", plu.plu_number))?;
                 summary.records.push(RecordImportResult {
@@ -88,6 +89,7 @@ pub async fn run_import(
             Ok((request_id, final_status, message))
                 if final_status == ProcessingStatus::SubmittedStatusUnknown =>
             {
+                summary.submitted += 1;
                 summary.unknown += 1;
                 let unknown_message = message.unwrap_or_else(|| {
                     "DIGIweb accepted the submission but the final status is unknown".to_string()
@@ -116,6 +118,7 @@ pub async fn run_import(
                 }
             }
             Ok((request_id, final_status, message)) => {
+                summary.submitted += 1;
                 summary.failed += 1;
                 let failure = message
                     .unwrap_or_else(|| format!("DIGIweb final status {}", final_status.as_str()));

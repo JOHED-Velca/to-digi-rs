@@ -137,13 +137,31 @@ impl DigiwebClient {
                 status_path,
                 message,
             } => {
-                if let Some(path) = status_path.or_else(|| captured.location.clone()) {
-                    let final_status = self.poll_location(&path, logger).await?;
-                    return Ok((Some(request_id), final_status.status, final_status.message));
-                }
                 if self.has_configured_status_path() {
-                    let final_status = self.poll_request_status(&request_id, logger).await?;
-                    return Ok((Some(request_id), final_status.status, final_status.message));
+                    return match self.poll_request_status(&request_id, logger).await {
+                        Ok(final_status) => {
+                            Ok((Some(request_id), final_status.status, final_status.message))
+                        }
+                        Err(err) => Ok(submitted_status_unknown(
+                            request_id,
+                            format!(
+                                "PLU submission returned a request ID, but status polling failed: {err}. The PLU may have been accepted; do not retry blindly."
+                            ),
+                        )),
+                    };
+                }
+                if let Some(path) = status_path.or_else(|| captured.location.clone()) {
+                    return match self.poll_location(&path, logger).await {
+                        Ok(final_status) => {
+                            Ok((Some(request_id), final_status.status, final_status.message))
+                        }
+                        Err(err) => Ok(submitted_status_unknown(
+                            request_id,
+                            format!(
+                                "PLU submission returned a request ID, but status polling failed: {err}. The PLU may have been accepted; do not retry blindly."
+                            ),
+                        )),
+                    };
                 }
                 Ok((
                     Some(request_id),
@@ -363,7 +381,7 @@ fn interpret_plu_submission(
             if let Some(request_id) = response.request_id_header.clone() {
                 Ok(SubmissionInterpretation::Async {
                     request_id,
-                    status_path: response.location.clone(),
+                    status_path: None,
                     message: None,
                 })
             } else {
@@ -386,9 +404,7 @@ fn interpret_plu_submission(
     let request_id = submission
         .request_id()
         .or_else(|| response.request_id_header.clone());
-    let status_path = submission
-        .status_path()
-        .or_else(|| response.location.clone());
+    let status_path = submission.status_path();
     let message = submission.message.clone();
 
     if let Some(status) = submission.processing_status() {
@@ -531,12 +547,48 @@ fn parse_async_status(value: &Value) -> AsyncRequestStatusResponse {
 }
 
 fn json_value(response: &CapturedHttpResponse) -> Result<Value, AppError> {
+    if is_html_response(response) {
+        return Err(AppError::Http(format!(
+            "status endpoint returned HTML instead of JSON; likely routing/status-endpoint error; content-type={}; body preview={}",
+            response.content_type.as_deref().unwrap_or("<none>"),
+            sanitize_response_body(&response.body)
+        )));
+    }
     serde_json::from_str(&response.body).map_err(|err| {
         AppError::Http(format!(
             "response body was not valid JSON for HTTP {}: {}; captured body was logged before deserialization",
             response.status, err
         ))
     })
+}
+
+fn submitted_status_unknown(
+    request_id: String,
+    message: String,
+) -> (Option<String>, ProcessingStatus, Option<String>) {
+    (
+        Some(request_id),
+        ProcessingStatus::SubmittedStatusUnknown,
+        Some(message),
+    )
+}
+
+fn is_html_response(response: &CapturedHttpResponse) -> bool {
+    response
+        .content_type
+        .as_deref()
+        .map(|value| value.to_ascii_lowercase().contains("text/html"))
+        .unwrap_or(false)
+        || response
+            .body
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("<!doctype html")
+        || response
+            .body
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("<html")
 }
 
 fn json_text(value: &Value, keys: &[&str]) -> Option<String> {
@@ -652,9 +704,13 @@ fn sanitize_response_body(body: &str) -> String {
     {
         return "<redacted body contains sensitive text>".to_string();
     }
-    const MAX_LOGGED_BODY_CHARS: usize = 16_384;
-    if body.chars().count() > MAX_LOGGED_BODY_CHARS {
-        let mut truncated = body.chars().take(MAX_LOGGED_BODY_CHARS).collect::<String>();
+    let max_logged_body_chars = if lower.contains("<html") || lower.contains("<!doctype html") {
+        512
+    } else {
+        16_384
+    };
+    if body.chars().count() > max_logged_body_chars {
+        let mut truncated = body.chars().take(max_logged_body_chars).collect::<String>();
         truncated.push_str("...<truncated>");
         truncated
     } else {
@@ -843,6 +899,129 @@ mod tests {
         assert_eq!(request_id.as_deref(), Some("019f85f5"));
         assert_eq!(status, ProcessingStatus::Success);
         assert_eq!(server.handled_requests().await, 2);
+    }
+
+    #[tokio::test]
+    async fn created_201_todo_prefers_body_id_and_configured_vb_status_path_over_location() {
+        let server = TestServer::start(vec![
+            raw_response(
+                201,
+                "Created",
+                &[
+                    ("Content-Type", "application/json"),
+                    ("Location", "/v1/requests/019f8655"),
+                ],
+                r#"{"id":"019f8655","status":"TODO","type":"Plu","method":"WRITE"}"#,
+            ),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"019f8655","status":"SUCCESS","method":"WRITE"}"#,
+            ),
+        ])
+        .await;
+        let client = DigiwebClient::new(test_config(
+            &server.base_url,
+            "/api/thirdpartylinker/api/v1/requests/{request_id}",
+            1,
+            5,
+        ))
+        .expect("client");
+        let mut logger = test_logger();
+
+        let (request_id, status, _message) = client
+            .upsert_plu(&test_token(), &test_payload(), &mut logger)
+            .await
+            .expect("upsert");
+
+        let request_lines = server.request_lines().await;
+        assert_eq!(request_id.as_deref(), Some("019f8655"));
+        assert_eq!(status, ProcessingStatus::Success);
+        assert_eq!(request_lines.len(), 2);
+        assert!(request_lines[0].starts_with("POST /api/v1/third-party/plus/write "));
+        assert!(
+            request_lines[1].starts_with("GET /api/thirdpartylinker/api/v1/requests/019f8655 ")
+        );
+    }
+
+    #[tokio::test]
+    async fn html_from_incorrect_status_route_is_unknown_not_plu_failure() {
+        let html = format!(
+            "<!doctype html><html><body><app-root></app-root>{}</body></html>",
+            "x".repeat(2_000)
+        );
+        let server = TestServer::start(vec![
+            raw_response(
+                201,
+                "Created",
+                &[
+                    ("Content-Type", "application/json"),
+                    ("Location", "/v1/requests/019f8655"),
+                ],
+                r#"{"id":"019f8655","status":"TODO","type":"Plu","method":"WRITE"}"#,
+            ),
+            raw_response(200, "OK", &[("Content-Type", "text/html")], &html),
+        ])
+        .await;
+        let client = DigiwebClient::new(test_config(&server.base_url, "", 1, 5)).expect("client");
+        let mut logger = test_logger();
+
+        let (request_id, status, message) = client
+            .upsert_plu(&test_token(), &test_payload(), &mut logger)
+            .await
+            .expect("upsert");
+
+        assert_eq!(request_id.as_deref(), Some("019f8655"));
+        assert_eq!(status, ProcessingStatus::SubmittedStatusUnknown);
+        assert_ne!(status, ProcessingStatus::Fail);
+        assert_eq!(server.handled_requests().await, 2);
+        let message = message.unwrap_or_default();
+        assert!(message.contains("routing/status-endpoint error"));
+        assert!(message.contains("may have been accepted"));
+    }
+
+    #[tokio::test]
+    async fn polling_waits_for_todo_and_processing_until_success() {
+        let server = TestServer::start(vec![
+            raw_response(
+                201,
+                "Created",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"abc","status":"TODO"}"#,
+            ),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"abc","status":"TODO"}"#,
+            ),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"abc","status":"PROCESSING"}"#,
+            ),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"abc","status":"SUCCESS"}"#,
+            ),
+        ])
+        .await;
+        let client =
+            DigiwebClient::new(test_config(&server.base_url, "/status/{request_id}", 1, 5))
+                .expect("client");
+        let mut logger = test_logger();
+
+        let (_request_id, status, _message) = client
+            .upsert_plu(&test_token(), &test_payload(), &mut logger)
+            .await
+            .expect("upsert");
+
+        assert_eq!(status, ProcessingStatus::Success);
+        assert_eq!(server.handled_requests().await, 4);
     }
 
     #[tokio::test]
@@ -1129,6 +1308,20 @@ mod tests {
         AuditLogger::create(&path).expect("logger")
     }
 
+    #[test]
+    fn html_response_body_logging_is_bounded() {
+        let body = format!(
+            "<html><body><app-root></app-root>{}</body></html>",
+            "x".repeat(2_000)
+        );
+
+        let sanitized = sanitize_response_body(&body);
+
+        assert!(sanitized.contains("<app-root>"));
+        assert!(sanitized.contains("<truncated>"));
+        assert!(sanitized.chars().count() < 600);
+    }
+
     fn raw_response(
         status_code: u16,
         reason: &str,
@@ -1153,6 +1346,7 @@ mod tests {
     struct TestServer {
         base_url: String,
         handled_requests: std::sync::Arc<tokio::sync::Mutex<usize>>,
+        request_lines: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
     }
 
     impl TestServer {
@@ -1163,26 +1357,36 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let addr = listener.local_addr().expect("addr");
             let handled_requests = std::sync::Arc::new(tokio::sync::Mutex::new(0));
+            let request_lines = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
             let handled_requests_task = handled_requests.clone();
+            let request_lines_task = request_lines.clone();
             tokio::spawn(async move {
                 for response in responses {
                     let Ok((mut stream, _peer)) = listener.accept().await else {
                         return;
                     };
                     let mut buffer = [0_u8; 4096];
-                    let _ = stream.read(&mut buffer).await;
+                    let bytes_read = stream.read(&mut buffer).await.unwrap_or_default();
                     *handled_requests_task.lock().await += 1;
+                    let request_text = String::from_utf8_lossy(&buffer[..bytes_read]);
+                    let request_line = request_text.lines().next().unwrap_or_default().to_string();
+                    request_lines_task.lock().await.push(request_line);
                     let _ = stream.write_all(response.as_bytes()).await;
                 }
             });
             Self {
                 base_url: format!("http://{addr}"),
                 handled_requests,
+                request_lines,
             }
         }
 
         async fn handled_requests(&self) -> usize {
             *self.handled_requests.lock().await
+        }
+
+        async fn request_lines(&self) -> Vec<String> {
+            self.request_lines.lock().await.clone()
         }
     }
 }

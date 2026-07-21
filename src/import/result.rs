@@ -42,6 +42,7 @@ impl FinalStatus {
 #[derive(Debug, Default)]
 pub struct ImportSummary {
     pub discovered: usize,
+    pub submitted: usize,
     pub succeeded: usize,
     pub failed: usize,
     pub skipped: usize,
@@ -67,6 +68,7 @@ mod tests {
     fn final_status_success_exit_zero() {
         let summary = ImportSummary {
             discovered: 1,
+            submitted: 1,
             succeeded: 1,
             failed: 0,
             skipped: 0,
@@ -82,6 +84,7 @@ mod tests {
     fn final_status_partial_failure_exit_one() {
         let summary = ImportSummary {
             discovered: 2,
+            submitted: 2,
             succeeded: 1,
             failed: 1,
             skipped: 0,
@@ -97,6 +100,7 @@ mod tests {
     fn final_status_unknown_exit_one() {
         let summary = ImportSummary {
             discovered: 1,
+            submitted: 1,
             succeeded: 0,
             failed: 0,
             skipped: 0,

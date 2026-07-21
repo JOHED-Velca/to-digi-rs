@@ -46,6 +46,7 @@ impl AuditLogger {
     pub fn final_success(
         &mut self,
         discovered: usize,
+        submitted: usize,
         succeeded: usize,
         failed: usize,
         skipped: usize,
@@ -56,6 +57,7 @@ impl AuditLogger {
         self.line("==================================================")?;
         self.kv("FINAL STATUS", status)?;
         self.kv("PLUs discovered", &discovered.to_string())?;
+        self.kv("PLUs submitted", &submitted.to_string())?;
         self.kv("PLUs successfully imported", &succeeded.to_string())?;
         self.kv("PLUs failed", &failed.to_string())?;
         self.kv("PLUs skipped", &skipped.to_string())?;
@@ -123,11 +125,12 @@ mod tests {
         let mut logger = AuditLogger::create(&path).expect("logger");
 
         logger
-            .final_success(1, 1, 0, 0, 0, "SUCCESS")
+            .final_success(1, 1, 1, 0, 0, 0, "SUCCESS")
             .expect("final");
 
         let contents = fs::read_to_string(path).expect("read");
         assert!(contents.contains("FINAL STATUS: SUCCESS"));
+        assert!(contents.contains("PLUs submitted: 1"));
         assert!(contents.contains("PLUs successfully imported: 1"));
     }
 }

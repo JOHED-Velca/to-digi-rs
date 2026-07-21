@@ -108,6 +108,7 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
             dataset.plu_rows.len(),
             0,
             0,
+            0,
             dataset.plu_rows.len(),
             0,
             "SUCCESS",
@@ -286,6 +287,7 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
     let final_status = summary.final_status();
     logger.final_success(
         summary.discovered,
+        summary.submitted,
         summary.succeeded,
         summary.failed,
         summary.skipped,
