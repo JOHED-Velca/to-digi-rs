@@ -1,11 +1,11 @@
 [digiweb]
-base_url = "https://192.168.0.150"
+base_url = "https://DIGIWEB_HOST_OR_IP"
 client_id = "digi"
 client_secret = ""
 log_credentials_for_testing = false
-token_url = "https://192.168.0.150/auth/realms/skypro/protocol/openid-connect/token"
+token_url = "https://DIGIWEB_HOST_OR_IP/auth/realms/skypro/protocol/openid-connect/token"
 store_number = 1
-allow_invalid_certificates = true
+allow_invalid_certificates = false
 plu_upsert_path = "/api/v1/third-party/plus/write"
 request_status_path_template = "/api/thirdpartylinker/api/v1/requests/{request_id}"
 plu_barcode_type = ""
@@ -17,9 +17,9 @@ poll_interval_seconds = 2
 poll_timeout_seconds = 120
 
 [import]
-continue_after_record_failure = true
-send_only_first_plu = false
-dry_run_inspect_only = false
+continue_after_record_failure = false
+send_only_first_plu = true
+dry_run_inspect_only = true
 write_payload_preview = true
 
 [mapping]

@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.0
+
+- One-command importer execution
+- Portable deployment directory
+- Docker Compose-based runtime
+- Automatic bind-mount and host-network handling
+- Automatic UID/GID handling
+- Timestamped output archiving
+- GHCR release-image workflow
+- Portable deployment bundle
+- Offline image fallback
+
 ## v0.2.1
 
 - Accurate status and skip reporting

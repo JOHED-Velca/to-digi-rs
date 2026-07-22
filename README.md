@@ -6,7 +6,7 @@ It reads only `./plu.mdb`, exports supported Access tables with `mdbtools`, norm
 
 ## Current Stable Workflow
 
-Version `0.2.1` preserves the confirmed import path:
+Version `0.3.0` keeps the confirmed importer behavior and adds one-command container deployment:
 
 ```text
 plu.mdb
@@ -19,55 +19,176 @@ plu.mdb
 -> final SUCCESS/FAIL/unknown-status summary
 ```
 
-The importer keeps source-file safety strict: it opens exactly `./plu.mdb` read-only, rejects symbolic links, does not scan for alternate databases, and never modifies the MDB.
+Confirmed behavior remains unchanged: exact filename `plu.mdb`, read-only MDB access, `Pludata` and `PluIng` mappings, department/group normalization, group `997`, price and barcode mappings, ingredient/nutrition mapping, sequential submission, secret redaction, one-shot execution, no deletion, and no automatic department or group creation.
 
-The Docker runtime model uses `/work` as the working directory:
+## Quick Deployment
+
+The v0.3.0 deployment bundle lets the operator run the importer with:
 
 ```bash
-docker build -t to-digi-rs:0.2.1 .
-
-docker run --rm \
-  --network host \
-  -v "$PWD/work:/work" \
-  -e DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator' \
-  to-digi-rs:0.2.1
+./run.sh
 ```
 
-The image contains the release binary, `mdbtools`, CA certificates, and required Linux runtime libraries. It does not contain customer MDB files, real configuration, credentials, logs, Rust build artifacts, or the Rust toolchain.
+No long Docker command is required.
+
+1. Download and extract `to-digi-rs-deploy-v0.3.0.tar.gz`.
+2. Copy `config.example.toml` to `config.toml`.
+3. Fill in customer-specific DIGIweb values.
+4. Place the source MDB beside `run.sh` using the exact filename `plu.mdb`.
+5. Log in to GHCR if the package is private.
+6. Run `./run.sh`.
+7. Read the printed log path.
+
+Prepared directory:
+
+```text
+to-digi-rs-deploy/
+|-- compose.yaml
+|-- run.sh
+|-- config.toml
+|-- plu.mdb
+`-- output/
+```
+
+The template lives in [deploy](deploy). It does not include a real `config.toml`, real MDB, credentials, logs, or payload previews.
+
+## Build The Deployment Bundle
+
+Create the operator bundle locally:
+
+```bash
+bash scripts/package-deploy.sh
+```
+
+The archive is written to:
+
+```text
+target/release-bundles/to-digi-rs-deploy-v0.3.0.tar.gz
+```
+
+The archive contains only:
+
+```text
+to-digi-rs-deploy/
+|-- compose.yaml
+|-- run.sh
+|-- config.example.toml
+|-- README.md
+`-- output/
+```
+
+## GHCR Image
+
+The release image name is:
+
+```text
+ghcr.io/johed-velca/to-digi-rs:0.3.0
+```
+
+The deployment Compose file defaults to that image, but the image can be overridden without editing `compose.yaml`:
+
+```bash
+TO_DIGI_RS_IMAGE=to-digi-rs:0.3.0 ./run.sh
+```
+
+## GHCR Login
+
+If the GHCR package is private, authenticate the Ubuntu VM with a token that has only `read:packages` or the minimum required pull access:
+
+```bash
+read -rsp "GitHub package token: " GHCR_TOKEN
+echo
+printf '%s' "$GHCR_TOKEN" |
+    docker login ghcr.io \
+        --username JOHED-Velca \
+        --password-stdin
+unset GHCR_TOKEN
+```
+
+Do not commit the token, pass it as a command-line argument, or put it in `config.toml`. Docker stores the login for later pulls.
+
+## Normal Execution
+
+From the prepared deployment directory:
+
+```bash
+./run.sh
+```
+
+`run.sh` resolves its own directory, checks Docker and Compose, validates `config.toml` and exact `plu.mdb`, exports the invoking UID/GID, invokes `docker compose run --rm importer`, preserves the importer exit code, and archives outputs.
+
+The script uses host networking, a bind mount to `/work`, no fixed host path, no container name, no restart policy, no named volumes, no Docker socket mount, and no changes to the DIGIweb Compose project.
+
+## Local Image Test
+
+Build a local image without touching GHCR:
+
+```bash
+docker build --tag to-digi-rs:0.3.0 .
+```
+
+Prepare a deployment directory with `compose.yaml`, `run.sh`, `config.toml`, `plu.mdb`, and `output/`, then run:
+
+```bash
+TO_DIGI_RS_IMAGE=to-digi-rs:0.3.0 ./run.sh
+```
+
+## Offline Image Fallback
+
+On a machine that has the image:
+
+```bash
+docker save to-digi-rs:0.3.0 -o to-digi-rs-image-0.3.0.tar
+```
+
+On the customer Ubuntu VM:
+
+```bash
+docker load -i to-digi-rs-image-0.3.0.tar
+TO_DIGI_RS_IMAGE=to-digi-rs:0.3.0 ./run.sh
+```
+
+GHCR is not required after the image is loaded locally.
+
+## Output Locations
+
+Every run gets a new timestamped output directory:
+
+```text
+output/
+|-- run-20260722-143000/
+|   |-- logs.txt
+|   `-- payload-previews/
+`-- run-20260722-150500/
+    |-- logs.txt
+    `-- payload-previews/
+```
+
+Previous output is preserved. The script prints the final log path. If the importer fails before creating `logs.txt`, the script reports that clearly.
 
 ## Configuration Reference
 
-Important `config.toml` fields:
+Start from `deploy/config.example.toml`:
 
 ```toml
 [digiweb]
-base_url = "https://192.168.0.150"
+base_url = "https://DIGIWEB_HOST_OR_IP"
 client_id = "digi"
 client_secret = ""
 log_credentials_for_testing = false
-token_url = "https://192.168.0.150/auth/realms/skypro/protocol/openid-connect/token"
+token_url = "https://DIGIWEB_HOST_OR_IP/auth/realms/skypro/protocol/openid-connect/token"
 store_number = 1
-allow_invalid_certificates = true
+allow_invalid_certificates = false
 plu_upsert_path = "/api/v1/third-party/plus/write"
 request_status_path_template = "/api/thirdpartylinker/api/v1/requests/{request_id}"
 plu_barcode_type = ""
 plu_barcode_ref_no = ""
 
-[timeouts]
-request_seconds = 30
-poll_interval_seconds = 2
-poll_timeout_seconds = 120
-
 [import]
-continue_after_record_failure = true
-send_only_first_plu = false
-dry_run_inspect_only = false
+continue_after_record_failure = false
+send_only_first_plu = true
+dry_run_inspect_only = true
 write_payload_preview = true
-
-[mapping]
-main_plu_table = "Pludata"
-ingredient_table = "PluIng"
-nutrition_table = ""
 ```
 
 Supply secrets with:
@@ -76,11 +197,11 @@ Supply secrets with:
 export DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator'
 ```
 
-`DIGIWEB_CLIENT_SECRET` takes precedence over `digiweb.client_secret`. The config value is a development fallback only. The application does not log client secrets, full access tokens, authorization headers, passwords, or secret-bearing request bodies.
+`DIGIWEB_CLIENT_SECRET` takes precedence over `digiweb.client_secret`. The config value is a development fallback only. Secrets, tokens, and authorization headers are not logged.
 
 ## Dry-Run Inspection
 
-Use inspection mode to verify the container, `mdbtools`, `plu.mdb`, schema export, normalization, and validation without authentication or API traffic:
+Use inspection mode to validate MDB extraction and normalization without authentication or API traffic:
 
 ```toml
 [import]
@@ -88,24 +209,6 @@ continue_after_record_failure = false
 send_only_first_plu = true
 dry_run_inspect_only = true
 write_payload_preview = true
-```
-
-Run:
-
-```bash
-docker run --rm -v "$PWD/work:/work" to-digi-rs:0.2.1
-```
-
-The final summary should use inspection wording, for example:
-
-```text
-Source rows discovered: 5
-Empty source placeholders ignored: 1
-Normalized PLUs: 4
-Valid PLUs identified: 4
-PLUs submitted: 0
-Import intentionally disabled by inspection-only mode.
-FINAL STATUS: SUCCESS
 ```
 
 ## First-PLU Test
@@ -120,11 +223,11 @@ dry_run_inspect_only = false
 write_payload_preview = true
 ```
 
-Only the first valid normalized PLU is submitted. Remaining valid PLUs are reported as intentionally skipped by the first-PLU limit; that intentional exclusion does not make the run `COMPLETED_WITH_ERRORS`.
+Only the first valid normalized PLU is submitted. Remaining valid PLUs are intentionally skipped by the first-PLU limit and do not make the run `COMPLETED_WITH_ERRORS`.
 
 ## Full Import
 
-Use this for the controlled sample import after prerequisites are confirmed:
+Use this after prerequisites are confirmed:
 
 ```toml
 [import]
@@ -134,36 +237,13 @@ dry_run_inspect_only = false
 write_payload_preview = true
 ```
 
-This submits all valid PLUs sequentially and continues after an individual record failure so the batch summary is complete.
-
-For a production-safe stop-on-error run:
-
-```toml
-[import]
-continue_after_record_failure = false
-send_only_first_plu = false
-dry_run_inspect_only = false
-write_payload_preview = true
-```
-
-If a PLU fails, later selected PLUs are counted as not attempted after failure, not as confirmed failures.
-
 ## Payload Previews
 
-When `write_payload_preview = true`, the importer writes the exact sanitized JSON payload submitted for each selected PLU:
+When `write_payload_preview = true`, the importer writes pretty JSON payload previews under `/work/payload-previews/`. `run.sh` archives them with the matching timestamped run directory.
 
-```text
-/work/payload-previews/plu-1.json
-/work/payload-previews/plu-4.json
-/work/payload-previews/plu-2.json
-/work/payload-previews/plu-3.json
-```
+Preview files contain no credentials, tokens, or authorization headers.
 
-Preview files are pretty-printed and contain no credentials, tokens, or authorization headers. At the start of each preview-enabled run, old `payload-previews/*.json` files are removed so the directory reflects the current run.
-
-When `write_payload_preview = false`, the importer does not create preview files.
-
-## Understanding Exit Codes
+## Exit Codes
 
 ```text
 0 = complete success
@@ -173,7 +253,7 @@ When `write_payload_preview = false`, the importer does not create preview files
 4 = unexpected internal failure
 ```
 
-## Understanding Final Statuses
+## Final Statuses
 
 `SUCCESS` means every selected PLU finished successfully. Intentional first-PLU exclusions do not change this status.
 
@@ -181,39 +261,37 @@ When `write_payload_preview = false`, the importer does not create preview files
 
 `FAILED` means a fatal startup, configuration, source parsing, validation, authentication, or connection stage prevented the import from running normally.
 
-`SUBMITTED_STATUS_UNKNOWN` is used when DIGIweb accepted a PLU request but the importer could not confirm the final asynchronous result. Do not blindly resubmit that PLU; use the logged request ID to investigate.
+`SUBMITTED_STATUS_UNKNOWN` means DIGIweb accepted a PLU request but the importer could not confirm the final asynchronous result. Do not blindly resubmit that PLU; use the logged request ID to investigate.
 
-## Updating an Existing PLU
+## Updating An Existing PLU
 
 The confirmed DIGIweb endpoint behaves as an upsert. Re-running the same valid PLU may update the existing active PLU.
 
-The importer does not directly delete inactive historical records. Failed early development attempts may leave inactive records in DIGIweb. Database cleanup must not be performed automatically by this importer; use approved DIGIweb functionality or a controlled administrator procedure.
+The importer does not directly delete inactive historical records. Failed early development attempts may leave inactive records in DIGIweb. Cleanup must use approved DIGIweb functionality or a controlled administrator procedure, not this importer.
 
 ## Troubleshooting
 
-If startup fails before authentication, check that `/work/plu.mdb` exists, is a regular file, is not a symbolic link, and that the container can run `mdb-tables`, `mdb-schema`, and `mdb-export`.
+`Docker not installed`: install Docker Engine.
 
-If authentication fails, confirm `base_url`, `token_url`, `client_id`, and `DIGIWEB_CLIENT_SECRET`. The log intentionally shows only safe credential diagnostics.
+`Docker daemon not running`: start Docker or add the user to the Docker group, then open a new shell.
 
-If PLU submission succeeds but polling is unknown, inspect the request ID and status endpoint logs. Normal polling logs are concise; detailed sanitized bodies are logged only for decode failures, unexpected response shapes, failed statuses, or non-2xx responses.
+`Compose plugin missing`: install the modern `docker compose` plugin. The old `docker-compose` command is not used.
 
-If DIGIweb returns a business failure, the final summary shows a concise message such as `barcodetype_uuid is null`, while detailed sanitized diagnostics remain in `logs.txt`.
+`GHCR login required` or `image pull denied`: log in with a `read:packages` token or use the offline image fallback.
 
-## DIGIweb Prerequisites
+`Missing config.toml`: copy `config.example.toml` to `config.toml`.
 
-DIGIweb must already contain the referenced store, department, and each referenced group under the correct department. The importer does not create departments or groups and does not query PostgreSQL directly.
+`Missing plu.mdb`: place the MDB beside `run.sh` using the exact lowercase filename.
 
-For the current sample source, department reference `1` and group reference `997` must exist and be active.
+`Root-owned output`: run `./run.sh` as the intended Linux user. The runner passes UID/GID into Compose.
 
-## MDB Mapping
+`DIGIweb connection failure`: verify `base_url`, `token_url`, network routing, and certificate settings.
 
-The confirmed source tables are `Pludata` for PLUs and `PluIng` for both ingredients and nutrition data. `PluIng` rows are joined to PLUs by normalized `Plucode + Department`.
+`Self-signed certificate`: set `allow_invalid_certificates = true` only when required. The importer logs a warning when certificate validation is disabled.
 
-Confirmed mappings include department normalization, group reference normalization with default group `997` for empty main-group values, price-category mapping, barcode-format mapping, barcode-data construction, ingredient formatting, and nutrition-facts mapping.
+`Nonzero importer exit code`: open the printed `logs.txt` path and inspect the final section.
 
-Unknown source fields are documented in code rather than guessed into DIGIweb payloads.
-
-## Native Development
+## Development
 
 On Ubuntu without Docker:
 
@@ -222,19 +300,30 @@ sudo apt install mdbtools
 cargo run
 ```
 
-Running from Windows PowerShell builds a Windows executable, which cannot see `mdbtools` installed inside WSL. Use Docker or run Cargo inside Linux/WSL when validating `mdbtools`.
+Running Cargo from Windows PowerShell builds a Windows executable, which cannot see `mdbtools` installed inside WSL. Use Docker or run Cargo inside Linux/WSL when validating `mdbtools`.
 
-## Remote Ubuntu Transfer
-
-Build and save the image without using a public registry:
+Run checks:
 
 ```bash
-docker build -t to-digi-rs:0.2.1 .
-docker save to-digi-rs:0.2.1 -o to-digi-rs-image-0.2.1.tar
+cargo fmt --check
+cargo test
+bash scripts/test-deploy.sh
 ```
 
-Transfer `to-digi-rs-image-0.2.1.tar` to the remote Ubuntu device, then load it:
+Validate Compose from the deployment template:
 
 ```bash
-docker load -i to-digi-rs-image-0.2.1.tar
+cd deploy
+LOCAL_UID="$(id -u)" LOCAL_GID="$(id -g)" docker compose config
 ```
+
+## Container Publishing
+
+`.github/workflows/publish-container.yml` is configured for semantic-version tags such as `v0.3.0` and manual dispatch. It uses `GITHUB_TOKEN` to publish:
+
+```text
+ghcr.io/johed-velca/to-digi-rs:0.3.0
+ghcr.io/johed-velca/to-digi-rs:v0.3.0
+```
+
+It does not publish `latest` automatically.
