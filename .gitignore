@@ -1,5 +1,14 @@
 /target/
 /logs.txt
+/payload-previews/
+/output/
+/config.toml
 *.mdb
 *.accdb
 *.ldb
+deploy/config.toml
+deploy/plu.mdb
+deploy/logs.txt
+deploy/payload-previews/
+deploy/output/*
+!deploy/output/.gitkeep

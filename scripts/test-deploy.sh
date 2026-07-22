@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TEST_ROOT="$(mktemp -d)"
+
+cleanup() {
+    rm -rf "$TEST_ROOT"
+}
+trap cleanup EXIT
+
+fail() {
+    printf 'FAIL: %s\n' "$1" >&2
+    exit 1
+}
+
+assert_contains() {
+    local file="$1"
+    local text="$2"
+    grep -Fq "$text" "$file" || fail "expected '$text' in $file"
+}
+
+assert_not_contains() {
+    local file="$1"
+    local text="$2"
+    ! grep -Fq "$text" "$file" || fail "did not expect '$text' in $file"
+}
+
+make_fake_docker() {
+    local path="$1"
+    cat >"$path" <<'FAKE'
+#!/usr/bin/env bash
+set -u
+
+log="${FAKE_DOCKER_LOG:?}"
+printf 'ARGS:%s\n' "$*" >>"$log"
+
+if [ "$#" -eq 1 ] && [ "$1" = "info" ]; then
+    exit "${FAKE_DOCKER_INFO_EXIT:-0}"
+fi
+
+if [ "$#" -eq 2 ] && [ "$1" = "compose" ] && [ "$2" = "version" ]; then
+    exit "${FAKE_DOCKER_COMPOSE_VERSION_EXIT:-0}"
+fi
+
+if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
+    if printf '%s\n' "$*" | grep -Fq ' config'; then
+        exit 0
+    fi
+    printf 'LOCAL_UID=%s\n' "${LOCAL_UID:-}" >>"$log"
+    printf 'LOCAL_GID=%s\n' "${LOCAL_GID:-}" >>"$log"
+    printf 'TO_DIGI_RS_IMAGE=%s\n' "${TO_DIGI_RS_IMAGE:-}" >>"$log"
+    printf 'compose-run-ok\n' >logs.txt
+    mkdir -p payload-previews
+    printf '{"pluno":1}\n' >payload-previews/plu-1.json
+    exit "${FAKE_IMPORT_EXIT:-0}"
+fi
+
+exit 0
+FAKE
+    chmod +x "$path"
+}
+
+copy_deploy() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cp "$ROOT_DIR/deploy/compose.yaml" "$dir/compose.yaml"
+    cp "$ROOT_DIR/deploy/run.sh" "$dir/run.sh"
+    cp "$ROOT_DIR/deploy/config.example.toml" "$dir/config.toml"
+    mkdir -p "$dir/output"
+    printf 'mdb\n' >"$dir/plu.mdb"
+    chmod +x "$dir/run.sh"
+}
+
+run_with_fake_docker() {
+    local deploy_dir="$1"
+    local output_file="$2"
+    local fake_dir="$TEST_ROOT/fake-bin"
+    mkdir -p "$fake_dir"
+    make_fake_docker "$fake_dir/docker"
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-docker.log" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    PATH="$fake_dir:$PATH" \
+    "$deploy_dir/run.sh" >"$output_file" 2>&1
+}
+
+test_resolves_own_directory_and_archives_output() {
+    local deploy_dir="$TEST_ROOT/deploy-a"
+    local output="$TEST_ROOT/output-a.txt"
+    copy_deploy "$deploy_dir"
+    mkdir -p "$TEST_ROOT/elsewhere"
+    (cd "$TEST_ROOT/elsewhere" && run_with_fake_docker "$deploy_dir" "$output")
+
+    assert_contains "$output" "Importer exit code: 0"
+    assert_contains "$output" "$deploy_dir/output/run-"
+    [ -f "$deploy_dir"/output/run-*/logs.txt ] || fail "logs.txt was not archived"
+    [ -f "$deploy_dir"/output/run-*/payload-previews/plu-1.json ] || fail "payload preview was not archived"
+    [ ! -f "$deploy_dir/logs.txt" ] || fail "root logs.txt was not left behind"
+}
+
+test_missing_config_fails_clearly() {
+    local deploy_dir="$TEST_ROOT/deploy-missing-config"
+    local output="$TEST_ROOT/output-missing-config.txt"
+    copy_deploy "$deploy_dir"
+    rm "$deploy_dir/config.toml"
+    set +e
+    run_with_fake_docker "$deploy_dir" "$output"
+    local code=$?
+    set -e
+    [ "$code" -eq 2 ] || fail "missing config exit code was $code"
+    assert_contains "$output" "Missing required configuration file"
+}
+
+test_missing_plu_fails_clearly() {
+    local deploy_dir="$TEST_ROOT/deploy-missing-plu"
+    local output="$TEST_ROOT/output-missing-plu.txt"
+    copy_deploy "$deploy_dir"
+    rm "$deploy_dir/plu.mdb"
+    set +e
+    run_with_fake_docker "$deploy_dir" "$output"
+    local code=$?
+    set -e
+    [ "$code" -eq 2 ] || fail "missing plu exit code was $code"
+    assert_contains "$output" "Missing required source database"
+}
+
+test_symlinked_plu_is_rejected_when_supported() {
+    local deploy_dir="$TEST_ROOT/deploy-symlink-plu"
+    local output="$TEST_ROOT/output-symlink-plu.txt"
+    copy_deploy "$deploy_dir"
+    rm "$deploy_dir/plu.mdb"
+    if ! ln -s "$TEST_ROOT/not-real.mdb" "$deploy_dir/plu.mdb" 2>/dev/null; then
+        return 0
+    fi
+    set +e
+    run_with_fake_docker "$deploy_dir" "$output"
+    local code=$?
+    set -e
+    [ "$code" -eq 2 ] || fail "symlink plu exit code was $code"
+    assert_contains "$output" "not a symbolic link"
+}
+
+test_missing_docker_fails_clearly() {
+    local deploy_dir="$TEST_ROOT/deploy-no-docker"
+    local output="$TEST_ROOT/output-no-docker.txt"
+    copy_deploy "$deploy_dir"
+    set +e
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 DOCKER_BIN="$TEST_ROOT/does-not-exist" "$deploy_dir/run.sh" >"$output" 2>&1
+    local code=$?
+    set -e
+    [ "$code" -eq 2 ] || fail "missing docker exit code was $code"
+    assert_contains "$output" "Required command not found"
+}
+
+test_docker_daemon_failure_fails_clearly() {
+    local deploy_dir="$TEST_ROOT/deploy-daemon-fail"
+    local output="$TEST_ROOT/output-daemon-fail.txt"
+    copy_deploy "$deploy_dir"
+    local fake_dir="$TEST_ROOT/fake-daemon-bin"
+    mkdir -p "$fake_dir"
+    make_fake_docker "$fake_dir/docker"
+    set +e
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-daemon.log" FAKE_DOCKER_INFO_EXIT=1 \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
+    "$deploy_dir/run.sh" >"$output" 2>&1
+    local code=$?
+    set -e
+    [ "$code" -eq 2 ] || fail "daemon failure exit code was $code"
+    assert_contains "$output" "Docker daemon is not reachable"
+}
+
+test_compose_plugin_failure_fails_clearly() {
+    local deploy_dir="$TEST_ROOT/deploy-compose-fail"
+    local output="$TEST_ROOT/output-compose-fail.txt"
+    copy_deploy "$deploy_dir"
+    local fake_dir="$TEST_ROOT/fake-compose-bin"
+    mkdir -p "$fake_dir"
+    make_fake_docker "$fake_dir/docker"
+    set +e
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-compose.log" FAKE_DOCKER_COMPOSE_VERSION_EXIT=1 \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
+    "$deploy_dir/run.sh" >"$output" 2>&1
+    local code=$?
+    set -e
+    [ "$code" -eq 2 ] || fail "compose failure exit code was $code"
+    assert_contains "$output" "Docker Compose plugin is not available"
+}
+
+test_image_override_uid_gid_and_exit_code_are_preserved() {
+    local deploy_dir="$TEST_ROOT/deploy-exit"
+    local output="$TEST_ROOT/output-exit.txt"
+    local log="$TEST_ROOT/fake-docker.log"
+    local fake_dir="$TEST_ROOT/fake-exit-bin"
+    copy_deploy "$deploy_dir"
+    mkdir -p "$fake_dir"
+    make_fake_docker "$fake_dir/docker"
+    set +e
+    FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.3.0 \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
+    "$deploy_dir/run.sh" >"$output" 2>&1
+    local code=$?
+    set -e
+    [ "$code" -eq 7 ] || fail "import exit code was not preserved: $code"
+    assert_contains "$output" "Importer exit code: 7"
+    assert_contains "$log" "TO_DIGI_RS_IMAGE=to-digi-rs:0.3.0"
+    assert_contains "$log" "LOCAL_UID="
+    assert_contains "$log" "LOCAL_GID="
+}
+
+test_existing_output_is_preserved() {
+    local deploy_dir="$TEST_ROOT/deploy-preserve"
+    local output="$TEST_ROOT/output-preserve.txt"
+    copy_deploy "$deploy_dir"
+    mkdir -p "$deploy_dir/output/run-old"
+    printf 'old\n' >"$deploy_dir/output/run-old/logs.txt"
+    run_with_fake_docker "$deploy_dir" "$output"
+
+    [ -f "$deploy_dir/output/run-old/logs.txt" ] || fail "existing output was deleted"
+}
+
+test_package_archive_contains_only_expected_files() {
+    local archive
+    archive="$(TO_DIGI_RS_VERSION=0.3.0 "$ROOT_DIR/scripts/package-deploy.sh")"
+    [ -f "$archive" ] || fail "archive was not created"
+    local listing="$TEST_ROOT/archive-list.txt"
+    tar -tzf "$archive" | sort >"$listing"
+
+    assert_contains "$listing" "to-digi-rs-deploy/compose.yaml"
+    assert_contains "$listing" "to-digi-rs-deploy/config.example.toml"
+    assert_contains "$listing" "to-digi-rs-deploy/run.sh"
+    assert_contains "$listing" "to-digi-rs-deploy/README.md"
+    assert_contains "$listing" "to-digi-rs-deploy/output/"
+    assert_not_contains "$listing" "to-digi-rs-deploy/config.toml"
+    assert_not_contains "$listing" "to-digi-rs-deploy/plu.mdb"
+    assert_not_contains "$listing" "target/"
+    assert_not_contains "$listing" ".git/"
+}
+
+test_resolves_own_directory_and_archives_output
+test_missing_config_fails_clearly
+test_missing_plu_fails_clearly
+test_symlinked_plu_is_rejected_when_supported
+test_missing_docker_fails_clearly
+test_docker_daemon_failure_fails_clearly
+test_compose_plugin_failure_fails_clearly
+test_image_override_uid_gid_and_exit_code_are_preserved
+test_existing_output_is_preserved
+test_package_archive_contains_only_expected_files
+
+printf 'deployment script tests passed\n'
