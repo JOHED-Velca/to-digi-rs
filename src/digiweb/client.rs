@@ -169,7 +169,7 @@ impl DigiwebClient {
                 message,
             } => {
                 if let Some(label) = progress_label {
-                    logger.line(format!("{label} Submitted request: {request_id}"))?;
+                    logger.line(format!("{label} Request submitted: {request_id}"))?;
                 }
                 if self.has_configured_status_path() {
                     return match self
@@ -306,23 +306,39 @@ impl DigiwebClient {
             )
             .await?;
             if let Some(label) = progress_label {
-                logger.line(format!(
-                    "{label} HTTP status: {}",
-                    format_status(captured.status)
-                ))?;
+                logger.line(format!("{label} Polling request {status_reference}"))?;
+                logger.line(format!("{label} HTTP {}", format_status(captured.status)))?;
             }
             if !captured.status.is_success() {
+                logger.kv(
+                    "Detailed non-success status response body",
+                    &sanitize_response_body(&captured.body),
+                )?;
                 return Err(http_error(
                     &format!("status request {status_reference}"),
                     &captured,
                 ));
             }
-            let status_response = interpret_status_response(&captured)?;
+            let status_response = match interpret_status_response(&captured) {
+                Ok(status_response) => status_response,
+                Err(err) => {
+                    logger.kv(
+                        "Detailed undecodable status response body",
+                        &sanitize_response_body(&captured.body),
+                    )?;
+                    return Err(err);
+                }
+            };
             if let Some(label) = progress_label {
-                logger.line(format!(
-                    "{label} Status: {}",
-                    status_response.status.as_str()
-                ))?;
+                let status_for_log = status_text_for_log(&captured)
+                    .unwrap_or_else(|| status_response.status.as_str().to_string());
+                logger.line(format!("{label} DIGIweb status: {}", status_for_log))?;
+            }
+            if status_response.status == ProcessingStatus::Fail {
+                logger.kv(
+                    "Detailed failed status response body",
+                    &sanitize_response_body(&captured.body),
+                )?;
             }
             if status_response.status != ProcessingStatus::Processing {
                 return Ok(status_response);
@@ -654,6 +670,17 @@ fn parse_async_status(value: &Value) -> AsyncRequestStatusResponse {
         method: json_text(value, &["method"]),
         message: json_text(value, &["message", "error", "detail", "title"]),
     }
+}
+
+fn status_text_for_log(response: &CapturedHttpResponse) -> Option<String> {
+    if response.body_empty || is_html_response(response) {
+        return None;
+    }
+    let value = serde_json::from_str::<Value>(&response.body).ok()?;
+    let status = parse_async_status(&value)
+        .status
+        .or_else(|| parse_async_status(&value).state)?;
+    Some(status.trim().to_string()).filter(|value| !value.is_empty())
 }
 
 fn concise_backend_message(message: &str) -> String {
@@ -1247,6 +1274,57 @@ mod tests {
 
         assert_eq!(status, ProcessingStatus::Success);
         assert_eq!(server.handled_requests().await, 4);
+    }
+
+    #[tokio::test]
+    async fn successful_polling_logs_are_concise_without_full_bodies() {
+        let server = TestServer::start(vec![
+            raw_response(
+                201,
+                "Created",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"abc","status":"TODO"}"#,
+            ),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"abc","status":"TODO","record":{"large":"payload-body-should-not-repeat"}}"#,
+            ),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"abc","status":"PROCESSING","record":{"large":"payload-body-should-not-repeat"}}"#,
+            ),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"abc","status":"SUCCESS","record":{"large":"payload-body-should-not-repeat"}}"#,
+            ),
+        ])
+        .await;
+        let client =
+            DigiwebClient::new(test_config(&server.base_url, "/status/{request_id}", 1, 5))
+                .expect("client");
+        let (_dir, path, mut logger) = test_logger_with_path();
+
+        let (_request_id, status, _message) = client
+            .upsert_plu_with_progress(&test_token(), &test_payload(), &mut logger, "[1/1]")
+            .await
+            .expect("upsert");
+        logger.flush().expect("flush");
+        let contents = std::fs::read_to_string(path).expect("read log");
+
+        assert_eq!(status, ProcessingStatus::Success);
+        assert!(contents.contains("[1/1] Request submitted: abc"));
+        assert!(contents.contains("[1/1] HTTP 200 OK"));
+        assert!(contents.contains("[1/1] DIGIweb status: TODO"));
+        assert!(contents.contains("[1/1] DIGIweb status: PROCESSING"));
+        assert!(contents.contains("[1/1] DIGIweb status: SUCCESS"));
+        assert!(contents.contains("Sanitized raw response body: <omitted for routine polling>"));
+        assert!(!contents.contains("payload-body-should-not-repeat"));
     }
 
     #[tokio::test]

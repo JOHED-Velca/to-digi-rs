@@ -2,50 +2,129 @@
 
 `to-digi-rs` is a Linux-compatible, one-shot PLU importer for DIGIweb.
 
-It reads only `./plu.mdb`, exports supported Access tables with `mdbtools`, normalizes and validates PLU records, authenticates to DIGIweb, submits PLUs sequentially, writes `./logs.txt`, and exits.
+It reads only `./plu.mdb`, exports supported Access tables with `mdbtools`, normalizes and validates PLU records, authenticates to DIGIweb, submits PLUs sequentially through the Third-Party API, writes `./logs.txt`, and exits.
 
-## Docker Deployment Model
+## Current Stable Workflow
 
-The intended deployment artifact is a Docker image. The final runtime image contains:
-
-```text
-to-digi-rs release binary
-mdbtools
-ca-certificates
-required Linux runtime libraries
-```
-
-The image does not contain `plu.mdb`, customer data, real `config.toml`, credentials, tokens, `logs.txt`, Rust build artifacts, or the Rust toolchain.
-
-Build locally:
-
-```bash
-docker build -t to-digi-rs:0.2.0 .
-```
-
-Prepare a host work directory containing:
+Version `0.2.1` preserves the confirmed import path:
 
 ```text
 plu.mdb
-config.toml
+-> mdbtools inspection/export
+-> Pludata + PluIng normalization
+-> validation
+-> DIGIweb authentication
+-> POST /api/v1/third-party/plus/write
+-> GET /api/thirdpartylinker/api/v1/requests/{request_id}
+-> final SUCCESS/FAIL/unknown-status summary
 ```
 
-Run the container with that directory mounted as `/work`:
+The importer keeps source-file safety strict: it opens exactly `./plu.mdb` read-only, rejects symbolic links, does not scan for alternate databases, and never modifies the MDB.
+
+The Docker runtime model uses `/work` as the working directory:
 
 ```bash
+docker build -t to-digi-rs:0.2.1 .
+
 docker run --rm \
+  --network host \
   -v "$PWD/work:/work" \
   -e DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator' \
-  to-digi-rs:0.2.0
+  to-digi-rs:0.2.1
 ```
 
-The program reads `/work/plu.mdb`, reads `/work/config.toml`, writes `/work/logs.txt`, and exits with the application exit code.
+The image contains the release binary, `mdbtools`, CA certificates, and required Linux runtime libraries. It does not contain customer MDB files, real configuration, credentials, logs, Rust build artifacts, or the Rust toolchain.
 
-## First Full Import
+## Configuration Reference
 
-Version `0.2.0` is the first full-import release candidate. The small controlled sample `plu.mdb` contains five raw `Pludata` rows: PLU `0` is an empty placeholder and is ignored, while valid PLUs are processed sequentially in normalized source order: `1`, `4`, `2`, `3`.
+Important `config.toml` fields:
 
-Recommended sample configuration:
+```toml
+[digiweb]
+base_url = "https://192.168.0.150"
+client_id = "digi"
+client_secret = ""
+log_credentials_for_testing = false
+token_url = "https://192.168.0.150/auth/realms/skypro/protocol/openid-connect/token"
+store_number = 1
+allow_invalid_certificates = true
+plu_upsert_path = "/api/v1/third-party/plus/write"
+request_status_path_template = "/api/thirdpartylinker/api/v1/requests/{request_id}"
+plu_barcode_type = ""
+plu_barcode_ref_no = ""
+
+[timeouts]
+request_seconds = 30
+poll_interval_seconds = 2
+poll_timeout_seconds = 120
+
+[import]
+continue_after_record_failure = true
+send_only_first_plu = false
+dry_run_inspect_only = false
+write_payload_preview = true
+
+[mapping]
+main_plu_table = "Pludata"
+ingredient_table = "PluIng"
+nutrition_table = ""
+```
+
+Supply secrets with:
+
+```bash
+export DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator'
+```
+
+`DIGIWEB_CLIENT_SECRET` takes precedence over `digiweb.client_secret`. The config value is a development fallback only. The application does not log client secrets, full access tokens, authorization headers, passwords, or secret-bearing request bodies.
+
+## Dry-Run Inspection
+
+Use inspection mode to verify the container, `mdbtools`, `plu.mdb`, schema export, normalization, and validation without authentication or API traffic:
+
+```toml
+[import]
+continue_after_record_failure = false
+send_only_first_plu = true
+dry_run_inspect_only = true
+write_payload_preview = true
+```
+
+Run:
+
+```bash
+docker run --rm -v "$PWD/work:/work" to-digi-rs:0.2.1
+```
+
+The final summary should use inspection wording, for example:
+
+```text
+Source rows discovered: 5
+Empty source placeholders ignored: 1
+Normalized PLUs: 4
+Valid PLUs identified: 4
+PLUs submitted: 0
+Import intentionally disabled by inspection-only mode.
+FINAL STATUS: SUCCESS
+```
+
+## First-PLU Test
+
+Use this for the first real API test:
+
+```toml
+[import]
+continue_after_record_failure = false
+send_only_first_plu = true
+dry_run_inspect_only = false
+write_payload_preview = true
+```
+
+Only the first valid normalized PLU is submitted. Remaining valid PLUs are reported as intentionally skipped by the first-PLU limit; that intentional exclusion does not make the run `COMPLETED_WITH_ERRORS`.
+
+## Full Import
+
+Use this for the controlled sample import after prerequisites are confirmed:
 
 ```toml
 [import]
@@ -55,9 +134,9 @@ dry_run_inspect_only = false
 write_payload_preview = true
 ```
 
-This submits all valid PLUs sequentially and continues after an individual record failure so the whole small sample can be tested in one run.
+This submits all valid PLUs sequentially and continues after an individual record failure so the batch summary is complete.
 
-Production-safe alternative:
+For a production-safe stop-on-error run:
 
 ```toml
 [import]
@@ -67,238 +146,72 @@ dry_run_inspect_only = false
 write_payload_preview = true
 ```
 
-With this setting, the importer records the failed PLU and stops before submitting the next PLU. Remaining selected PLUs are reported as not attempted because processing stopped.
+If a PLU fails, later selected PLUs are counted as not attempted after failure, not as confirmed failures.
 
-Run the Docker full-import candidate with:
+## Payload Previews
 
-```bash
-docker run --rm \
-  --network host \
-  -v "$PWD/work:/work" \
-  -e DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator' \
-  to-digi-rs:0.2.0
+When `write_payload_preview = true`, the importer writes the exact sanitized JSON payload submitted for each selected PLU:
+
+```text
+/work/payload-previews/plu-1.json
+/work/payload-previews/plu-4.json
+/work/payload-previews/plu-2.json
+/work/payload-previews/plu-3.json
 ```
 
-When payload previews are enabled, the exact submitted JSON payloads are written to `/work/payload-previews/plu-N.json`. Preview files are overwritten on each run and never contain credentials or tokens.
+Preview files are pretty-printed and contain no credentials, tokens, or authorization headers. At the start of each preview-enabled run, old `payload-previews/*.json` files are removed so the directory reflects the current run.
 
-## Local Container Inspection
+When `write_payload_preview = false`, the importer does not create preview files.
 
-For a packaging/startup test that does not contact DIGIweb, set:
+## Understanding Exit Codes
 
-```toml
-[import]
-dry_run_inspect_only = true
-send_only_first_plu = true
-continue_after_record_failure = false
+```text
+0 = complete success
+1 = import completed but one or more submitted records failed or have unknown status
+2 = startup, configuration, source parsing, or validation failure
+3 = authentication or DIGIweb connection failure
+4 = unexpected internal failure
 ```
 
-Then run:
+## Understanding Final Statuses
 
-```bash
-docker run --rm -v "$PWD/work:/work" to-digi-rs:0.2.0
-```
+`SUCCESS` means every selected PLU finished successfully. Intentional first-PLU exclusions do not change this status.
 
-This verifies that the container starts, `mdb-tables`, `mdb-schema`, and `mdb-export` are available, `/work/plu.mdb` is the exact source file, MDB tables can be read, `Pludata` can be exported, `PluIng` can be exported when present, counts are logged, and `/work/logs.txt` can be written. No authentication or API request is attempted.
+`COMPLETED_WITH_ERRORS` means at least one selected PLU was confirmed failed, submitted with unknown final status, or left not attempted because stop-on-error was enabled.
 
-## Remote Ubuntu Transfer
+`FAILED` means a fatal startup, configuration, source parsing, validation, authentication, or connection stage prevented the import from running normally.
 
-Build and save the image without using a public registry:
+`SUBMITTED_STATUS_UNKNOWN` is used when DIGIweb accepted a PLU request but the importer could not confirm the final asynchronous result. Do not blindly resubmit that PLU; use the logged request ID to investigate.
 
-```bash
-docker build -t to-digi-rs:0.2.0 .
-docker save to-digi-rs:0.2.0 -o to-digi-rs-image-0.2.0.tar
-```
+## Updating an Existing PLU
 
-Transfer `to-digi-rs-image-0.2.0.tar` to the remote Ubuntu device, then load it:
+The confirmed DIGIweb endpoint behaves as an upsert. Re-running the same valid PLU may update the existing active PLU.
 
-```bash
-docker load -i to-digi-rs-image-0.2.0.tar
-```
+The importer does not directly delete inactive historical records. Failed early development attempts may leave inactive records in DIGIweb. Database cleanup must not be performed automatically by this importer; use approved DIGIweb functionality or a controlled administrator procedure.
 
-On the remote device, create a work directory containing the real `plu.mdb` and deployment `config.toml`, then run:
+## Troubleshooting
 
-```bash
-docker run --rm \
-  --network host \
-  -v "$PWD/work:/work" \
-  -e DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator' \
-  to-digi-rs:0.2.0
-```
+If startup fails before authentication, check that `/work/plu.mdb` exists, is a regular file, is not a symbolic link, and that the container can run `mdb-tables`, `mdb-schema`, and `mdb-export`.
 
-`--network host` is recommended for the first remote test so the container uses the Ubuntu host network path to `https://192.168.0.150`.
+If authentication fails, confirm `base_url`, `token_url`, `client_id`, and `DIGIWEB_CLIENT_SECRET`. The log intentionally shows only safe credential diagnostics.
 
-## First Remote API Test
+If PLU submission succeeds but polling is unknown, inspect the request ID and status endpoint logs. Normal polling logs are concise; detailed sanitized bodies are logged only for decode failures, unexpected response shapes, failed statuses, or non-2xx responses.
 
-Keep the first customer-network API test limited:
-
-```toml
-[import]
-dry_run_inspect_only = false
-send_only_first_plu = true
-continue_after_record_failure = false
-write_payload_preview = true
-```
-
-This sends only the first normalized PLU, stops after a record failure, logs the selected PLU number, writes the generated payload preview to `payload-previews/plu-N.json`, and never logs credentials or tokens.
-
-PLU submission and status-poll responses are logged before parsing. The audit log includes method, sanitized path, HTTP status, content type, `Location`, request-ID headers, whether the body is empty, and the sanitized raw response body. Authorization headers, access tokens, and client secrets are never written to the log.
-
-The default request-status endpoint matches the original working ToDIGIweb client:
-
-```toml
-request_status_path_template = "/api/thirdpartylinker/api/v1/requests/{request_id}"
-```
-
-The `/plus/write` response may initially return `status = "TODO"` with an `id`; this is treated as a processing state and polled through the request-status endpoint.
-
-For the current test source, keep:
-
-```toml
-[import]
-dry_run_inspect_only = false
-send_only_first_plu = true
-continue_after_record_failure = false
-write_payload_preview = true
-```
-
-## Configuration
-
-Important `config.toml` fields:
-
-```toml
-[digiweb]
-base_url = "https://192.168.0.150"
-client_id = "digi"
-client_secret = ""
-token_url = "https://192.168.0.150/auth/realms/skypro/protocol/openid-connect/token"
-store_number = 1
-allow_invalid_certificates = true
-plu_upsert_path = "/api/v1/third-party/plus/write"
-request_status_path_template = "/api/thirdpartylinker/api/v1/requests/{request_id}"
-plu_barcode_type = ""
-plu_barcode_ref_no = ""
-```
-
-Secrets should be supplied with:
-
-```bash
-export DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator'
-```
-
-`DIGIWEB_CLIENT_SECRET` takes precedence over `digiweb.client_secret`. The config value remains as a development fallback only. The application does not log client secrets, full access tokens, authorization headers, passwords, or secret-bearing request bodies.
+If DIGIweb returns a business failure, the final summary shows a concise message such as `barcodetype_uuid is null`, while detailed sanitized diagnostics remain in `logs.txt`.
 
 ## DIGIweb Prerequisites
 
-Before running a PLU import, DIGIweb must already contain:
+DIGIweb must already contain the referenced store, department, and each referenced group under the correct department. The importer does not create departments or groups and does not query PostgreSQL directly.
 
-```text
-referenced store
-referenced department
-each referenced group under the correct department
-```
-
-For the current test source:
-
-```text
-Department reference: 1
-Group reference: 997
-```
-
-must exist and be active in DIGIweb, and group reference `997` must belong to department reference `1`.
-
-The importer treats the group identity as:
-
-```text
-department reference number + group reference number
-```
-
-It does not assume group references are globally unique. It does not create groups, invent group names, or invent internal DIGIweb UUIDs. The DIGIweb API is expected to resolve:
-
-```text
-department reference + group reference -> internal DIGIweb group UUID
-```
-
-The source `Main Group Code` field is treated as the external DIGIweb group reference number. Values such as `997` are accepted by local validation as positive integers; DIGIweb remains responsible for final existence and business validation. The importer does not query PostgreSQL directly.
-
-When `Main Group Code` is empty or whitespace only, the importer assigns group reference `997` and logs `Group default applied: yes`. Explicit values are trimmed and parsed, so `"0001"` becomes group `1`, `"25   "` becomes group `25`, and explicit `"997"` remains group `997` with `Group default applied: no`. Malformed non-empty values such as `ABC`, `-1`, `0`, `1.5`, or `99X` are rejected as row-level issues and are not defaulted.
-
-Department references are also trimmed and parsed numerically before joins and payload generation. For example, source departments `"0001"` and `"1"` both normalize to department reference `1`, so `Pludata` and `PluIng` rows are matched by normalized `Plucode + Department` rather than raw department strings.
-
-## Source File Safety
-
-The importer checks exactly:
-
-```text
-./plu.mdb
-```
-
-Inside Docker, the working directory is `/work`, so this resolves to:
-
-```text
-/work/plu.mdb
-```
-
-It does not search recursively, accept alternate filenames, rename, delete, move, or write to the MDB. Symbolic links are rejected. The source file is opened read-only.
+For the current sample source, department reference `1` and group reference `997` must exist and be active.
 
 ## MDB Mapping
 
-The inspected MDB contains these relevant tables:
+The confirmed source tables are `Pludata` for PLUs and `PluIng` for both ingredients and nutrition data. `PluIng` rows are joined to PLUs by normalized `Plucode + Department`.
 
-```text
-Department
-Pludata
-PluIng
-Maingroup
-Presetkey
-Pricelot
-Scaledept
-ScaleInfo
-SText
-```
-
-`Pludata` is the primary PLU table. `PluIng` supplies both ingredient text and nutrition values. There is no required `PluNut` table.
-
-Default mapping:
-
-```toml
-[mapping]
-main_plu_table = "Pludata"
-ingredient_table = "PluIng"
-nutrition_table = ""
-```
-
-`Pludata` names are assembled from non-empty `Name 1` through `Name 4` values with DIGIweb `<br>` line breaks.
-
-`PluIng` ingredients are assembled from non-empty `Ing Name 1` through `Ing Name 99` in numeric order.
-
-`PluIng` nutrition values are parsed as written. Source values may be text and zero-padded, such as `0000`, `008`, or `690`; the importer does not apply hidden decimal scaling or unit conversion.
+Confirmed mappings include department normalization, group reference normalization with default group `997` for empty main-group values, price-category mapping, barcode-format mapping, barcode-data construction, ingredient formatting, and nutrition-facts mapping.
 
 Unknown source fields are documented in code rather than guessed into DIGIweb payloads.
-
-## DIGIweb PLU Payload
-
-The importer serializes DIGIweb field names from `DIGIweb_ThirdParty_API_20260607.pdf`, including:
-
-```text
-storeno
-pluno
-pludepartmentno
-plugroupno
-plubarcodetype
-plubarcoderefno
-plubarcodedata
-plucommname
-plutexts
-pluingredients
-plupricemode
-pluunitprice
-pluusingdateprint
-pluusingdateterm
-pluadditionaldatas.keylabel
-plunft.data
-```
-
-JSON `null` values are omitted because the DIGIweb PDF states that null JSON fields are not supported.
 
 ## Native Development
 
@@ -311,13 +224,17 @@ cargo run
 
 Running from Windows PowerShell builds a Windows executable, which cannot see `mdbtools` installed inside WSL. Use Docker or run Cargo inside Linux/WSL when validating `mdbtools`.
 
-## Exit Codes
+## Remote Ubuntu Transfer
 
-```text
-0 = complete success
-1 = import completed but one or more submitted records failed or have unknown status
-2 = startup, configuration, source parsing, or validation failure
-3 = authentication or DIGIweb connection failure
-4 = unexpected internal failure
+Build and save the image without using a public registry:
+
+```bash
+docker build -t to-digi-rs:0.2.1 .
+docker save to-digi-rs:0.2.1 -o to-digi-rs-image-0.2.1.tar
 ```
 
+Transfer `to-digi-rs-image-0.2.1.tar` to the remote Ubuntu device, then load it:
+
+```bash
+docker load -i to-digi-rs-image-0.2.1.tar
+```

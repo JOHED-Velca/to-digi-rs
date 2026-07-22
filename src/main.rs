@@ -102,32 +102,19 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         &dataset.nutrition_rows.len().to_string(),
     )?;
 
-    if config.import.dry_run_inspect_only {
-        logger.line("Dry-run inspection mode is enabled; MDB inspection completed and no normalization, validation, authentication, or API requests will be attempted.")?;
-        logger.final_import_summary(FinalImportLog {
-            status: "SUCCESS",
-            source_discovered: dataset.plu_rows.len(),
-            placeholders_ignored: 0,
-            validation_skipped: 0,
-            valid_available: 0,
-            selected: 0,
-            submitted: 0,
-            succeeded: 0,
-            failed: 0,
-            unknown: 0,
-            not_attempted: 0,
-            intentionally_skipped_by_limit: 0,
-            successful_plu_numbers: &[],
-        })?;
-        return Ok(0);
-    }
-
     let normalization_report =
         normalize_dataset(&dataset, &config.mapping, config.digiweb.store_number)?;
-    let placeholder_ignored = normalization_report
+    let placeholder_plu_numbers = normalization_report
         .row_issues
         .iter()
         .filter(|issue| is_empty_placeholder_issue(issue))
+        .filter_map(|issue| issue.plu_number)
+        .collect::<Vec<_>>();
+    let placeholder_ignored = placeholder_plu_numbers.len();
+    let invalid_source_rows = normalization_report
+        .row_issues
+        .iter()
+        .filter(|issue| !is_empty_placeholder_issue(issue))
         .count();
     for issue in &normalization_report.row_issues {
         let plu = issue
@@ -279,6 +266,7 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
     }
     let valid_plus = valid_plu_candidates(&plus, &validation_report);
     let validation_skipped = plus.len().saturating_sub(valid_plus.len());
+    let invalid_source_rows = invalid_source_rows + validation_skipped;
     for plu in &plus {
         if !valid_plus
             .iter()
@@ -296,6 +284,31 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         "PLUs skipped due to validation error",
         &validation_skipped.to_string(),
     )?;
+    if config.import.dry_run_inspect_only {
+        logger.line("Dry-run inspection mode is enabled; normalization and validation completed, and no authentication or API requests will be attempted.")?;
+        logger.final_import_summary(FinalImportLog {
+            status: "SUCCESS",
+            source_discovered: dataset.plu_rows.len(),
+            placeholders_ignored: placeholder_ignored,
+            placeholder_plu_numbers: &placeholder_plu_numbers,
+            invalid_source_rows,
+            validation_skipped,
+            normalized: plus.len(),
+            valid: valid_plus.len(),
+            selected: 0,
+            submitted: 0,
+            succeeded: 0,
+            failed: 0,
+            unknown: 0,
+            not_attempted: 0,
+            intentionally_skipped_by_limit: 0,
+            successful_plu_numbers: &[],
+            failed_plu_numbers: &[],
+            unknown_plu_numbers: &[],
+            dry_run: true,
+        })?;
+        return Ok(0);
+    }
     if valid_plus.is_empty() {
         logger.final_failure("validation", "no valid PLUs are available to send", true)?;
         return Ok(2);
@@ -311,7 +324,11 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
     let client_secret = client_secret.ok_or(AppError::MissingEnv("DIGIWEB_CLIENT_SECRET"))?;
     let summary = run_import(config, client_secret, &valid_plus, logger).await?;
     for record in &summary.records {
-        if record.final_status == digiweb::status::ProcessingStatus::SubmittedStatusUnknown {
+        if matches!(
+            record.final_status,
+            digiweb::status::ProcessingStatus::SubmittedStatusUnknown
+                | digiweb::status::ProcessingStatus::UnknownOrTimeout
+        ) {
             logger.line(format!(
                 "UNKNOWN RECORD: PLU {} started={} request_id={} http_result={} status={} duration_ms={} message={}",
                 record.plu_number,
@@ -342,12 +359,33 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         .filter(|record| record.final_status == digiweb::status::ProcessingStatus::Success)
         .map(|record| record.plu_number)
         .collect::<Vec<_>>();
+    let failed_plu_numbers = summary
+        .records
+        .iter()
+        .filter(|record| record.final_status == digiweb::status::ProcessingStatus::Fail)
+        .map(|record| record.plu_number)
+        .collect::<Vec<_>>();
+    let unknown_plu_numbers = summary
+        .records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.final_status,
+                digiweb::status::ProcessingStatus::SubmittedStatusUnknown
+                    | digiweb::status::ProcessingStatus::UnknownOrTimeout
+            )
+        })
+        .map(|record| record.plu_number)
+        .collect::<Vec<_>>();
     logger.final_import_summary(FinalImportLog {
         status: final_status.as_str(),
         source_discovered: dataset.plu_rows.len(),
         placeholders_ignored: placeholder_ignored,
+        placeholder_plu_numbers: &placeholder_plu_numbers,
+        invalid_source_rows,
         validation_skipped,
-        valid_available: summary.discovered,
+        normalized: plus.len(),
+        valid: summary.discovered,
         selected: summary.selected,
         submitted: summary.submitted,
         succeeded: summary.succeeded,
@@ -356,6 +394,9 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         not_attempted: summary.not_attempted_after_stop,
         intentionally_skipped_by_limit: summary.intentionally_skipped_by_limit,
         successful_plu_numbers: &successful_plu_numbers,
+        failed_plu_numbers: &failed_plu_numbers,
+        unknown_plu_numbers: &unknown_plu_numbers,
+        dry_run: false,
     })?;
     Ok(final_status.exit_code())
 }
