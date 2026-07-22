@@ -32,6 +32,8 @@ pub async fn run_import(
     let selected_count = records_to_send.len();
     summary.selected = selected_count;
 
+    prepare_payload_preview_dir(config.import.write_payload_preview)?;
+
     if config.import.send_only_first_plu && plus.len() > 1 {
         summary.intentionally_skipped_by_limit += plus.len() - 1;
         logger.warning(format!(
@@ -82,6 +84,10 @@ pub async fn run_import(
                 summary.submitted += 1;
                 summary.succeeded += 1;
                 logger.line(format!("{progress} Final status: SUCCESS"))?;
+                logger.line(format!(
+                    "{progress} Duration ms: {}",
+                    timer.elapsed().as_millis()
+                ))?;
                 summary.records.push(RecordImportResult {
                     plu_number: plu.plu_number,
                     started_at,
@@ -93,7 +99,10 @@ pub async fn run_import(
                 });
             }
             Ok((request_id, final_status, message))
-                if final_status == ProcessingStatus::SubmittedStatusUnknown =>
+                if matches!(
+                    final_status,
+                    ProcessingStatus::SubmittedStatusUnknown | ProcessingStatus::UnknownOrTimeout
+                ) =>
             {
                 summary.submitted += 1;
                 summary.unknown += 1;
@@ -104,7 +113,14 @@ pub async fn run_import(
                     "{progress} PLU {} submitted with unknown final status: {}",
                     plu.plu_number, unknown_message
                 ))?;
-                logger.line(format!("{progress} Final status: SUBMITTED_STATUS_UNKNOWN"))?;
+                logger.line(format!(
+                    "{progress} Final status: {}",
+                    final_status.as_str()
+                ))?;
+                logger.line(format!(
+                    "{progress} Duration ms: {}",
+                    timer.elapsed().as_millis()
+                ))?;
                 summary.records.push(RecordImportResult {
                     plu_number: plu.plu_number,
                     started_at,
@@ -137,6 +153,10 @@ pub async fn run_import(
                     "{progress} Final status: {}",
                     final_status.as_str()
                 ))?;
+                logger.line(format!(
+                    "{progress} Duration ms: {}",
+                    timer.elapsed().as_millis()
+                ))?;
                 summary.records.push(RecordImportResult {
                     plu_number: plu.plu_number,
                     started_at,
@@ -160,6 +180,10 @@ pub async fn run_import(
                 summary.failed += 1;
                 logger.error(format!("{progress} PLU {} failed: {}", plu.plu_number, err))?;
                 logger.line(format!("{progress} Final status: FAIL"))?;
+                logger.line(format!(
+                    "{progress} Duration ms: {}",
+                    timer.elapsed().as_millis()
+                ))?;
                 summary.records.push(RecordImportResult {
                     plu_number: plu.plu_number,
                     started_at,
@@ -182,6 +206,44 @@ pub async fn run_import(
         }
     }
     Ok(summary)
+}
+
+fn prepare_payload_preview_dir(enabled: bool) -> Result<(), AppError> {
+    prepare_payload_preview_dir_in_dir(Path::new("."), enabled)
+}
+
+fn prepare_payload_preview_dir_in_dir(base_dir: &Path, enabled: bool) -> Result<(), AppError> {
+    if !enabled {
+        return Ok(());
+    }
+    let dir = base_dir.join("payload-previews");
+    if !dir.exists() {
+        return Ok(());
+    }
+    let entries = fs::read_dir(&dir).map_err(|err| {
+        AppError::Logging(format!(
+            "failed to inspect payload preview directory '{}': {err}",
+            dir.display()
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            AppError::Logging(format!(
+                "failed to inspect payload preview directory '{}': {err}",
+                dir.display()
+            ))
+        })?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("json") {
+            fs::remove_file(&path).map_err(|err| {
+                AppError::Logging(format!(
+                    "failed to remove old payload preview '{}': {err}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn write_payload_preview(
@@ -212,7 +274,7 @@ fn write_payload_preview_in_dir(
             path.display()
         ))
     })?;
-    Ok(path)
+    Ok(fs::canonicalize(&path).unwrap_or(path))
 }
 
 pub fn select_records_to_send(plus: &[Plu], send_only_first_plu: bool) -> Vec<&Plu> {
@@ -337,5 +399,42 @@ mod tests {
         assert!(contents.contains("\"plubarcodetype\": \"5\""));
         assert!(!contents.to_ascii_lowercase().contains("secret"));
         assert!(!contents.to_ascii_lowercase().contains("token"));
+    }
+
+    #[test]
+    fn preview_file_matches_submitted_json() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let payload =
+            DigiwebPluPayload::from_plu(&plu(4), &crate::config::DigiwebConfig::default())
+                .expect("payload");
+
+        let path = write_payload_preview_in_dir(temp.path(), 4, &payload).expect("preview");
+        let contents = fs::read_to_string(&path).expect("read");
+        let expected = serde_json::to_string_pretty(&payload).expect("json");
+
+        assert_eq!(contents, expected);
+    }
+
+    #[test]
+    fn old_preview_json_files_are_cleaned_when_enabled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().join("payload-previews");
+        fs::create_dir_all(&dir).expect("dir");
+        fs::write(dir.join("plu-1.json"), "{}").expect("old json");
+        fs::write(dir.join("keep.txt"), "keep").expect("old txt");
+
+        prepare_payload_preview_dir_in_dir(temp.path(), true).expect("clean");
+
+        assert!(!dir.join("plu-1.json").exists());
+        assert!(dir.join("keep.txt").exists());
+    }
+
+    #[test]
+    fn preview_directory_is_not_created_when_disabled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        prepare_payload_preview_dir_in_dir(temp.path(), false).expect("disabled");
+
+        assert!(!temp.path().join("payload-previews").exists());
     }
 }
