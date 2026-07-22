@@ -13,7 +13,7 @@ use config::{AppConfig, client_secret_log_message, load_client_secret};
 use digiweb::preflight::collect_required_references;
 use error::AppError;
 use import::runner::run_import;
-use logging::AuditLogger;
+use logging::{AuditLogger, FinalImportLog};
 use source::mapping::{normalize_dataset, validate_source_schema};
 use source::mdb_tools::MdbTools;
 use source::{FIXED_SOURCE_FILE, VerifiedSourceFile};
@@ -104,26 +104,44 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
 
     if config.import.dry_run_inspect_only {
         logger.line("Dry-run inspection mode is enabled; MDB inspection completed and no normalization, validation, authentication, or API requests will be attempted.")?;
-        logger.final_success(
-            dataset.plu_rows.len(),
-            0,
-            0,
-            0,
-            dataset.plu_rows.len(),
-            0,
-            "SUCCESS",
-        )?;
+        logger.final_import_summary(FinalImportLog {
+            status: "SUCCESS",
+            source_discovered: dataset.plu_rows.len(),
+            placeholders_ignored: 0,
+            validation_skipped: 0,
+            valid_available: 0,
+            selected: 0,
+            submitted: 0,
+            succeeded: 0,
+            failed: 0,
+            unknown: 0,
+            not_attempted: 0,
+            intentionally_skipped_by_limit: 0,
+            successful_plu_numbers: &[],
+        })?;
         return Ok(0);
     }
 
     let normalization_report =
         normalize_dataset(&dataset, &config.mapping, config.digiweb.store_number)?;
+    let placeholder_ignored = normalization_report
+        .row_issues
+        .iter()
+        .filter(|issue| is_empty_placeholder_issue(issue))
+        .count();
     for issue in &normalization_report.row_issues {
         let plu = issue
             .plu_number
             .map(|value| value.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        logger.line(format!("PLU {plu} skipped: {}", issue.message))?;
+        if is_empty_placeholder_issue(issue) {
+            logger.line(format!(
+                "PLU {plu} ignored as empty placeholder: {}",
+                issue.message
+            ))?;
+        } else {
+            logger.line(format!("PLU {plu} skipped: {}", issue.message))?;
+        }
     }
     logger.kv(
         "Unmatched PluIng rows",
@@ -260,6 +278,7 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         return Ok(2);
     }
     let valid_plus = valid_plu_candidates(&plus, &validation_report);
+    let validation_skipped = plus.len().saturating_sub(valid_plus.len());
     for plu in &plus {
         if !valid_plus
             .iter()
@@ -269,6 +288,14 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         }
     }
     logger.kv("Valid PLUs available", &valid_plus.len().to_string())?;
+    logger.kv(
+        "Empty placeholder PLUs ignored",
+        &placeholder_ignored.to_string(),
+    )?;
+    logger.kv(
+        "PLUs skipped due to validation error",
+        &validation_skipped.to_string(),
+    )?;
     if valid_plus.is_empty() {
         logger.final_failure("validation", "no valid PLUs are available to send", true)?;
         return Ok(2);
@@ -309,14 +336,30 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         }
     }
     let final_status = summary.final_status();
-    logger.final_success(
-        summary.discovered,
-        summary.submitted,
-        summary.succeeded,
-        summary.failed,
-        summary.skipped,
-        summary.unknown,
-        final_status.as_str(),
-    )?;
+    let successful_plu_numbers = summary
+        .records
+        .iter()
+        .filter(|record| record.final_status == digiweb::status::ProcessingStatus::Success)
+        .map(|record| record.plu_number)
+        .collect::<Vec<_>>();
+    logger.final_import_summary(FinalImportLog {
+        status: final_status.as_str(),
+        source_discovered: dataset.plu_rows.len(),
+        placeholders_ignored: placeholder_ignored,
+        validation_skipped,
+        valid_available: summary.discovered,
+        selected: summary.selected,
+        submitted: summary.submitted,
+        succeeded: summary.succeeded,
+        failed: summary.failed,
+        unknown: summary.unknown,
+        not_attempted: summary.not_attempted_after_stop,
+        intentionally_skipped_by_limit: summary.intentionally_skipped_by_limit,
+        successful_plu_numbers: &successful_plu_numbers,
+    })?;
     Ok(final_status.exit_code())
+}
+
+fn is_empty_placeholder_issue(issue: &validation::issue::ValidationIssue) -> bool {
+    issue.plu_number == Some(0) && issue.message.contains("missing product name")
 }

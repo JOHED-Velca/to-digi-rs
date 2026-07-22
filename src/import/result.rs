@@ -42,17 +42,19 @@ impl FinalStatus {
 #[derive(Debug, Default)]
 pub struct ImportSummary {
     pub discovered: usize,
+    pub selected: usize,
     pub submitted: usize,
     pub succeeded: usize,
     pub failed: usize,
-    pub skipped: usize,
     pub unknown: usize,
+    pub intentionally_skipped_by_limit: usize,
+    pub not_attempted_after_stop: usize,
     pub records: Vec<RecordImportResult>,
 }
 
 impl ImportSummary {
     pub fn final_status(&self) -> FinalStatus {
-        if self.failed == 0 && self.skipped == 0 && self.unknown == 0 {
+        if self.failed == 0 && self.unknown == 0 && self.not_attempted_after_stop == 0 {
             FinalStatus::Success
         } else {
             FinalStatus::CompletedWithErrors
@@ -68,11 +70,13 @@ mod tests {
     fn final_status_success_exit_zero() {
         let summary = ImportSummary {
             discovered: 1,
+            selected: 1,
             submitted: 1,
             succeeded: 1,
             failed: 0,
-            skipped: 0,
             unknown: 0,
+            intentionally_skipped_by_limit: 0,
+            not_attempted_after_stop: 0,
             records: Vec::new(),
         };
 
@@ -84,11 +88,13 @@ mod tests {
     fn final_status_partial_failure_exit_one() {
         let summary = ImportSummary {
             discovered: 2,
+            selected: 2,
             submitted: 2,
             succeeded: 1,
             failed: 1,
-            skipped: 0,
             unknown: 0,
+            intentionally_skipped_by_limit: 0,
+            not_attempted_after_stop: 0,
             records: Vec::new(),
         };
 
@@ -100,15 +106,35 @@ mod tests {
     fn final_status_unknown_exit_one() {
         let summary = ImportSummary {
             discovered: 1,
+            selected: 1,
             submitted: 1,
             succeeded: 0,
             failed: 0,
-            skipped: 0,
             unknown: 1,
+            intentionally_skipped_by_limit: 0,
+            not_attempted_after_stop: 0,
             records: Vec::new(),
         };
 
         assert_eq!(summary.final_status(), FinalStatus::CompletedWithErrors);
         assert_eq!(summary.final_status().exit_code(), 1);
+    }
+
+    #[test]
+    fn intentional_limit_skip_does_not_make_final_status_error() {
+        let summary = ImportSummary {
+            discovered: 4,
+            selected: 1,
+            submitted: 1,
+            succeeded: 1,
+            failed: 0,
+            unknown: 0,
+            intentionally_skipped_by_limit: 3,
+            not_attempted_after_stop: 0,
+            records: Vec::new(),
+        };
+
+        assert_eq!(summary.final_status(), FinalStatus::Success);
+        assert_eq!(summary.final_status().exit_code(), 0);
     }
 }

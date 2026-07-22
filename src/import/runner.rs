@@ -1,3 +1,6 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use chrono::Local;
 use secrecy::SecretString;
 
@@ -27,11 +30,12 @@ pub async fn run_import(
     };
     let records_to_send = select_records_to_send(plus, config.import.send_only_first_plu);
     let selected_count = records_to_send.len();
+    summary.selected = selected_count;
 
     if config.import.send_only_first_plu && plus.len() > 1 {
-        summary.skipped += plus.len() - 1;
+        summary.intentionally_skipped_by_limit += plus.len() - 1;
         logger.warning(format!(
-            "send_only_first_plu is enabled; {} PLU(s) will be skipped.",
+            "send_only_first_plu is enabled; {} PLU(s) will be intentionally skipped by the first-PLU limit.",
             plus.len() - 1
         ))?;
     }
@@ -55,27 +59,29 @@ pub async fn run_import(
     let token = authenticate(client.http(), &config, &client_secret).await?;
     logger.kv("Authentication result", "SUCCESS")?;
 
-    for plu in records_to_send {
+    for (index, plu) in records_to_send.iter().enumerate() {
+        let progress = format!("[{}/{}]", index + 1, selected_count);
         let started_at = Local::now();
         let timer = std::time::Instant::now();
-        logger.kv("Importing PLU", &plu.plu_number.to_string())?;
+        logger.line(format!("{progress} Importing PLU {}", plu.plu_number))?;
         let payload = DigiwebPluPayload::from_plu(plu, &config.digiweb)?;
         if config.import.write_payload_preview {
-            let preview = serde_json::to_string_pretty(&payload)
-                .map_err(|err| AppError::Internal(format!("payload preview failed: {err}")))?;
+            let path = write_payload_preview(plu.plu_number, &payload)?;
             logger.line(format!(
-                "Sanitized payload preview for PLU {}:",
-                plu.plu_number
+                "{progress} Payload preview written: {}",
+                path.display()
             ))?;
-            logger.line(preview)?;
         }
-        match client.upsert_plu(&token, &payload, logger).await {
+        match client
+            .upsert_plu_with_progress(&token, &payload, logger, &progress)
+            .await
+        {
             Ok((request_id, final_status, message))
                 if final_status == ProcessingStatus::Success =>
             {
                 summary.submitted += 1;
                 summary.succeeded += 1;
-                logger.kv("PLU result", &format!("{} SUCCESS", plu.plu_number))?;
+                logger.line(format!("{progress} Final status: SUCCESS"))?;
                 summary.records.push(RecordImportResult {
                     plu_number: plu.plu_number,
                     started_at,
@@ -95,9 +101,10 @@ pub async fn run_import(
                     "DIGIweb accepted the submission but the final status is unknown".to_string()
                 });
                 logger.warning(format!(
-                    "PLU {} submitted with unknown final status: {}",
+                    "{progress} PLU {} submitted with unknown final status: {}",
                     plu.plu_number, unknown_message
                 ))?;
+                logger.line(format!("{progress} Final status: SUBMITTED_STATUS_UNKNOWN"))?;
                 summary.records.push(RecordImportResult {
                     plu_number: plu.plu_number,
                     started_at,
@@ -108,7 +115,7 @@ pub async fn run_import(
                     duration_ms: timer.elapsed().as_millis(),
                 });
                 if !config.import.continue_after_record_failure {
-                    summary.skipped += skipped_after_stop(
+                    summary.not_attempted_after_stop += skipped_after_stop(
                         selected_count,
                         summary.succeeded,
                         summary.failed,
@@ -122,7 +129,14 @@ pub async fn run_import(
                 summary.failed += 1;
                 let failure = message
                     .unwrap_or_else(|| format!("DIGIweb final status {}", final_status.as_str()));
-                logger.error(format!("PLU {} failed: {}", plu.plu_number, failure))?;
+                logger.error(format!(
+                    "{progress} PLU {} failed: {}",
+                    plu.plu_number, failure
+                ))?;
+                logger.line(format!(
+                    "{progress} Final status: {}",
+                    final_status.as_str()
+                ))?;
                 summary.records.push(RecordImportResult {
                     plu_number: plu.plu_number,
                     started_at,
@@ -133,7 +147,7 @@ pub async fn run_import(
                     duration_ms: timer.elapsed().as_millis(),
                 });
                 if !config.import.continue_after_record_failure {
-                    summary.skipped += skipped_after_stop(
+                    summary.not_attempted_after_stop += skipped_after_stop(
                         selected_count,
                         summary.succeeded,
                         summary.failed,
@@ -144,7 +158,8 @@ pub async fn run_import(
             }
             Err(err) => {
                 summary.failed += 1;
-                logger.error(format!("PLU {} failed: {}", plu.plu_number, err))?;
+                logger.error(format!("{progress} PLU {} failed: {}", plu.plu_number, err))?;
+                logger.line(format!("{progress} Final status: FAIL"))?;
                 summary.records.push(RecordImportResult {
                     plu_number: plu.plu_number,
                     started_at,
@@ -155,7 +170,7 @@ pub async fn run_import(
                     duration_ms: timer.elapsed().as_millis(),
                 });
                 if !config.import.continue_after_record_failure {
-                    summary.skipped += skipped_after_stop(
+                    summary.not_attempted_after_stop += skipped_after_stop(
                         selected_count,
                         summary.succeeded,
                         summary.failed,
@@ -167,6 +182,37 @@ pub async fn run_import(
         }
     }
     Ok(summary)
+}
+
+fn write_payload_preview(
+    plu_number: u64,
+    payload: &DigiwebPluPayload,
+) -> Result<PathBuf, AppError> {
+    write_payload_preview_in_dir(Path::new("."), plu_number, payload)
+}
+
+fn write_payload_preview_in_dir(
+    base_dir: &Path,
+    plu_number: u64,
+    payload: &DigiwebPluPayload,
+) -> Result<PathBuf, AppError> {
+    let dir = base_dir.join("payload-previews");
+    fs::create_dir_all(&dir).map_err(|err| {
+        AppError::Logging(format!(
+            "failed to create payload preview directory '{}': {err}",
+            dir.display()
+        ))
+    })?;
+    let path = dir.join(format!("plu-{plu_number}.json"));
+    let preview = serde_json::to_string_pretty(payload)
+        .map_err(|err| AppError::Internal(format!("payload preview failed: {err}")))?;
+    fs::write(&path, preview).map_err(|err| {
+        AppError::Logging(format!(
+            "failed to write payload preview '{}': {err}",
+            path.display()
+        ))
+    })?;
+    Ok(path)
 }
 
 pub fn select_records_to_send(plus: &[Plu], send_only_first_plu: bool) -> Vec<&Plu> {
@@ -260,5 +306,36 @@ mod tests {
 
         assert_eq!(skipped_by_first_plu_mode, 3);
         assert_eq!(skipped_after_failure, 0);
+    }
+
+    #[test]
+    fn send_only_first_plu_false_selects_all_valid_plus() {
+        let records = vec![plu(1), plu(4), plu(2), plu(3)];
+
+        let selected = select_records_to_send(&records, false);
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|plu| plu.plu_number)
+                .collect::<Vec<_>>(),
+            vec![1, 4, 2, 3]
+        );
+    }
+
+    #[test]
+    fn preview_file_is_written_for_payload() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let payload =
+            DigiwebPluPayload::from_plu(&plu(1), &crate::config::DigiwebConfig::default())
+                .expect("payload");
+
+        let path = write_payload_preview_in_dir(temp.path(), 1, &payload).expect("preview");
+        let contents = fs::read_to_string(&path).expect("read");
+
+        assert!(contents.contains("\"pluno\": 1"));
+        assert!(contents.contains("\"plubarcodetype\": \"5\""));
+        assert!(!contents.to_ascii_lowercase().contains("secret"));
+        assert!(!contents.to_ascii_lowercase().contains("token"));
     }
 }

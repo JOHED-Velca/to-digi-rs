@@ -105,11 +105,33 @@ impl DigiwebClient {
         &self.http
     }
 
+    #[allow(dead_code)]
     pub async fn upsert_plu(
         &self,
         token: &AccessToken,
         payload: &DigiwebPluPayload,
         logger: &mut AuditLogger,
+    ) -> Result<(Option<String>, ProcessingStatus, Option<String>), AppError> {
+        self.upsert_plu_internal(token, payload, logger, None).await
+    }
+
+    pub async fn upsert_plu_with_progress(
+        &self,
+        token: &AccessToken,
+        payload: &DigiwebPluPayload,
+        logger: &mut AuditLogger,
+        progress_label: &str,
+    ) -> Result<(Option<String>, ProcessingStatus, Option<String>), AppError> {
+        self.upsert_plu_internal(token, payload, logger, Some(progress_label))
+            .await
+    }
+
+    async fn upsert_plu_internal(
+        &self,
+        token: &AccessToken,
+        payload: &DigiwebPluPayload,
+        logger: &mut AuditLogger,
+        progress_label: Option<&str>,
     ) -> Result<(Option<String>, ProcessingStatus, Option<String>), AppError> {
         let url = self.join_base_path(self.config.plu_upsert_path()?)?;
         let response = self
@@ -124,6 +146,7 @@ impl DigiwebClient {
             "PLU submission response",
             "POST",
             &url,
+            true,
             true,
             response,
             logger,
@@ -145,8 +168,14 @@ impl DigiwebClient {
                 status_path,
                 message,
             } => {
+                if let Some(label) = progress_label {
+                    logger.line(format!("{label} Submitted request: {request_id}"))?;
+                }
                 if self.has_configured_status_path() {
-                    return match self.poll_request_status(token, &request_id, logger).await {
+                    return match self
+                        .poll_request_status_internal(token, &request_id, logger, progress_label)
+                        .await
+                    {
                         Ok(final_status) => {
                             Ok((Some(request_id), final_status.status, final_status.message))
                         }
@@ -159,7 +188,10 @@ impl DigiwebClient {
                     };
                 }
                 if let Some(path) = status_path.or_else(|| captured.location.clone()) {
-                    return match self.poll_location(token, &path, logger).await {
+                    return match self
+                        .poll_location_internal(token, &path, logger, progress_label)
+                        .await
+                    {
                         Ok(final_status) => {
                             Ok((Some(request_id), final_status.status, final_status.message))
                         }
@@ -198,6 +230,17 @@ impl DigiwebClient {
         request_id: &str,
         logger: &mut AuditLogger,
     ) -> Result<DigiwebStatusResponse, AppError> {
+        self.poll_request_status_internal(token, request_id, logger, None)
+            .await
+    }
+
+    async fn poll_request_status_internal(
+        &self,
+        token: &AccessToken,
+        request_id: &str,
+        logger: &mut AuditLogger,
+        progress_label: Option<&str>,
+    ) -> Result<DigiwebStatusResponse, AppError> {
         let template = self.config.digiweb.request_status_path_template.trim();
         if template.is_empty() {
             return Err(AppError::Config(
@@ -207,17 +250,31 @@ impl DigiwebClient {
         }
         let path = template.replace("{request_id}", request_id);
         let url = self.join_base_path(&path)?;
-        self.poll_url(token, &url, request_id, logger).await
+        self.poll_url(token, &url, request_id, logger, progress_label)
+            .await
     }
 
+    #[allow(dead_code)]
     pub async fn poll_location(
         &self,
         token: &AccessToken,
         location: &str,
         logger: &mut AuditLogger,
     ) -> Result<DigiwebStatusResponse, AppError> {
+        self.poll_location_internal(token, location, logger, None)
+            .await
+    }
+
+    async fn poll_location_internal(
+        &self,
+        token: &AccessToken,
+        location: &str,
+        logger: &mut AuditLogger,
+        progress_label: Option<&str>,
+    ) -> Result<DigiwebStatusResponse, AppError> {
         let url = self.resolve_location(location)?;
-        self.poll_url(token, &url, location, logger).await
+        self.poll_url(token, &url, location, logger, progress_label)
+            .await
     }
 
     async fn poll_url(
@@ -226,6 +283,7 @@ impl DigiwebClient {
         url: &str,
         status_reference: &str,
         logger: &mut AuditLogger,
+        progress_label: Option<&str>,
     ) -> Result<DigiwebStatusResponse, AppError> {
         let deadline =
             Instant::now() + Duration::from_secs(self.config.timeouts.poll_timeout_seconds);
@@ -242,10 +300,17 @@ impl DigiwebClient {
                 "GET",
                 url,
                 true,
+                false,
                 response,
                 logger,
             )
             .await?;
+            if let Some(label) = progress_label {
+                logger.line(format!(
+                    "{label} HTTP status: {}",
+                    format_status(captured.status)
+                ))?;
+            }
             if !captured.status.is_success() {
                 return Err(http_error(
                     &format!("status request {status_reference}"),
@@ -253,6 +318,12 @@ impl DigiwebClient {
                 ));
             }
             let status_response = interpret_status_response(&captured)?;
+            if let Some(label) = progress_label {
+                logger.line(format!(
+                    "{label} Status: {}",
+                    status_response.status.as_str()
+                ))?;
+            }
             if status_response.status != ProcessingStatus::Processing {
                 return Ok(status_response);
             }
@@ -319,6 +390,7 @@ async fn capture_response(
     method: &str,
     url: &str,
     bearer_auth_attached: bool,
+    log_body_detail: bool,
     response: reqwest::Response,
     logger: &mut AuditLogger,
 ) -> Result<CapturedHttpResponse, AppError> {
@@ -344,7 +416,15 @@ async fn capture_response(
         body,
         body_empty,
     };
-    log_captured_response(label, method, url, bearer_auth_attached, &captured, logger)?;
+    log_captured_response(
+        label,
+        method,
+        url,
+        bearer_auth_attached,
+        log_body_detail,
+        &captured,
+        logger,
+    )?;
     Ok(captured)
 }
 
@@ -353,6 +433,7 @@ fn log_captured_response(
     method: &str,
     url: &str,
     bearer_auth_attached: bool,
+    log_body_detail: bool,
     response: &CapturedHttpResponse,
     logger: &mut AuditLogger,
 ) -> Result<(), AppError> {
@@ -377,10 +458,17 @@ fn log_captured_response(
         "Response body empty",
         if response.body_empty { "yes" } else { "no" },
     )?;
-    logger.kv(
-        "Sanitized raw response body",
-        &sanitize_response_body(&response.body),
-    )?;
+    if log_body_detail {
+        logger.kv(
+            "Sanitized raw response body",
+            &sanitize_response_body(&response.body),
+        )?;
+    } else {
+        logger.kv(
+            "Sanitized raw response body",
+            "<omitted for routine polling>",
+        )?;
+    }
     Ok(())
 }
 
