@@ -104,7 +104,7 @@ impl Default for TimeoutConfig {
 impl Default for ImportConfig {
     fn default() -> Self {
         Self {
-            continue_after_record_failure: true,
+            continue_after_record_failure: false,
             send_only_first_plu: false,
             dry_run_inspect_only: false,
             write_payload_preview: true,

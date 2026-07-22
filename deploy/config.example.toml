@@ -17,6 +17,12 @@ poll_interval_seconds = 2
 poll_timeout_seconds = 120
 
 [import]
+# Deprecated as command selectors in v0.4.0. Use:
+#   ./run.sh analyze
+#   ./run.sh import --test
+#   ./run.sh import --limit N
+#   ./run.sh import --continue-on-error
+# These values are still honored for one release when run.sh is executed without a command.
 continue_after_record_failure = false
 send_only_first_plu = true
 dry_run_inspect_only = true
