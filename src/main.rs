@@ -104,13 +104,11 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
 
     let normalization_report =
         normalize_dataset(&dataset, &config.mapping, config.digiweb.store_number)?;
-    let placeholder_plu_numbers = normalization_report
+    let placeholder_ignored = normalization_report
         .row_issues
         .iter()
         .filter(|issue| is_empty_placeholder_issue(issue))
-        .filter_map(|issue| issue.plu_number)
-        .collect::<Vec<_>>();
-    let placeholder_ignored = placeholder_plu_numbers.len();
+        .count();
     let invalid_source_rows = normalization_report
         .row_issues
         .iter()
@@ -290,7 +288,6 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
             status: "SUCCESS",
             source_discovered: dataset.plu_rows.len(),
             placeholders_ignored: placeholder_ignored,
-            placeholder_plu_numbers: &placeholder_plu_numbers,
             invalid_source_rows,
             validation_skipped,
             normalized: plus.len(),
@@ -381,7 +378,6 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
         status: final_status.as_str(),
         source_discovered: dataset.plu_rows.len(),
         placeholders_ignored: placeholder_ignored,
-        placeholder_plu_numbers: &placeholder_plu_numbers,
         invalid_source_rows,
         validation_skipped,
         normalized: plus.len(),

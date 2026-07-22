@@ -10,7 +10,6 @@ pub struct FinalImportLog<'a> {
     pub status: &'a str,
     pub source_discovered: usize,
     pub placeholders_ignored: usize,
-    pub placeholder_plu_numbers: &'a [u64],
     pub invalid_source_rows: usize,
     pub validation_skipped: usize,
     pub normalized: usize,
@@ -147,7 +146,7 @@ impl AuditLogger {
         )?;
         self.kv(
             "Ignored source placeholders",
-            &format_plu_list(summary.placeholder_plu_numbers),
+            &summary.placeholders_ignored.to_string(),
         )?;
         self.kv("Started", &self.started_at.to_rfc3339())?;
         self.kv("Finished", &finished.to_rfc3339())?;
@@ -251,7 +250,6 @@ mod tests {
                 status: "SUCCESS",
                 source_discovered: 5,
                 placeholders_ignored: 1,
-                placeholder_plu_numbers: &[0],
                 invalid_source_rows: 0,
                 validation_skipped: 0,
                 normalized: 4,
@@ -275,7 +273,7 @@ mod tests {
         assert!(contents.contains("PLUs intentionally skipped by first-PLU limit: 3"));
         assert!(contents.contains("Successful PLUs: 1"));
         assert!(contents.contains("Failed PLUs: None"));
-        assert!(contents.contains("Ignored source placeholders: 0"));
+        assert!(contents.contains("Ignored source placeholders: 1"));
     }
 
     #[test]
@@ -289,7 +287,6 @@ mod tests {
                 status: "SUCCESS",
                 source_discovered: 5,
                 placeholders_ignored: 1,
-                placeholder_plu_numbers: &[0],
                 invalid_source_rows: 0,
                 validation_skipped: 0,
                 normalized: 4,
@@ -313,6 +310,41 @@ mod tests {
         assert!(contents.contains("PLUs submitted: 0"));
         assert!(contents.contains("Import intentionally disabled by inspection-only mode."));
         assert!(!contents.contains("PLUs failed: 1"));
+    }
+
+    #[test]
+    fn ignored_source_placeholder_summary_fields_use_same_count() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("logs.txt");
+        let mut logger = AuditLogger::create(&path).expect("logger");
+
+        logger
+            .final_import_summary(FinalImportLog {
+                status: "SUCCESS",
+                source_discovered: 5,
+                placeholders_ignored: 1,
+                invalid_source_rows: 0,
+                validation_skipped: 0,
+                normalized: 4,
+                valid: 4,
+                selected: 0,
+                submitted: 0,
+                succeeded: 0,
+                failed: 0,
+                unknown: 0,
+                not_attempted: 0,
+                intentionally_skipped_by_limit: 0,
+                successful_plu_numbers: &[],
+                failed_plu_numbers: &[],
+                unknown_plu_numbers: &[],
+                dry_run: true,
+            })
+            .expect("summary");
+
+        let contents = fs::read_to_string(path).expect("read");
+        assert!(contents.contains("Empty source placeholders ignored: 1"));
+        assert!(contents.contains("Ignored source placeholders: 1"));
+        assert!(!contents.contains("Ignored source placeholders: 0"));
     }
 
     #[test]
