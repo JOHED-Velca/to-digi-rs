@@ -27,6 +27,8 @@ const GROUP_COLUMNS: &[&str] = &[
     "group_number",
 ];
 const BARCODE_COLUMNS: &[&str] = &["Barcode", "BarCode", "JAN", "UPC", "barcode"];
+const BARCODE_FORMAT_COLUMNS: &[&str] = &["Barcode Format", "BARCODE_FORMAT", "BarcodeFormat"];
+const FLAG_DATA_COLUMNS: &[&str] = &["Flag Data", "FLAG DATA", "FLAG_DATA", "FlagData"];
 const NAME_COLUMNS: &[&str] = &["Name", "ProductName", "CommodityName", "PLUName", "name"];
 const NAME_LINE_COLUMNS: &[&str] = &["Name 1", "Name 2", "Name 3", "Name 4"];
 const PRICE_COLUMNS: &[&str] = &["Price", "UnitPrice", "SellPrice", "price"];
@@ -122,6 +124,16 @@ struct NormalizedPriceMode {
     quantity_symbol: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedBarcode {
+    data: String,
+    barcode_type: String,
+    barcode_ref_no: String,
+    source_barcode: String,
+    source_barcode_format: String,
+    source_flag_data: String,
+}
+
 /// Source mapping assumptions:
 ///
 /// - The main table defaults to `Pludata`; `PluIng` supplies both ingredient text and nutrition values.
@@ -131,6 +143,10 @@ struct NormalizedPriceMode {
 /// - `Pludata` names are assembled from non-empty `Name 1` through `Name 4` values with DIGIweb `<br>` line breaks.
 /// - `Pludata`.`Main Group Code` is the preferred external DIGIweb group reference. Empty values default to group reference 997.
 /// - DCA `Category` is the source of truth for price mode when present: 0/blank = weight per kg, 1 = fixed price, 3 = weight per 100g.
+/// - DCA barcode mapping follows the working VB.NET `mod_dca_sms.vb` implementation:
+///   raw `Barcode Format` is normalized through an integer-like conversion, blank format defaults to `5`,
+///   `plubarcodetype` receives that normalized format, `plubarcoderefno` is `1` for blank/0/00 and otherwise the normalized format,
+///   `plubarcodedata` is `Flag Data` left-padded to 2 digits plus `Barcode` left-padded to 6 digits for format 4 or 5 digits otherwise.
 /// - `PluIng` ingredients are assembled from non-empty `Ing Name 1` through `Ing Name 99` values in numeric order.
 /// - `PluIng` nutrition values are text in the inspected MDB and may contain zero padding. They are parsed as written with no unit conversion or decimal scaling.
 /// - Unknown DIGIweb-specific field limits are enforced in validation with conservative defaults only where documented in code.
@@ -162,6 +178,9 @@ pub fn validate_source_schema(schema: &MdbSchema, mapping: &MappingConfig) -> Re
     require_source_column(columns, "Main Group Code", &mapping.main_plu_table)?;
     require_source_column(columns, "Name 1", &mapping.main_plu_table)?;
     require_source_column(columns, "Price", &mapping.main_plu_table)?;
+    require_source_column(columns, "Barcode", &mapping.main_plu_table)?;
+    require_source_column(columns, "Barcode Format", &mapping.main_plu_table)?;
+    require_source_column(columns, "Flag Data", &mapping.main_plu_table)?;
     Ok(())
 }
 
@@ -275,6 +294,14 @@ fn normalize_plu(
             format!("invalid group: {err}"),
         )
     })?;
+    let normalized_barcode = normalize_barcode(row).map_err(|err| {
+        row_issue(
+            row,
+            Some(plu_number),
+            "barcode",
+            format!("invalid barcode fields: {err}"),
+        )
+    })?;
     Ok(Plu {
         plu_number,
         store_number,
@@ -284,7 +311,12 @@ fn normalize_plu(
         source_group: optional_raw_text(row, GROUP_COLUMNS),
         group_default_applied: normalized_group.default_applied,
         name,
-        barcode: optional_text(row, BARCODE_COLUMNS),
+        barcode: Some(normalized_barcode.data),
+        barcode_type: Some(normalized_barcode.barcode_type),
+        barcode_ref_no: Some(normalized_barcode.barcode_ref_no),
+        source_barcode: Some(normalized_barcode.source_barcode),
+        source_barcode_format: Some(normalized_barcode.source_barcode_format),
+        source_flag_data: Some(normalized_barcode.source_flag_data),
         price,
         price_mode: normalized_price_mode.price_mode,
         price_calc_method: normalized_price_mode.price_calc_method,
@@ -347,6 +379,81 @@ fn normalize_plu(
             .and_then(|key| pluing_counts.get(&key).copied())
             .unwrap_or_default(),
     })
+}
+
+fn normalize_barcode(row: &SourceRow) -> Result<NormalizedBarcode, AppError> {
+    let raw_barcode = required_text(row, BARCODE_COLUMNS, "Barcode")?;
+    let barcode = raw_barcode.trim();
+    if barcode.is_empty() {
+        return Err(AppError::MdbExport(
+            "Barcode is empty; VB.NET does not use PLU number as barcode data".to_string(),
+        ));
+    }
+    if !barcode.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(AppError::MdbExport(format!(
+            "Barcode value '{barcode}' must contain only digits"
+        )));
+    }
+
+    let raw_format = optional_raw_text(row, BARCODE_FORMAT_COLUMNS).unwrap_or_default();
+    let normalized_format = normalize_barcode_format(&raw_format)?;
+    let raw_flag = optional_raw_text(row, FLAG_DATA_COLUMNS).unwrap_or_default();
+    let normalized_flag = normalize_non_negative_integer_text(&raw_flag, "Flag Data", "0")?;
+
+    let barcode_width = if normalized_format == "4" { 6 } else { 5 };
+    let data = format!(
+        "{}{}",
+        left_pad(&normalized_flag, 2),
+        left_pad(barcode, barcode_width)
+    );
+    let barcode_ref_no = if normalized_format.is_empty()
+        || normalized_format == "0"
+        || raw_format.trim().eq_ignore_ascii_case("00")
+    {
+        "1".to_string()
+    } else {
+        normalized_format.clone()
+    };
+
+    Ok(NormalizedBarcode {
+        data,
+        barcode_type: normalized_format,
+        barcode_ref_no,
+        source_barcode: raw_barcode,
+        source_barcode_format: raw_format,
+        source_flag_data: raw_flag,
+    })
+}
+
+fn normalize_barcode_format(raw_format: &str) -> Result<String, AppError> {
+    normalize_non_negative_integer_text(raw_format, "Barcode Format", "5")
+}
+
+fn normalize_non_negative_integer_text(
+    raw: &str,
+    field: &str,
+    default_value: &str,
+) -> Result<String, AppError> {
+    let trimmed = raw.trim();
+    let effective = if trimmed.is_empty() {
+        default_value
+    } else {
+        trimmed
+    };
+    let value = effective.parse::<u32>().map_err(|err| {
+        AppError::MdbExport(format!(
+            "{field} value '{effective}' is not a supported non-negative integer: {err}"
+        ))
+    })?;
+    Ok(value.to_string())
+}
+
+fn left_pad(value: &str, width: usize) -> String {
+    if value.len() >= width {
+        value.to_string()
+    } else {
+        format!("{}{}", "0".repeat(width - value.len()), value)
+    }
 }
 
 fn normalize_price_mode(row: &SourceRow) -> Result<NormalizedPriceMode, AppError> {
@@ -768,6 +875,9 @@ mod tests {
                 ("Name 1".to_string(), name_1.to_string()),
                 ("Price".to_string(), "1.99".to_string()),
                 ("PriceMode".to_string(), "each".to_string()),
+                ("Barcode".to_string(), plucode.to_string()),
+                ("Barcode Format".to_string(), "05".to_string()),
+                ("Flag Data".to_string(), "02".to_string()),
             ]),
         }
     }
@@ -790,7 +900,9 @@ mod tests {
                 ("Price".to_string(), price.to_string()),
                 ("Quantity".to_string(), quantity.to_string()),
                 ("Quantity Symbol".to_string(), quantity_symbol.to_string()),
+                ("Barcode".to_string(), plucode.to_string()),
                 ("Barcode Format".to_string(), "05".to_string()),
+                ("Flag Data".to_string(), "02".to_string()),
             ]),
         }
     }
@@ -1172,6 +1284,9 @@ mod tests {
                 ("Name".to_string(), "Apples".to_string()),
                 ("Price".to_string(), "1.99".to_string()),
                 ("PriceMode".to_string(), "weight".to_string()),
+                ("Barcode".to_string(), "1001".to_string()),
+                ("Barcode Format".to_string(), "05".to_string()),
+                ("Flag Data".to_string(), "02".to_string()),
             ]),
         };
         let dataset = SourceDataset {
@@ -1204,6 +1319,12 @@ mod tests {
         assert_eq!(plu.price_calc_method, Some(0));
         assert_eq!(plu.quantity, Some(0));
         assert_eq!(plu.quantity_symbol, Some(0));
+        assert_eq!(plu.source_barcode_format.as_deref(), Some("05"));
+        assert_eq!(plu.source_barcode.as_deref(), Some("1001"));
+        assert_eq!(plu.source_flag_data.as_deref(), Some("02"));
+        assert_eq!(plu.barcode_type.as_deref(), Some("5"));
+        assert_eq!(plu.barcode_ref_no.as_deref(), Some("5"));
+        assert_eq!(plu.barcode.as_deref(), Some("0201001"));
     }
 
     #[test]
@@ -1221,6 +1342,8 @@ mod tests {
         assert_eq!(plu.price_calc_method, Some(0));
         assert_eq!(plu.quantity, Some(6));
         assert_eq!(plu.quantity_symbol, Some(1));
+        assert_eq!(plu.barcode_type.as_deref(), Some("5"));
+        assert_eq!(plu.barcode_ref_no.as_deref(), Some("5"));
     }
 
     #[test]
@@ -1276,6 +1399,76 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_barcode_format_05_maps_to_vb_payload_values() {
+        let dataset = SourceDataset {
+            plu_rows: vec![SourceRow {
+                table: "Pludata".to_string(),
+                values: BTreeMap::from([
+                    ("Plucode".to_string(), "1".to_string()),
+                    ("Department".to_string(), "0001".to_string()),
+                    ("Main Group Code".to_string(), "1".to_string()),
+                    ("Category".to_string(), "0".to_string()),
+                    ("Name 1".to_string(), "BALERON".to_string()),
+                    ("Price".to_string(), "16.90".to_string()),
+                    ("Barcode".to_string(), "1".to_string()),
+                    ("Barcode Format".to_string(), "05".to_string()),
+                    ("Flag Data".to_string(), "02".to_string()),
+                ]),
+            }],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let plu = &report.plus[0];
+
+        assert_eq!(plu.barcode_type.as_deref(), Some("5"));
+        assert_eq!(plu.barcode_ref_no.as_deref(), Some("5"));
+        assert_eq!(plu.barcode.as_deref(), Some("0200001"));
+    }
+
+    #[test]
+    fn barcode_format_4_uses_six_digit_barcode_payload_data() {
+        let mut row = dca_pludata_row("42", "0", "1.99", "0", "");
+        row.values
+            .insert("Barcode Format".to_string(), "4".to_string());
+        row.values.insert("Barcode".to_string(), "42".to_string());
+        row.values.insert("Flag Data".to_string(), "02".to_string());
+        let dataset = SourceDataset {
+            plu_rows: vec![row],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(report.plus[0].barcode_type.as_deref(), Some("4"));
+        assert_eq!(report.plus[0].barcode_ref_no.as_deref(), Some("4"));
+        assert_eq!(report.plus[0].barcode.as_deref(), Some("02000042"));
+    }
+
+    #[test]
+    fn invalid_barcode_format_is_blocked_before_submission() {
+        let mut row = dca_pludata_row("1", "0", "1.99", "0", "");
+        row.values
+            .insert("Barcode Format".to_string(), "ABC".to_string());
+        let dataset = SourceDataset {
+            plu_rows: vec![row],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert!(report.plus.is_empty());
+        assert!(
+            report.row_issues.iter().any(|issue| {
+                issue.field == "barcode" && issue.message.contains("Barcode Format")
+            })
+        );
+    }
+
+    #[test]
     fn pluing_supplies_ordered_ingredients_and_nutrition() {
         let plu_row = SourceRow {
             table: "Pludata".to_string(),
@@ -1287,6 +1480,9 @@ mod tests {
                 ("Name 2".to_string(), "Slices".to_string()),
                 ("Price".to_string(), "1.99".to_string()),
                 ("PriceMode".to_string(), "each".to_string()),
+                ("Barcode".to_string(), "1001".to_string()),
+                ("Barcode Format".to_string(), "05".to_string()),
+                ("Flag Data".to_string(), "02".to_string()),
             ]),
         };
         let pluing_row = SourceRow {

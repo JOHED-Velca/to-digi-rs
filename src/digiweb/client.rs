@@ -508,7 +508,10 @@ fn interpret_status_response(
             .or_else(|| response.request_id_header.clone()),
         status,
         method: status_response.method,
-        message: status_response.message,
+        message: status_response
+            .message
+            .as_deref()
+            .map(concise_backend_message),
     })
 }
 
@@ -563,6 +566,17 @@ fn parse_async_status(value: &Value) -> AsyncRequestStatusResponse {
         method: json_text(value, &["method"]),
         message: json_text(value, &["message", "error", "detail", "title"]),
     }
+}
+
+fn concise_backend_message(message: &str) -> String {
+    let first_line = message.lines().next().unwrap_or(message).trim();
+    if let Some((_prefix, detail)) = first_line.split_once("java.lang.Exception:") {
+        let detail = detail.trim();
+        if !detail.is_empty() {
+            return detail.to_string();
+        }
+    }
+    first_line.to_string()
 }
 
 fn json_value(response: &CapturedHttpResponse) -> Result<Value, AppError> {
@@ -1395,7 +1409,12 @@ mod tests {
                 source_group: Some("997".to_string()),
                 group_default_applied: false,
                 name: "Apples".to_string(),
-                barcode: None,
+                barcode: Some("0200001".to_string()),
+                barcode_type: Some("5".to_string()),
+                barcode_ref_no: Some("5".to_string()),
+                source_barcode: Some("1".to_string()),
+                source_barcode_format: Some("05".to_string()),
+                source_flag_data: Some("02".to_string()),
                 price: rust_decimal::Decimal::new(199, 2),
                 price_mode: PriceMode::ByEach,
                 price_calc_method: None,
@@ -1450,6 +1469,13 @@ mod tests {
         assert!(sanitized.contains("<app-root>"));
         assert!(sanitized.contains("<truncated>"));
         assert!(sanitized.chars().count() < 600);
+    }
+
+    #[test]
+    fn backend_stack_trace_message_is_summarized_for_record_result() {
+        let message = "Error processing shop. Shop nr: 5001: java.lang.Exception: barcodetype_uuid is null\n\tat eu.digi.skyproject.registry.service.PluConsumerService";
+
+        assert_eq!(concise_backend_message(message), "barcodetype_uuid is null");
     }
 
     fn raw_response(

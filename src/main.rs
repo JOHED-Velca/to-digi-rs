@@ -173,6 +173,30 @@ async fn run_inner(logger: &mut AuditLogger) -> Result<i32, AppError> {
                 "no"
             },
         )?;
+        logger.kv(
+            "Raw Barcode Format",
+            &format!("{:?}", plu.source_barcode_format.as_deref().unwrap_or("")),
+        )?;
+        logger.kv(
+            "Raw Barcode",
+            &format!("{:?}", plu.source_barcode.as_deref().unwrap_or("")),
+        )?;
+        logger.kv(
+            "Raw Flag Data",
+            &format!("{:?}", plu.source_flag_data.as_deref().unwrap_or("")),
+        )?;
+        logger.kv(
+            "Derived DIGIweb barcode type",
+            plu.barcode_type.as_deref().unwrap_or("missing"),
+        )?;
+        logger.kv(
+            "Derived DIGIweb barcode reference",
+            plu.barcode_ref_no.as_deref().unwrap_or("missing"),
+        )?;
+        logger.kv(
+            "Derived barcode data",
+            &format!("{:?}", plu.barcode.as_deref().unwrap_or("")),
+        )?;
         if let Some(group) = plu.group_number {
             logger.line(format!(
                 "PLU {} group reference: {} - local validation passed",

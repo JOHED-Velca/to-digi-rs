@@ -138,7 +138,25 @@ pub fn validate_plus(plus: &[Plu]) -> ValidationReport {
                     format!("duplicate barcode also used by PLU {previous_plu}"),
                 ));
             }
+        } else {
+            issues.push(ValidationIssue::error(
+                Some(plu.plu_number),
+                "barcode",
+                "DIGIweb plubarcodedata is mandatory for plus/write",
+            ));
         }
+        validate_barcode_reference(
+            plu,
+            "barcode_type",
+            plu.barcode_type.as_deref(),
+            &mut issues,
+        );
+        validate_barcode_reference(
+            plu,
+            "barcode_ref_no",
+            plu.barcode_ref_no.as_deref(),
+            &mut issues,
+        );
         if let Some(expiration_days) = plu.expiration_days {
             if expiration_days > MAX_EXPIRATION_DAYS {
                 issues.push(ValidationIssue::error(
@@ -187,6 +205,29 @@ pub fn validate_plus(plus: &[Plu]) -> ValidationReport {
     }
 
     ValidationReport { issues }
+}
+
+fn validate_barcode_reference(
+    plu: &Plu,
+    field: &str,
+    value: Option<&str>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        issues.push(ValidationIssue::error(
+            Some(plu.plu_number),
+            field,
+            "DIGIweb barcode reference is mandatory for plus/write",
+        ));
+        return;
+    };
+    if !value.chars().all(|ch| ch.is_ascii_digit()) {
+        issues.push(ValidationIssue::error(
+            Some(plu.plu_number),
+            field,
+            "DIGIweb barcode reference must contain only digits",
+        ));
+    }
 }
 
 pub fn valid_plu_candidates(plus: &[Plu], report: &ValidationReport) -> Vec<Plu> {
@@ -245,7 +286,12 @@ mod tests {
             source_group: Some("1".to_string()),
             group_default_applied: false,
             name: "Apples".to_string(),
-            barcode: None,
+            barcode: Some(format!("020{plu_number:05}")),
+            barcode_type: Some("5".to_string()),
+            barcode_ref_no: Some("5".to_string()),
+            source_barcode: Some(plu_number.to_string()),
+            source_barcode_format: Some("05".to_string()),
+            source_flag_data: Some("02".to_string()),
             price: Decimal::new(199, 2),
             price_mode: PriceMode::ByWeight,
             price_calc_method: None,

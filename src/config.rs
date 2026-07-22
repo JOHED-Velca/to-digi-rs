@@ -162,6 +162,14 @@ impl AppConfig {
                 "poll interval and timeout must be greater than zero".to_string(),
             ));
         }
+        validate_optional_numeric_override(
+            "digiweb.plu_barcode_type",
+            &self.digiweb.plu_barcode_type,
+        )?;
+        validate_optional_numeric_override(
+            "digiweb.plu_barcode_ref_no",
+            &self.digiweb.plu_barcode_ref_no,
+        )?;
         Ok(())
     }
 
@@ -171,6 +179,20 @@ impl AppConfig {
 
     pub fn plu_upsert_path(&self) -> Result<&str, AppError> {
         required_configured_path("digiweb.plu_upsert_path", &self.digiweb.plu_upsert_path)
+    }
+}
+
+fn validate_optional_numeric_override(name: &str, value: &str) -> Result<(), AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        Ok(())
+    } else {
+        Err(AppError::Config(format!(
+            "{name} must be empty or contain only digits"
+        )))
     }
 }
 
