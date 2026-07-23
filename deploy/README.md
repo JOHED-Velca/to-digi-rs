@@ -1,25 +1,25 @@
 # to-digi-rs Deployment Bundle
 
-This directory is the portable customer deployment template for `to-digi-rs` v0.5.0.
+This directory is the portable customer deployment template for `to-digi-rs` v0.5.1.
 
 ## Quick Deployment
 
-1. Download and extract `to-digi-rs-deploy-v0.5.0.tar.gz`.
-2. Place the customer Access database beside `run.sh` using the exact filename `plu.mdb`.
-3. Run `./run.sh analyze` before configuring DIGIweb credentials.
+1. Download and extract `to-digi-rs-deploy-v0.5.1.tar.gz`.
+2. Place the customer Access database beside `import.sh` using the exact filename `plu.mdb`.
+3. Run `./import.sh analyze` before configuring DIGIweb credentials.
 4. Copy `config.example.toml` to `config.toml`.
 5. Fill in the customer-specific DIGIweb values in `config.toml`.
 6. Log in to GHCR once if the package is private.
-7. Run `./run.sh verify`, then one of the import commands below.
-7. Read the printed output path under `output/run-...-COMMAND/`.
+7. Run `./import.sh verify`, then one of the import commands below.
+8. Read the printed output path under `output/run-...-COMMAND/`.
 
 ```bash
-./run.sh analyze
-./run.sh import --test
-./run.sh import --limit 10
-./run.sh import --continue-on-error
-./run.sh test-connection
-./run.sh verify
+./import.sh analyze
+./import.sh import --test
+./import.sh import --limit 10
+./import.sh import --continue-on-error
+./import.sh test-connection
+./import.sh verify
 ```
 
 Prepared runtime directory:
@@ -27,6 +27,7 @@ Prepared runtime directory:
 ```text
 to-digi-rs-deploy/
 |-- compose.yaml
+|-- import.sh
 |-- run.sh
 |-- config.toml
 |-- plu.mdb
@@ -35,18 +36,24 @@ to-digi-rs-deploy/
 
 The release bundle ships `config.example.toml`, not a real `config.toml`, and it never includes a real MDB, credentials, tokens, logs, analysis reports, or payload previews.
 
+## Runner Rename
+
+`run.sh` was renamed to `import.sh` in v0.5.1. New installations should use `import.sh`.
+
+For this patch release, `run.sh` remains as a small compatibility wrapper. It prints a deprecation notice, forwards all arguments to `import.sh`, and preserves the exit code.
+
 ## First Customer-Installation Command
 
 Use analysis as the first source-prerequisite check:
 
 ```bash
 cp CUSTOMER_DATABASE.mdb plu.mdb
-./run.sh analyze
+./import.sh analyze
 ```
 
 `analyze` does not require `config.toml`, `DIGIWEB_CLIENT_SECRET`, working DIGIweb URLs, or network access. If `config.toml` is absent, the importer logs that it is using the built-in `Pludata` and `PluIng` mapping defaults.
 
-Review both reports before configuring DIGIweb prerequisites:
+The terminal summary prints the required departments and groups directly. Review both reports for audit detail and automation:
 
 ```text
 analysis-report.txt
@@ -58,9 +65,9 @@ Then continue:
 ```bash
 cp config.example.toml config.toml
 # edit config.toml and export DIGIWEB_CLIENT_SECRET when ready
-./run.sh verify
-./run.sh import --limit 1
-./run.sh import
+./import.sh verify
+./import.sh import --limit 1
+./import.sh import
 ```
 
 ## Commands
@@ -73,7 +80,7 @@ cp config.example.toml config.toml
 
 `verify` reads the source and authenticates, but does not write PLUs.
 
-For one release, running `./run.sh` with no command still honors the old `[import]` config booleans and logs a deprecation warning. New scripts should use explicit commands.
+For one release, running `./import.sh` with no command still honors the old `[import]` config booleans and logs a deprecation warning. New scripts should use explicit commands.
 
 ## GHCR Login
 
@@ -89,28 +96,28 @@ printf '%s' "$GHCR_TOKEN" |
 unset GHCR_TOKEN
 ```
 
-Do not paste the token into `config.toml`, `run.sh`, shell history, or any repository file. Docker stores the login for later pulls.
+Do not paste the token into `config.toml`, `import.sh`, shell history, or any repository file. Docker stores the login for later pulls.
 
 ## Image Selection
 
 The default image is:
 
 ```text
-ghcr.io/johed-velca/to-digi-rs:0.5.0
+ghcr.io/johed-velca/to-digi-rs:0.5.1
 ```
 
 For local testing or an offline customer VM, load or build a local image and override the image name without editing `compose.yaml`:
 
 ```bash
-TO_DIGI_RS_IMAGE=to-digi-rs:0.5.0 ./run.sh analyze
+TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1 ./import.sh analyze
 ```
 
 Offline transfer example:
 
 ```bash
-docker save to-digi-rs:0.5.0 -o to-digi-rs-image-0.5.0.tar
-docker load -i to-digi-rs-image-0.5.0.tar
-TO_DIGI_RS_IMAGE=to-digi-rs:0.5.0 ./run.sh import --test
+docker save to-digi-rs:0.5.1 -o to-digi-rs-image-0.5.1.tar
+docker load -i to-digi-rs-image-0.5.1.tar
+TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1 ./import.sh import --test
 ```
 
 ## Output Locations
@@ -146,7 +153,7 @@ The JSON report is intended for automation. It includes `schema_version`, `appli
 
 ## Exit Codes
 
-`run.sh` exits with the importer/container exit code.
+`import.sh` exits with the importer/container exit code.
 
 ```text
 0 = complete success
@@ -168,11 +175,11 @@ The JSON report is intended for automation. It includes `schema_version`, `appli
 
 `Missing config.toml`: copy `config.example.toml` to `config.toml` and fill in the customer values. `analyze`, `--help`, and `--version` do not require this file.
 
-`Missing plu.mdb`: place the source database beside `run.sh` using the exact lowercase filename `plu.mdb`. `test-connection`, `--help`, and `--version` do not require the database.
+`Missing plu.mdb`: place the source database beside `import.sh` using the exact lowercase filename `plu.mdb`. `test-connection`, `--help`, and `--version` do not require the database.
 
 `plu.mdb is a symbolic link`: replace it with a regular file. The importer rejects symlinked databases.
 
-`Root-owned output`: run `./run.sh` as the intended Linux user. The script passes the invoking UID/GID into Compose so new files are not owned by root.
+`Root-owned output`: run `./import.sh` as the intended Linux user. The script passes the invoking UID/GID into Compose so new files are not owned by root.
 
 `DIGIweb connection failure`: verify `base_url`, `token_url`, network access from the Ubuntu host, and certificate settings.
 

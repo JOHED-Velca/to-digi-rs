@@ -1,6 +1,6 @@
 services:
   importer:
-    image: ${TO_DIGI_RS_IMAGE:-ghcr.io/johed-velca/to-digi-rs:0.5.0}
+    image: ${TO_DIGI_RS_IMAGE:-ghcr.io/johed-velca/to-digi-rs:0.5.1}
     network_mode: host
     working_dir: /work
     user: "${LOCAL_UID:?LOCAL_UID is required}:${LOCAL_GID:?LOCAL_GID is required}"

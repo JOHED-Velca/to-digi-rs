@@ -13,7 +13,9 @@ use std::path::Path;
 use std::time::Instant;
 
 use analysis::model::ReferenceTableSnapshot;
-use analysis::{AnalysisInput, collect_analysis, write_json_report, write_text_report};
+use analysis::{
+    AnalysisInput, collect_analysis, render_console_summary, write_json_report, write_text_report,
+};
 use clap::Parser;
 use cli::{Cli, EffectiveCommand, effective_command};
 use config::{AppConfig, client_secret_log_message, load_client_secret};
@@ -433,19 +435,10 @@ fn run_analyze(config: &AppConfig, logger: &mut AuditLogger) -> Result<i32, AppE
         unknown_plu_numbers: &[],
         dry_run: true,
     })?;
-    println!("MDB analysis completed.\n");
-    println!("Source PLUs: {}", report.summary.source_plus_discovered);
-    println!("Valid PLUs: {}", report.summary.valid_plus);
-    println!(
-        "Empty placeholders: {}",
-        report.summary.empty_placeholder_rows
+    print!(
+        "{}",
+        render_console_summary(&report, "./analysis-report.txt", "./analysis-report.json")
     );
-    println!("Warnings: {}", report.warnings.len());
-    println!("Blocking errors: {}", report.blocking_errors.len());
-    println!("Analysis status: {}", report.analysis_status.as_text());
-    println!("\nText report:\n./analysis-report.txt");
-    println!("\nJSON report:\n./analysis-report.json");
-    println!("\nNo authentication or DIGIweb API requests were attempted.");
     Ok(report.analysis_status.exit_code())
 }
 
@@ -699,6 +692,7 @@ fn read_reference_tables(
                 present: true,
                 row_count: rows.len(),
                 columns,
+                rows,
             });
         } else {
             tables.push(ReferenceTableSnapshot {
@@ -706,6 +700,7 @@ fn read_reference_tables(
                 present: false,
                 row_count: 0,
                 columns: Vec::new(),
+                rows: Vec::new(),
             });
         }
     }

@@ -121,6 +121,13 @@ pub fn render_text_report(report: &AnalysisReport) -> String {
         line(
             &mut out,
             format!(
+                "Source name: {}",
+                display_optional_name(department.source_name.as_deref())
+            ),
+        );
+        line(
+            &mut out,
+            format!(
                 "Source representations: {}",
                 quoted_join(&department.source_representations)
             ),
@@ -186,6 +193,13 @@ pub fn render_text_report(report: &AnalysisReport) -> String {
             format!(
                 "Department {} / Group {}",
                 group.department_number, group.group_number
+            ),
+        );
+        line(
+            &mut out,
+            format!(
+                "Source name: {}",
+                display_optional_name(group.source_name.as_deref())
             ),
         );
         line(&mut out, format!("PLU count: {}", group.plu_count));
@@ -525,6 +539,10 @@ fn join_numbers(values: &[u64]) -> String {
     }
 }
 
+fn display_optional_name(value: Option<&str>) -> &str {
+    value.unwrap_or("Name unavailable in source MDB")
+}
+
 #[cfg(test)]
 mod tests {
     use crate::analysis::model::{
@@ -537,7 +555,7 @@ mod tests {
     fn text_report_contains_safety_confirmation_and_no_secrets() {
         let report = AnalysisReport {
             schema_version: 1,
-            application_version: "0.5.0".to_string(),
+            application_version: "0.5.1".to_string(),
             generated_at: "2026-07-23T00:00:00-04:00".to_string(),
             analysis_status: AnalysisStatus::Pass,
             source: SourceSummary {
