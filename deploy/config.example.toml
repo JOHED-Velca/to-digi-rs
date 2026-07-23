@@ -17,7 +17,7 @@ poll_interval_seconds = 2
 poll_timeout_seconds = 120
 
 [import]
-# Deprecated as command selectors in v0.4.0. Use:
+# Deprecated as command selectors in v0.5.0. Use:
 #   ./run.sh analyze
 #   ./run.sh import --test
 #   ./run.sh import --limit N

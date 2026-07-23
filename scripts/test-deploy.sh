@@ -47,12 +47,16 @@ if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
     if printf '%s\n' "$*" | grep -Fq ' config'; then
         exit 0
     fi
+    if printf '%s\n' "$*" | grep -Eq ' importer (--help|--version)$'; then
+        exit "${FAKE_IMPORT_EXIT:-0}"
+    fi
     printf 'LOCAL_UID=%s\n' "${LOCAL_UID:-}" >>"$log"
     printf 'LOCAL_GID=%s\n' "${LOCAL_GID:-}" >>"$log"
     printf 'TO_DIGI_RS_IMAGE=%s\n' "${TO_DIGI_RS_IMAGE:-}" >>"$log"
     printf 'compose-run-ok\n' >logs.txt
     if printf '%s\n' "$*" | grep -Fq ' importer analyze'; then
         printf 'analysis-ok\n' >analysis-report.txt
+        printf '{"schema_version":1}\n' >analysis-report.json
     fi
     mkdir -p payload-previews
     printf '{"pluno":1}\n' >payload-previews/plu-1.json
@@ -98,7 +102,7 @@ test_resolves_own_directory_and_archives_output() {
     assert_contains "$output" "Importer exit code: 0"
     assert_contains "$output" "$deploy_dir/output/run-"
     [ -f "$deploy_dir"/output/run-*-import/logs.txt ] || fail "import logs.txt was not archived under an import-suffixed directory"
-    assert_contains "$TEST_ROOT/fake-docker.log" "TO_DIGI_RS_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.4.0"
+    assert_contains "$TEST_ROOT/fake-docker.log" "TO_DIGI_RS_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.5.0"
     [ -f "$deploy_dir"/output/run-*/logs.txt ] || fail "logs.txt was not archived"
     [ -f "$deploy_dir"/output/run-*/payload-previews/plu-1.json ] || fail "payload preview was not archived"
     [ ! -f "$deploy_dir/logs.txt" ] || fail "root logs.txt was not left behind"
@@ -113,7 +117,8 @@ test_help_and_version_do_not_require_config_or_plu() {
     run_with_fake_docker "$deploy_dir" "$output" --help
 
     assert_contains "$output" "Importer exit code: 0"
-    [ -f "$deploy_dir"/output/run-*-info/logs.txt ] || fail "help output was not archived under an info-suffixed directory"
+    assert_not_contains "$output" "Importer did not create logs.txt"
+    [ -d "$deploy_dir"/output/run-*-info ] || fail "help output directory was not created under an info suffix"
     assert_contains "$TEST_ROOT/fake-docker.log" "importer --help"
 
     local deploy_dir_v="$TEST_ROOT/deploy-version"
@@ -124,6 +129,7 @@ test_help_and_version_do_not_require_config_or_plu() {
     run_with_fake_docker "$deploy_dir_v" "$output_v" --version
 
     assert_contains "$output_v" "Importer exit code: 0"
+    assert_not_contains "$output_v" "Importer did not create logs.txt"
     assert_contains "$TEST_ROOT/fake-docker.log" "importer --version"
 }
 
@@ -155,11 +161,14 @@ test_analyze_archives_analysis_report() {
     local deploy_dir="$TEST_ROOT/deploy-analyze"
     local output="$TEST_ROOT/output-analyze.txt"
     copy_deploy "$deploy_dir"
+    rm "$deploy_dir/config.toml"
 
     run_with_fake_docker "$deploy_dir" "$output" analyze
 
-    assert_contains "$output" "Analysis report:"
+    assert_contains "$output" "Text analysis report:"
+    assert_contains "$output" "JSON analysis report:"
     [ -f "$deploy_dir"/output/run-*-analyze/analysis-report.txt ] || fail "analysis-report.txt was not archived"
+    [ -f "$deploy_dir"/output/run-*-analyze/analysis-report.json ] || fail "analysis-report.json was not archived"
 }
 
 test_missing_config_fails_clearly() {
@@ -259,14 +268,14 @@ test_image_override_uid_gid_and_exit_code_are_preserved() {
     mkdir -p "$fake_dir"
     make_fake_docker "$fake_dir/docker"
     set +e
-    FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.4.0 \
+    FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.5.0 \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
     "$deploy_dir/run.sh" >"$output" 2>&1
     local code=$?
     set -e
     [ "$code" -eq 7 ] || fail "import exit code was not preserved: $code"
     assert_contains "$output" "Importer exit code: 7"
-    assert_contains "$log" "TO_DIGI_RS_IMAGE=to-digi-rs:0.4.0"
+    assert_contains "$log" "TO_DIGI_RS_IMAGE=to-digi-rs:0.5.0"
     assert_contains "$log" "LOCAL_UID="
     assert_contains "$log" "LOCAL_GID="
 }
@@ -284,7 +293,7 @@ test_existing_output_is_preserved() {
 
 test_package_archive_contains_only_expected_files() {
     local archive
-    archive="$(TO_DIGI_RS_VERSION=0.4.0 "$ROOT_DIR/scripts/package-deploy.sh")"
+    archive="$(TO_DIGI_RS_VERSION=0.5.0 "$ROOT_DIR/scripts/package-deploy.sh")"
     [ -f "$archive" ] || fail "archive was not created"
     local listing="$TEST_ROOT/archive-list.txt"
     tar -tzf "$archive" | sort >"$listing"

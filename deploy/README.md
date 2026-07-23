@@ -1,15 +1,16 @@
 # to-digi-rs Deployment Bundle
 
-This directory is the portable customer deployment template for `to-digi-rs` v0.4.0.
+This directory is the portable customer deployment template for `to-digi-rs` v0.5.0.
 
 ## Quick Deployment
 
-1. Download and extract `to-digi-rs-deploy-v0.4.0.tar.gz`.
-2. Copy `config.example.toml` to `config.toml`.
-3. Fill in the customer-specific DIGIweb values in `config.toml`.
-4. Place the customer Access database beside `run.sh` using the exact filename `plu.mdb` for `analyze`, `import`, or `verify`.
-5. Log in to GHCR once if the package is private.
-6. Run one of the commands below.
+1. Download and extract `to-digi-rs-deploy-v0.5.0.tar.gz`.
+2. Place the customer Access database beside `run.sh` using the exact filename `plu.mdb`.
+3. Run `./run.sh analyze` before configuring DIGIweb credentials.
+4. Copy `config.example.toml` to `config.toml`.
+5. Fill in the customer-specific DIGIweb values in `config.toml`.
+6. Log in to GHCR once if the package is private.
+7. Run `./run.sh verify`, then one of the import commands below.
 7. Read the printed output path under `output/run-...-COMMAND/`.
 
 ```bash
@@ -34,9 +35,37 @@ to-digi-rs-deploy/
 
 The release bundle ships `config.example.toml`, not a real `config.toml`, and it never includes a real MDB, credentials, tokens, logs, analysis reports, or payload previews.
 
+## First Customer-Installation Command
+
+Use analysis as the first source-prerequisite check:
+
+```bash
+cp CUSTOMER_DATABASE.mdb plu.mdb
+./run.sh analyze
+```
+
+`analyze` does not require `config.toml`, `DIGIWEB_CLIENT_SECRET`, working DIGIweb URLs, or network access. If `config.toml` is absent, the importer logs that it is using the built-in `Pludata` and `PluIng` mapping defaults.
+
+Review both reports before configuring DIGIweb prerequisites:
+
+```text
+analysis-report.txt
+analysis-report.json
+```
+
+Then continue:
+
+```bash
+cp config.example.toml config.toml
+# edit config.toml and export DIGIWEB_CLIENT_SECRET when ready
+./run.sh verify
+./run.sh import --limit 1
+./run.sh import
+```
+
 ## Commands
 
-`analyze` reads and validates `plu.mdb`, writes `analysis-report.txt`, and does not authenticate or contact DIGIweb.
+`analyze` reads and validates `plu.mdb`, writes `analysis-report.txt` and `analysis-report.json`, and does not authenticate or contact DIGIweb.
 
 `import` is the only command that writes PLUs to DIGIweb. `--test` imports the first valid normalized PLU. `--limit N` imports the first `N` valid normalized PLUs. `--continue-on-error` keeps submitting later selected PLUs after a record failure or unknown status.
 
@@ -67,21 +96,21 @@ Do not paste the token into `config.toml`, `run.sh`, shell history, or any repos
 The default image is:
 
 ```text
-ghcr.io/johed-velca/to-digi-rs:0.4.0
+ghcr.io/johed-velca/to-digi-rs:0.5.0
 ```
 
 For local testing or an offline customer VM, load or build a local image and override the image name without editing `compose.yaml`:
 
 ```bash
-TO_DIGI_RS_IMAGE=to-digi-rs:0.4.0 ./run.sh analyze
+TO_DIGI_RS_IMAGE=to-digi-rs:0.5.0 ./run.sh analyze
 ```
 
 Offline transfer example:
 
 ```bash
-docker save to-digi-rs:0.4.0 -o to-digi-rs-image-0.4.0.tar
-docker load -i to-digi-rs-image-0.4.0.tar
-TO_DIGI_RS_IMAGE=to-digi-rs:0.4.0 ./run.sh import --test
+docker save to-digi-rs:0.5.0 -o to-digi-rs-image-0.5.0.tar
+docker load -i to-digi-rs-image-0.5.0.tar
+TO_DIGI_RS_IMAGE=to-digi-rs:0.5.0 ./run.sh import --test
 ```
 
 ## Output Locations
@@ -92,13 +121,28 @@ Each run gets a new timestamped, command-suffixed directory:
 output/
 |-- run-20260722-143000-analyze/
 |   |-- logs.txt
-|   `-- analysis-report.txt
+|   |-- analysis-report.txt
+|   `-- analysis-report.json
 `-- run-20260722-150500-import/
     |-- logs.txt
     `-- payload-previews/
 ```
 
-Previous output is preserved. The script only removes transient root-level `logs.txt`, `analysis-report.txt`, and `payload-previews/` before starting the next run.
+Previous output is preserved. The script only removes transient root-level `logs.txt`, `analysis-report.txt`, `analysis-report.json`, and `payload-previews/` before starting the next run.
+
+## Analysis Statuses
+
+```text
+PASS = source analyzed successfully with no warnings
+PASS_WITH_WARNINGS = source analyzed successfully, but nonblocking issues need review
+FAIL = source, schema, extraction, or validation problems prevent safe analysis
+```
+
+Warnings exit `0`; `FAIL` exits `2`.
+
+The JSON report is intended for automation. It includes `schema_version`, `application_version`, source summary, table summaries, department requirements, group requirements, barcode-format summaries, price-category summaries, PluIng/ingredient/nutrition summaries, structured warnings, blocking errors, recommendations, and safety confirmations.
+
+`analyze` checks source prerequisites only. It does not confirm that departments or groups exist in DIGIweb. `verify` adds DIGIweb authentication/readiness checks without writing PLUs. `import` writes valid PLUs.
 
 ## Exit Codes
 
@@ -122,7 +166,7 @@ Previous output is preserved. The script only removes transient root-level `logs
 
 `Image pull denied`: log in to GHCR with a package token that has `read:packages`, or use the offline `docker load` fallback.
 
-`Missing config.toml`: copy `config.example.toml` to `config.toml` and fill in the customer values. `--help` and `--version` do not require this file.
+`Missing config.toml`: copy `config.example.toml` to `config.toml` and fill in the customer values. `analyze`, `--help`, and `--version` do not require this file.
 
 `Missing plu.mdb`: place the source database beside `run.sh` using the exact lowercase filename `plu.mdb`. `test-connection`, `--help`, and `--version` do not require the database.
 
