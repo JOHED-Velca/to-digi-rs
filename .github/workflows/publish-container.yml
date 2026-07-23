@@ -9,7 +9,7 @@ on:
       version:
         description: "Version tag to publish, without the leading v"
         required: true
-        default: "0.3.0"
+        default: "0.4.0"
 
 permissions:
   contents: read
@@ -54,8 +54,8 @@ jobs:
       - name: Upload deployment archive
         uses: actions/upload-artifact@v4
         with:
-          name: to-digi-rs-deploy-v0.3.0
-          path: target/release-bundles/to-digi-rs-deploy-v0.3.0.tar.gz
+          name: to-digi-rs-deploy-v0.4.0
+          path: target/release-bundles/to-digi-rs-deploy-v0.4.0.tar.gz
           if-no-files-found: error
 
   publish:

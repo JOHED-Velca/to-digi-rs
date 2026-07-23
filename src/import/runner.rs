@@ -14,10 +14,18 @@ use crate::import::result::{ImportSummary, RecordImportResult};
 use crate::logging::AuditLogger;
 use crate::models::plu::Plu;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportRunOptions {
+    pub limit: Option<usize>,
+    pub continue_after_record_failure: bool,
+    pub test_mode: bool,
+}
+
 pub async fn run_import(
     config: AppConfig,
     client_secret: SecretString,
     plus: &[Plu],
+    options: ImportRunOptions,
     logger: &mut AuditLogger,
 ) -> Result<ImportSummary, AppError> {
     config.token_url()?;
@@ -28,18 +36,24 @@ pub async fn run_import(
         discovered: plus.len(),
         ..ImportSummary::default()
     };
-    let records_to_send = select_records_to_send(plus, config.import.send_only_first_plu);
+    let records_to_send = select_records_to_send(plus, options.limit);
     let selected_count = records_to_send.len();
     summary.selected = selected_count;
 
     prepare_payload_preview_dir(config.import.write_payload_preview)?;
 
-    if config.import.send_only_first_plu && plus.len() > 1 {
-        summary.intentionally_skipped_by_limit += plus.len() - 1;
-        logger.warning(format!(
-            "send_only_first_plu is enabled; {} PLU(s) will be intentionally skipped by the first-PLU limit.",
-            plus.len() - 1
-        ))?;
+    if options.test_mode {
+        logger.line("Test mode enabled: equivalent to --limit 1.")?;
+    }
+    if let Some(limit) = options.limit {
+        logger.kv("Import limit", &limit.to_string())?;
+        summary.intentionally_skipped_by_limit += plus.len().saturating_sub(selected_count);
+        if plus.len() > selected_count {
+            logger.warning(format!(
+                "{} PLU(s) will be intentionally excluded by the import limit.",
+                plus.len() - selected_count
+            ))?;
+        }
     }
     if let Some(first) = records_to_send.first() {
         logger.kv("Selected first valid PLU", &first.plu_number.to_string())?;
@@ -130,7 +144,7 @@ pub async fn run_import(
                     failure_message: Some(unknown_message),
                     duration_ms: timer.elapsed().as_millis(),
                 });
-                if !config.import.continue_after_record_failure {
+                if !options.continue_after_record_failure {
                     summary.not_attempted_after_stop += skipped_after_stop(
                         selected_count,
                         summary.succeeded,
@@ -166,7 +180,7 @@ pub async fn run_import(
                     failure_message: Some(failure),
                     duration_ms: timer.elapsed().as_millis(),
                 });
-                if !config.import.continue_after_record_failure {
+                if !options.continue_after_record_failure {
                     summary.not_attempted_after_stop += skipped_after_stop(
                         selected_count,
                         summary.succeeded,
@@ -193,7 +207,7 @@ pub async fn run_import(
                     failure_message: Some(err.to_string()),
                     duration_ms: timer.elapsed().as_millis(),
                 });
-                if !config.import.continue_after_record_failure {
+                if !options.continue_after_record_failure {
                     summary.not_attempted_after_stop += skipped_after_stop(
                         selected_count,
                         summary.succeeded,
@@ -277,12 +291,8 @@ fn write_payload_preview_in_dir(
     Ok(fs::canonicalize(&path).unwrap_or(path))
 }
 
-pub fn select_records_to_send(plus: &[Plu], send_only_first_plu: bool) -> Vec<&Plu> {
-    if send_only_first_plu {
-        plus.iter().take(1).collect()
-    } else {
-        plus.iter().collect()
-    }
+pub fn select_records_to_send(plus: &[Plu], limit: Option<usize>) -> Vec<&Plu> {
+    plus.iter().take(limit.unwrap_or(usize::MAX)).collect()
 }
 
 pub fn skipped_after_stop(
@@ -340,10 +350,10 @@ mod tests {
     }
 
     #[test]
-    fn send_only_first_plu_limits_selection_to_one_record() {
+    fn limit_one_limits_selection_to_one_record() {
         let records = vec![plu(1), plu(2), plu(3)];
 
-        let selected = select_records_to_send(&records, true);
+        let selected = select_records_to_send(&records, Some(1));
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].plu_number, 1);
@@ -353,7 +363,7 @@ mod tests {
     fn send_only_first_plu_selects_first_valid_normalized_plu() {
         let valid_after_row_skips = vec![plu(1), plu(2), plu(3)];
 
-        let selected = select_records_to_send(&valid_after_row_skips, true);
+        let selected = select_records_to_send(&valid_after_row_skips, Some(1));
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].plu_number, 1);
@@ -362,7 +372,7 @@ mod tests {
     #[test]
     fn stop_after_first_selected_failure_does_not_double_count_unselected_plus() {
         let all_valid = vec![plu(1), plu(2), plu(3), plu(4)];
-        let selected = select_records_to_send(&all_valid, true);
+        let selected = select_records_to_send(&all_valid, Some(1));
         let skipped_by_first_plu_mode = all_valid.len() - selected.len();
         let skipped_after_failure = skipped_after_stop(selected.len(), 0, 1, 0);
 
@@ -371,10 +381,10 @@ mod tests {
     }
 
     #[test]
-    fn send_only_first_plu_false_selects_all_valid_plus() {
+    fn no_limit_selects_all_valid_plus() {
         let records = vec![plu(1), plu(4), plu(2), plu(3)];
 
-        let selected = select_records_to_send(&records, false);
+        let selected = select_records_to_send(&records, None);
 
         assert_eq!(
             selected
@@ -383,6 +393,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 4, 2, 3]
         );
+    }
+
+    #[test]
+    fn limit_two_selects_first_two_valid_plus() {
+        let records = vec![plu(1), plu(4), plu(2), plu(3)];
+
+        let selected = select_records_to_send(&records, Some(2));
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|plu| plu.plu_number)
+                .collect::<Vec<_>>(),
+            vec![1, 4]
+        );
+    }
+
+    #[test]
+    fn large_limit_selects_all_valid_plus() {
+        let records = vec![plu(1), plu(4), plu(2), plu(3)];
+
+        let selected = select_records_to_send(&records, Some(10));
+
+        assert_eq!(selected.len(), 4);
     }
 
     #[test]
