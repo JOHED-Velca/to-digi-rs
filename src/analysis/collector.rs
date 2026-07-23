@@ -181,6 +181,7 @@ fn table_analysis(input: &AnalysisInput<'_>) -> Vec<TableAnalysis> {
 
 fn department_requirements(input: &AnalysisInput<'_>) -> Vec<DepartmentRequirement> {
     let table_status = snapshot_to_status(reference_table(input, "Department"));
+    let department_names = department_names(input);
     let mut by_department: BTreeMap<u32, (BTreeSet<String>, BTreeSet<u64>, bool)> = BTreeMap::new();
     for plu in input.valid_plus {
         if let Some(department) = plu.department_number {
@@ -203,6 +204,7 @@ fn department_requirements(input: &AnalysisInput<'_>) -> Vec<DepartmentRequireme
         .map(
             |(department_number, (sources, plus, normalization_applied))| DepartmentRequirement {
                 department_number,
+                source_name: department_names.get(&department_number).cloned(),
                 source_representations: sources.into_iter().collect(),
                 plu_count: plus.len(),
                 plu_numbers: plus.into_iter().collect(),
@@ -216,6 +218,7 @@ fn department_requirements(input: &AnalysisInput<'_>) -> Vec<DepartmentRequireme
 
 fn group_requirements(input: &AnalysisInput<'_>) -> Vec<GroupRequirement> {
     let table_status = snapshot_to_status(reference_table(input, "Maingroup"));
+    let group_names = group_names(input);
     let mut groups: BTreeMap<(u32, u32), (BTreeSet<u64>, usize, usize)> = BTreeMap::new();
     for plu in input.valid_plus {
         if let (Some(department), Some(group)) = (plu.department_number, plu.group_number) {
@@ -234,6 +237,7 @@ fn group_requirements(input: &AnalysisInput<'_>) -> Vec<GroupRequirement> {
             |((department_number, group_number), (plus, explicit, defaulted))| GroupRequirement {
                 department_number,
                 group_number,
+                source_name: group_names.get(&(department_number, group_number)).cloned(),
                 plu_count: plus.len(),
                 plu_numbers: plus.into_iter().collect(),
                 explicit_source_group_count: explicit,
@@ -243,6 +247,82 @@ fn group_requirements(input: &AnalysisInput<'_>) -> Vec<GroupRequirement> {
             },
         )
         .collect()
+}
+
+fn department_names(input: &AnalysisInput<'_>) -> BTreeMap<u32, String> {
+    let mut names = BTreeMap::new();
+    let Some(table) = reference_table(input, "Department").filter(|table| table.present) else {
+        return names;
+    };
+    let Some(id_column) = find_column(
+        &table.columns,
+        &["DeptNo", "Department", "DepartmentNo", "DEPT"],
+    ) else {
+        return names;
+    };
+    let Some(name_column) = find_column(
+        &table.columns,
+        &["Department Name", "DeptName", "DepartmentName", "Name"],
+    ) else {
+        return names;
+    };
+    for row in &table.rows {
+        let Some(id) = row.get(id_column).and_then(normalize_department) else {
+            continue;
+        };
+        let Some(name) = row
+            .get(name_column)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        names.entry(id).or_insert_with(|| name.to_string());
+    }
+    names
+}
+
+fn group_names(input: &AnalysisInput<'_>) -> BTreeMap<(u32, u32), String> {
+    let mut names = BTreeMap::new();
+    let Some(table) = reference_table(input, "Maingroup").filter(|table| table.present) else {
+        return names;
+    };
+    let Some(group_column) = find_column(
+        &table.columns,
+        &["MaingroupNo", "Main Group Code", "GroupNo", "GrpNo"],
+    ) else {
+        return names;
+    };
+    let Some(department_column) =
+        find_column(&table.columns, &["Maingroup Dept", "Department", "DeptNo"])
+    else {
+        return names;
+    };
+    let Some(name_column) = find_column(
+        &table.columns,
+        &["Maingroup Name", "Main Group Name", "GroupName", "Name"],
+    ) else {
+        return names;
+    };
+    for row in &table.rows {
+        let Some(department) = row.get(department_column).and_then(normalize_department) else {
+            continue;
+        };
+        let Some(group) = row.get(group_column).and_then(normalize_department) else {
+            continue;
+        };
+        let Some(name) = row
+            .get(name_column)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        names
+            .entry((department, group))
+            .or_insert_with(|| name.to_string());
+    }
+    names
 }
 
 fn barcode_analysis(input: &AnalysisInput<'_>) -> Vec<BarcodeFormatAnalysis> {
@@ -663,6 +743,15 @@ fn reference_table<'a>(
         .find(|table| table.name == name)
 }
 
+fn find_column<'a>(columns: &'a [String], candidates: &[&str]) -> Option<&'a str> {
+    candidates.iter().find_map(|candidate| {
+        columns
+            .iter()
+            .find(|column| column.as_str() == *candidate)
+            .map(String::as_str)
+    })
+}
+
 fn sorted_strings(values: impl Iterator<Item = String>) -> Vec<String> {
     values.collect::<BTreeSet<_>>().into_iter().collect()
 }
@@ -965,6 +1054,7 @@ mod tests {
             present: true,
             row_count: 0,
             columns: Vec::new(),
+            rows: Vec::new(),
         }];
 
         let report = report_for(&dataset, &valid, &[], &refs);

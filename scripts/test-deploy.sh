@@ -72,14 +72,28 @@ copy_deploy() {
     local dir="$1"
     mkdir -p "$dir"
     cp "$ROOT_DIR/deploy/compose.yaml" "$dir/compose.yaml"
+    cp "$ROOT_DIR/deploy/import.sh" "$dir/import.sh"
     cp "$ROOT_DIR/deploy/run.sh" "$dir/run.sh"
     cp "$ROOT_DIR/deploy/config.example.toml" "$dir/config.toml"
     mkdir -p "$dir/output"
     printf 'mdb\n' >"$dir/plu.mdb"
-    chmod +x "$dir/run.sh"
+    chmod +x "$dir/import.sh" "$dir/run.sh"
 }
 
 run_with_fake_docker() {
+    local deploy_dir="$1"
+    local output_file="$2"
+    shift 2
+    local fake_dir="$TEST_ROOT/fake-bin"
+    mkdir -p "$fake_dir"
+    make_fake_docker "$fake_dir/docker"
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-docker.log" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    PATH="$fake_dir:$PATH" \
+    "$deploy_dir/import.sh" "$@" >"$output_file" 2>&1
+}
+
+run_wrapper_with_fake_docker() {
     local deploy_dir="$1"
     local output_file="$2"
     shift 2
@@ -102,7 +116,7 @@ test_resolves_own_directory_and_archives_output() {
     assert_contains "$output" "Importer exit code: 0"
     assert_contains "$output" "$deploy_dir/output/run-"
     [ -f "$deploy_dir"/output/run-*-import/logs.txt ] || fail "import logs.txt was not archived under an import-suffixed directory"
-    assert_contains "$TEST_ROOT/fake-docker.log" "TO_DIGI_RS_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.5.0"
+    assert_contains "$TEST_ROOT/fake-docker.log" "TO_DIGI_RS_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.5.1"
     [ -f "$deploy_dir"/output/run-*/logs.txt ] || fail "logs.txt was not archived"
     [ -f "$deploy_dir"/output/run-*/payload-previews/plu-1.json ] || fail "payload preview was not archived"
     [ ! -f "$deploy_dir/logs.txt" ] || fail "root logs.txt was not left behind"
@@ -218,7 +232,7 @@ test_missing_docker_fails_clearly() {
     local output="$TEST_ROOT/output-no-docker.txt"
     copy_deploy "$deploy_dir"
     set +e
-    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 DOCKER_BIN="$TEST_ROOT/does-not-exist" "$deploy_dir/run.sh" >"$output" 2>&1
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 DOCKER_BIN="$TEST_ROOT/does-not-exist" "$deploy_dir/import.sh" >"$output" 2>&1
     local code=$?
     set -e
     [ "$code" -eq 2 ] || fail "missing docker exit code was $code"
@@ -235,7 +249,7 @@ test_docker_daemon_failure_fails_clearly() {
     set +e
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-daemon.log" FAKE_DOCKER_INFO_EXIT=1 \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
-    "$deploy_dir/run.sh" >"$output" 2>&1
+    "$deploy_dir/import.sh" >"$output" 2>&1
     local code=$?
     set -e
     [ "$code" -eq 2 ] || fail "daemon failure exit code was $code"
@@ -252,7 +266,7 @@ test_compose_plugin_failure_fails_clearly() {
     set +e
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-compose.log" FAKE_DOCKER_COMPOSE_VERSION_EXIT=1 \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
-    "$deploy_dir/run.sh" >"$output" 2>&1
+    "$deploy_dir/import.sh" >"$output" 2>&1
     local code=$?
     set -e
     [ "$code" -eq 2 ] || fail "compose failure exit code was $code"
@@ -268,14 +282,14 @@ test_image_override_uid_gid_and_exit_code_are_preserved() {
     mkdir -p "$fake_dir"
     make_fake_docker "$fake_dir/docker"
     set +e
-    FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.5.0 \
+    FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1 \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
-    "$deploy_dir/run.sh" >"$output" 2>&1
+    "$deploy_dir/import.sh" >"$output" 2>&1
     local code=$?
     set -e
     [ "$code" -eq 7 ] || fail "import exit code was not preserved: $code"
     assert_contains "$output" "Importer exit code: 7"
-    assert_contains "$log" "TO_DIGI_RS_IMAGE=to-digi-rs:0.5.0"
+    assert_contains "$log" "TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1"
     assert_contains "$log" "LOCAL_UID="
     assert_contains "$log" "LOCAL_GID="
 }
@@ -291,15 +305,29 @@ test_existing_output_is_preserved() {
     [ -f "$deploy_dir/output/run-old/logs.txt" ] || fail "existing output was deleted"
 }
 
+test_run_sh_forwards_to_import_sh_with_notice() {
+    local deploy_dir="$TEST_ROOT/deploy-wrapper"
+    local output="$TEST_ROOT/output-wrapper.txt"
+    copy_deploy "$deploy_dir"
+
+    run_wrapper_with_fake_docker "$deploy_dir" "$output" analyze
+
+    assert_contains "$output" "NOTICE: run.sh has been renamed to import.sh."
+    assert_contains "$output" "Forwarding this command for backward compatibility."
+    assert_contains "$output" "Importer exit code: 0"
+    assert_contains "$TEST_ROOT/fake-docker.log" "importer analyze"
+}
+
 test_package_archive_contains_only_expected_files() {
     local archive
-    archive="$(TO_DIGI_RS_VERSION=0.5.0 "$ROOT_DIR/scripts/package-deploy.sh")"
+    archive="$(TO_DIGI_RS_VERSION=0.5.1 "$ROOT_DIR/scripts/package-deploy.sh")"
     [ -f "$archive" ] || fail "archive was not created"
     local listing="$TEST_ROOT/archive-list.txt"
     tar -tzf "$archive" | sort >"$listing"
 
     assert_contains "$listing" "to-digi-rs-deploy/compose.yaml"
     assert_contains "$listing" "to-digi-rs-deploy/config.example.toml"
+    assert_contains "$listing" "to-digi-rs-deploy/import.sh"
     assert_contains "$listing" "to-digi-rs-deploy/run.sh"
     assert_contains "$listing" "to-digi-rs-deploy/README.md"
     assert_contains "$listing" "to-digi-rs-deploy/output/"
@@ -322,6 +350,7 @@ test_docker_daemon_failure_fails_clearly
 test_compose_plugin_failure_fails_clearly
 test_image_override_uid_gid_and_exit_code_are_preserved
 test_existing_output_is_preserved
+test_run_sh_forwards_to_import_sh_with_notice
 test_package_archive_contains_only_expected_files
 
 printf 'deployment script tests passed\n'

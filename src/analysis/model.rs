@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::source::SourceRow;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnalysisStatus {
@@ -105,6 +107,7 @@ impl TableStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DepartmentRequirement {
     pub department_number: u32,
+    pub source_name: Option<String>,
     pub source_representations: Vec<String>,
     pub plu_count: usize,
     pub plu_numbers: Vec<u64>,
@@ -117,6 +120,7 @@ pub struct DepartmentRequirement {
 pub struct GroupRequirement {
     pub department_number: u32,
     pub group_number: u32,
+    pub source_name: Option<String>,
     pub plu_count: usize,
     pub plu_numbers: Vec<u64>,
     pub explicit_source_group_count: usize,
@@ -240,10 +244,11 @@ pub struct SafetyConfirmation {
     pub opened_only_exact_plu_mdb: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ReferenceTableSnapshot {
     pub name: String,
     pub present: bool,
     pub row_count: usize,
     pub columns: Vec<String>,
+    pub rows: Vec<SourceRow>,
 }

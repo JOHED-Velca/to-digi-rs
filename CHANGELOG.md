@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.5.1
+
+- Added a concise analysis summary directly to the terminal
+- Added clear department and group prerequisite instructions
+- Added source department and group names when available
+- Added explicit handling for unavailable source names
+- Renamed the deployment runner from run.sh to import.sh
+- Retained run.sh as a backward-compatible wrapper
+- Preserved detailed text and JSON analysis reports
+
 ## v0.5.0
 
 - Expanded offline MDB prerequisite analysis
