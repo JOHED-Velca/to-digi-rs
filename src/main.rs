@@ -1,3 +1,4 @@
+mod analysis;
 mod cli;
 mod config;
 mod digiweb;
@@ -8,11 +9,11 @@ mod models;
 mod source;
 mod validation;
 
-use std::collections::BTreeSet;
-use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
+use analysis::model::ReferenceTableSnapshot;
+use analysis::{AnalysisInput, collect_analysis, write_json_report, write_text_report};
 use clap::Parser;
 use cli::{Cli, EffectiveCommand, effective_command};
 use config::{AppConfig, client_secret_log_message, load_client_secret};
@@ -56,18 +57,33 @@ async fn run(cli: &Cli, logger: &mut AuditLogger) -> i32 {
 }
 
 async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError> {
-    let config = AppConfig::load(Path::new("config.toml"))?;
-    config.validate_startup()?;
+    let config_path = Path::new("config.toml");
+    let config_exists = config_path.exists();
+    let config = AppConfig::load(config_path)?;
     let command = effective_command(cli, &config);
-    log_command(&command, logger)?;
-    logger.kv("DIGIweb target URL", &config.digiweb.base_url)?;
-    if config.digiweb.allow_invalid_certificates {
-        logger.warning("TLS certificate validation is disabled.")?;
+    if matches!(command, EffectiveCommand::Analyze { .. }) && !config_exists {
+        logger.line("config.toml not found; using built-in analysis mapping defaults.")?;
     }
+    if !matches!(command, EffectiveCommand::Analyze { .. }) {
+        if !config_exists {
+            return Err(AppError::Config(format!(
+                "config.toml is required for the '{}' command",
+                command.name()
+            )));
+        }
+        config.validate_startup()?;
+    }
+    log_command(&command, logger)?;
+    if !matches!(command, EffectiveCommand::Analyze { .. }) {
+        logger.kv("DIGIweb target URL", &config.digiweb.base_url)?;
+        if config.digiweb.allow_invalid_certificates {
+            logger.warning("TLS certificate validation is disabled.")?;
+        }
 
-    if config.digiweb.log_credentials_for_testing {
-        logger.warning("Testing credential logging is enabled. Only the Client ID is written; client secrets are never logged.")?;
-        logger.kv("DIGIweb Client ID", &config.digiweb.client_id)?;
+        if config.digiweb.log_credentials_for_testing {
+            logger.warning("Testing credential logging is enabled. Only the Client ID is written; client secrets are never logged.")?;
+            logger.kv("DIGIweb Client ID", &config.digiweb.client_id)?;
+        }
     }
 
     if command.uses_legacy_config() {
@@ -92,6 +108,9 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
     match command {
         EffectiveCommand::Analyze { .. } => {
             logger.kv("Network access permitted", "no")?;
+            logger.kv("Authentication attempted", "NO")?;
+            logger.kv("DIGIweb API requests attempted", "NO")?;
+            logger.kv("Source database modified", "NO")?;
         }
         EffectiveCommand::Import {
             limit,
@@ -149,7 +168,15 @@ fn read_source_context(
     )?;
     logger.line("Confirmation: only plu.mdb was opened.")?;
 
-    let (schema, dataset) = MdbTools::read_dataset(source_file.path(), &config.mapping, logger)?;
+    let source_file_size_bytes = std::fs::metadata(source_file.path())
+        .map_err(|err| AppError::InvalidSourceFile {
+            path: source_file.path().to_path_buf(),
+            message: err.to_string(),
+        })?
+        .len();
+    let (mut schema, dataset) =
+        MdbTools::read_dataset(source_file.path(), &config.mapping, logger)?;
+    let reference_tables = read_reference_tables(source_file.path(), &mut schema, logger)?;
     validate_source_schema(&schema, &config.mapping)?;
     logger.kv(
         "Number of PLUs discovered",
@@ -353,17 +380,41 @@ fn read_source_context(
         explicit_group_references,
         defaulted_group_references,
         invalid_group_values,
+        row_issues: normalization_report.row_issues,
+        source_file_size_bytes,
+        source_is_symlink: false,
+        source_opened_read_only: true,
+        reference_tables,
+        nutrition_fallback_to_pluing: config.mapping.nutrition_table.trim().is_empty()
+            || config.mapping.nutrition_table == config.mapping.ingredient_table,
+        nutrition_source_table: if config.mapping.nutrition_table.trim().is_empty() {
+            config.mapping.ingredient_table.clone()
+        } else {
+            config.mapping.nutrition_table.clone()
+        },
     })
 }
 
 fn run_analyze(config: &AppConfig, logger: &mut AuditLogger) -> Result<i32, AppError> {
     logger.line("ANALYSIS ONLY")?;
-    logger.line("No authentication or DIGIweb API requests were attempted.")?;
+    logger.line("Network access permitted: NO")?;
+    logger.line("Authentication attempted: NO")?;
+    logger.line("DIGIweb API requests attempted: NO")?;
+    logger.line("Source database modified: NO")?;
     let source = read_source_context(config, logger)?;
-    write_analysis_report(&source)?;
-    logger.kv("Analysis report", "analysis-report.txt")?;
+    let report = build_analysis_report(&source);
+    write_text_report(Path::new("analysis-report.txt"), &report)?;
+    write_json_report(Path::new("analysis-report.json"), &report)?;
+    logger.kv("Text analysis report", "analysis-report.txt")?;
+    logger.kv("JSON analysis report", "analysis-report.json")?;
+    logger.kv("Analysis status", report.analysis_status.as_text())?;
+    logger.kv("Analysis warnings", &report.warnings.len().to_string())?;
+    logger.kv(
+        "Analysis blocking errors",
+        &report.blocking_errors.len().to_string(),
+    )?;
     logger.final_import_summary(FinalImportLog {
-        status: "SUCCESS",
+        status: report.analysis_status.as_text(),
         source_discovered: source.dataset.plu_rows.len(),
         placeholders_ignored: source.placeholder_ignored,
         invalid_source_rows: source.invalid_source_rows,
@@ -382,7 +433,20 @@ fn run_analyze(config: &AppConfig, logger: &mut AuditLogger) -> Result<i32, AppE
         unknown_plu_numbers: &[],
         dry_run: true,
     })?;
-    Ok(0)
+    println!("MDB analysis completed.\n");
+    println!("Source PLUs: {}", report.summary.source_plus_discovered);
+    println!("Valid PLUs: {}", report.summary.valid_plus);
+    println!(
+        "Empty placeholders: {}",
+        report.summary.empty_placeholder_rows
+    );
+    println!("Warnings: {}", report.warnings.len());
+    println!("Blocking errors: {}", report.blocking_errors.len());
+    println!("Analysis status: {}", report.analysis_status.as_text());
+    println!("\nText report:\n./analysis-report.txt");
+    println!("\nJSON report:\n./analysis-report.json");
+    println!("\nNo authentication or DIGIweb API requests were attempted.");
+    Ok(report.analysis_status.exit_code())
 }
 
 async fn run_import_command(
@@ -525,6 +589,7 @@ async fn run_test_connection(
 async fn run_verify(config: &AppConfig, logger: &mut AuditLogger) -> Result<i32, AppError> {
     logger.line("Verify scope: import-readiness verification only; no source-versus-DIGIweb post-import comparison is attempted.")?;
     let source = read_source_context(config, logger)?;
+    let analysis_report = build_analysis_report(&source);
     validate_connection_urls(config)?;
     let client_secret = load_client_secret(config)?;
     logger.kv(
@@ -533,7 +598,18 @@ async fn run_verify(config: &AppConfig, logger: &mut AuditLogger) -> Result<i32,
     )?;
     let client = DigiwebClient::new(config.clone())?;
     authenticate(client.http(), config, &client_secret).await?;
-    logger.kv("Local source validation", "PASSED")?;
+    logger.kv(
+        "Local source analysis status",
+        analysis_report.analysis_status.as_text(),
+    )?;
+    logger.kv(
+        "Local source validation",
+        if analysis_report.analysis_status == analysis::model::AnalysisStatus::Fail {
+            "FAILED"
+        } else {
+            "PASSED"
+        },
+    )?;
     logger.kv("DIGIweb authentication", "PASSED")?;
     logger.kv("DIGIweb department/group existence", "NOT CHECKED")?;
     logger.kv("Write operation attempted", "NO")?;
@@ -570,123 +646,70 @@ struct SourceContext {
     explicit_group_references: usize,
     defaulted_group_references: usize,
     invalid_group_values: usize,
+    row_issues: Vec<validation::issue::ValidationIssue>,
+    source_file_size_bytes: u64,
+    source_is_symlink: bool,
+    source_opened_read_only: bool,
+    reference_tables: Vec<ReferenceTableSnapshot>,
+    nutrition_fallback_to_pluing: bool,
+    nutrition_source_table: String,
 }
 
-fn write_analysis_report(source: &SourceContext) -> Result<(), AppError> {
-    let mut departments = BTreeSet::new();
-    let mut groups = BTreeSet::new();
-    let mut barcode_formats = BTreeSet::new();
-    let mut barcode_types = BTreeSet::new();
-    let mut price_modes = BTreeSet::new();
-    let mut pluing_counts = Vec::new();
-    for plu in &source.plus {
-        if let Some(department) = plu.department_number {
-            departments.insert(department);
-        }
-        if let Some(group) = plu.group_number {
-            groups.insert(format!(
-                "{}:{}",
-                plu.department_number
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "missing".to_string()),
-                group
-            ));
-        }
-        if let Some(format) = &plu.source_barcode_format {
-            barcode_formats.insert(format.clone());
-        }
-        if let Some(barcode_type) = &plu.barcode_type {
-            barcode_types.insert(barcode_type.clone());
-        }
-        price_modes.insert(format!("{:?}", plu.price_mode));
-        pluing_counts.push(format!(
-            "PLU {} department {:?}: {} matching PluIng rows",
-            plu.plu_number, plu.department_number, plu.source_pluing_row_count
-        ));
-    }
-    let required_references = collect_required_references(&source.plus)
-        .iter()
-        .map(|reference| {
-            format!(
-                "department {} + group {} from PLUs {:?}: {}",
-                reference.department_number,
-                reference.group_number,
-                reference.source_plu_numbers,
-                reference.status.as_str()
-            )
-        })
-        .collect::<Vec<_>>();
-    let report = format!(
-        "\
-ANALYSIS ONLY
-No authentication or DIGIweb API requests were attempted.
+fn build_analysis_report(source: &SourceContext) -> analysis::model::AnalysisReport {
+    collect_analysis(AnalysisInput {
+        source_filename: FIXED_SOURCE_FILE,
+        source_file_size_bytes: source.source_file_size_bytes,
+        source_is_symlink: source.source_is_symlink,
+        source_opened_read_only: source.source_opened_read_only,
+        mdb_tables: &source.schema.tables,
+        dataset: &source.dataset,
+        valid_plus: &source.valid_plus,
+        all_normalized_plus: &source.plus,
+        row_issues: &source.row_issues,
+        validation_report: &source.validation_report,
+        placeholder_ignored: source.placeholder_ignored,
+        invalid_source_rows: source.invalid_source_rows,
+        validation_skipped: source.validation_skipped,
+        orphan_pluing_rows: source.orphan_pluing_rows,
+        explicit_group_references: source.explicit_group_references,
+        defaulted_group_references: source.defaulted_group_references,
+        invalid_group_values: source.invalid_group_values,
+        reference_tables: &source.reference_tables,
+        nutrition_fallback_to_pluing: source.nutrition_fallback_to_pluing,
+        nutrition_source_table: &source.nutrition_source_table,
+    })
+}
 
-Source rows discovered: {}
-MDB tables discovered: {}
-Empty placeholder rows: {}
-Normalized PLUs: {}
-Valid PLUs: {}
-Invalid PLUs: {}
-PLU numbers: {}
-Departments discovered: {}
-Required department/group combinations: {}
-Group references discovered: {}
-Explicit group references: {}
-PLUs defaulted to group 997: {}
-PLUs with invalid group values: {}
-Barcode formats found: {}
-Derived barcode types: {}
-Price modes found: {}
-Matching PluIng rows:
-{}
-Unmatched PluIng rows: {}
-Ingredient availability: {} PLUs with ingredients
-Nutrition availability: {} PLUs with nutrition facts
-Validation errors: {}
-Validation warnings: {}
-",
-        source.dataset.plu_rows.len(),
-        source.schema.tables.join(", "),
-        source.placeholder_ignored,
-        source.plus.len(),
-        source.valid_plus.len(),
-        source.invalid_source_rows,
-        source
-            .plus
-            .iter()
-            .map(|plu| plu.plu_number.to_string())
-            .collect::<Vec<_>>()
-            .join(", "),
-        departments
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(", "),
-        required_references.join("; "),
-        groups.into_iter().collect::<Vec<_>>().join(", "),
-        source.explicit_group_references,
-        source.defaulted_group_references,
-        source.invalid_group_values,
-        barcode_formats.into_iter().collect::<Vec<_>>().join(", "),
-        barcode_types.into_iter().collect::<Vec<_>>().join(", "),
-        price_modes.into_iter().collect::<Vec<_>>().join(", "),
-        pluing_counts.join("\n"),
-        source.orphan_pluing_rows,
-        source
-            .plus
-            .iter()
-            .filter(|plu| plu.ingredients.is_some())
-            .count(),
-        source
-            .plus
-            .iter()
-            .filter(|plu| !plu.nutrition_facts.is_empty())
-            .count(),
-        source.validation_report.error_count(),
-        source.validation_report.warning_count(),
-    );
-    fs::write("analysis-report.txt", report)
-        .map_err(|err| AppError::Logging(format!("failed to write analysis-report.txt: {err}")))
+fn read_reference_tables(
+    source_path: &Path,
+    schema: &mut MdbSchema,
+    logger: &mut AuditLogger,
+) -> Result<Vec<ReferenceTableSnapshot>, AppError> {
+    let mut tables = Vec::new();
+    for table_name in ["Department", "Maingroup"] {
+        if schema.has_table(table_name) {
+            let (columns, rows) = MdbTools::export_table(source_path, table_name)?;
+            schema.set_columns(table_name, columns.clone());
+            logger.kv(
+                &format!("Rows in source reference table {table_name}"),
+                &rows.len().to_string(),
+            )?;
+            tables.push(ReferenceTableSnapshot {
+                name: table_name.to_string(),
+                present: true,
+                row_count: rows.len(),
+                columns,
+            });
+        } else {
+            tables.push(ReferenceTableSnapshot {
+                name: table_name.to_string(),
+                present: false,
+                row_count: 0,
+                columns: Vec::new(),
+            });
+        }
+    }
+    Ok(tables)
 }
 
 fn is_empty_placeholder_issue(issue: &validation::issue::ValidationIssue) -> bool {

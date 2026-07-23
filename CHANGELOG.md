@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.5.0
+
+- Expanded offline MDB prerequisite analysis
+- Added structured department and group requirements
+- Added barcode-format and price-category summaries
+- Added source reference-table checks
+- Added detailed PluIng matching statistics
+- Added ingredient and nutrition availability summaries
+- Added structured warning and blocking-error reporting
+- Added machine-readable analysis-report.json
+- Added installation recommendations
+- Allowed analyze to run without DIGIweb credentials
+- Reused analysis results in import-readiness verification
+
 ## v0.4.0
 
 - Proper command-line interface with `analyze`, `import`, `test-connection`, and `verify`

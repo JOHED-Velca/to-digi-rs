@@ -6,7 +6,7 @@ It reads only `./plu.mdb`, exports supported Access tables with `mdbtools`, norm
 
 ## Current Workflow
 
-Version `0.4.0` keeps the confirmed MDB mappings and DIGIweb API contract, then adds an explicit command-line interface:
+Version `0.5.0` keeps the confirmed MDB mappings and DIGIweb API contract, then expands `analyze` into an offline MDB prerequisite report:
 
 ```text
 plu.mdb
@@ -30,7 +30,7 @@ to-digi-rs test-connection
 to-digi-rs verify
 ```
 
-`analyze` reads and validates `plu.mdb`, writes `analysis-report.txt`, and does not authenticate or contact DIGIweb.
+`analyze` reads and validates `plu.mdb`, writes `analysis-report.txt` and `analysis-report.json`, and does not authenticate or contact DIGIweb. It can run before DIGIweb credentials or URLs are finalized, and it can run without `config.toml` by using built-in source mapping defaults.
 
 `import` is the only command that writes PLUs to DIGIweb. `--limit N` imports only the first `N` valid normalized PLUs. `--test` is a convenience alias for `--limit 1`. By default the importer stops after the first selected record failure or unknown final status; `--continue-on-error` keeps submitting later selected PLUs.
 
@@ -40,9 +40,35 @@ to-digi-rs verify
 
 For one release, running with no command still honors the old `[import]` config booleans and logs a deprecation warning. New automation should use explicit commands.
 
+## First Customer-Installation Command
+
+Run source analysis before configuring credentials or attempting an import:
+
+```bash
+cp config.example.toml config.toml
+cp CUSTOMER_DATABASE.mdb plu.mdb
+./run.sh analyze
+```
+
+`config.toml` is optional for `analyze`; when it is absent, the tool uses the built-in mappings for `Pludata` and `PluIng`. The report identifies required departments, required department/group combinations, barcode formats, price categories, PluIng matching statistics, ingredient/nutrition availability, source reference-table warnings, and recommended installation actions.
+
+Recommended installation sequence:
+
+```text
+1. Extract the deployment bundle.
+2. Place the customer database beside run.sh as plu.mdb.
+3. Run ./run.sh analyze.
+4. Review analysis-report.txt or analysis-report.json.
+5. Prepare departments and groups in DIGIweb.
+6. Configure authentication.
+7. Run ./run.sh verify.
+8. Run ./run.sh import --limit 1.
+9. Run ./run.sh import.
+```
+
 ## Quick Deployment
 
-The v0.4.0 deployment bundle lets the operator run the importer with one command:
+The v0.5.0 deployment bundle lets the operator run the importer with one command:
 
 ```bash
 ./run.sh analyze
@@ -52,15 +78,58 @@ The v0.4.0 deployment bundle lets the operator run the importer with one command
 ./run.sh verify
 ```
 
-1. Download and extract `to-digi-rs-deploy-v0.4.0.tar.gz`.
-2. Copy `config.example.toml` to `config.toml`.
-3. Fill in customer-specific DIGIweb values.
-4. Place the source MDB beside `run.sh` using the exact filename `plu.mdb` for `analyze`, `import`, or `verify`.
-5. Log in to GHCR if the package is private.
-6. Run the desired `./run.sh ...` command.
+1. Download and extract `to-digi-rs-deploy-v0.5.0.tar.gz`.
+2. Place the source MDB beside `run.sh` using the exact filename `plu.mdb`.
+3. Run `./run.sh analyze`.
+4. Copy `config.example.toml` to `config.toml`.
+5. Fill in customer-specific DIGIweb values.
+6. Log in to GHCR if the package is private.
+7. Run `./run.sh verify`, then the desired import command.
 7. Read the printed output path under `output/run-...-COMMAND/`.
 
 The template lives in [deploy](deploy). It does not include a real `config.toml`, real MDB, credentials, logs, analysis reports, or payload previews.
+
+## Analysis Reports
+
+`analyze` creates:
+
+```text
+analysis-report.txt
+analysis-report.json
+logs.txt
+```
+
+Text report sections are stable and concise:
+
+```text
+1. Source summary
+2. Source tables
+3. PLU validation
+4. Required departments
+5. Required groups
+6. Barcode analysis
+7. Price-category analysis
+8. Ingredient and nutrition analysis
+9. Source-reference-table checks
+10. Warnings
+11. Blocking errors
+12. Recommended installation actions
+13. Safety confirmation
+```
+
+The JSON report has `schema_version: 1`, `application_version`, source and summary blocks, arrays for departments/groups/barcode formats/price categories, structured warnings, blocking errors, recommendations, and a safety block. Arrays are sorted deterministically where order matters so automation can compare reports between runs.
+
+Analysis statuses:
+
+```text
+PASS = source analyzed successfully with no warnings
+PASS_WITH_WARNINGS = source analyzed successfully, but nonblocking issues need review
+FAIL = source, schema, extraction, or validation problems prevent safe analysis
+```
+
+Warnings still exit `0`; `FAIL` exits `2`.
+
+`analyze` checks source prerequisites only. It does not claim that departments or groups already exist in DIGIweb. `verify` adds DIGIweb authentication and import-readiness checks but still does not write PLUs. `import` writes valid PLUs.
 
 ## Build The Deployment Bundle
 
@@ -71,20 +140,20 @@ bash scripts/package-deploy.sh
 The archive is written to:
 
 ```text
-target/release-bundles/to-digi-rs-deploy-v0.4.0.tar.gz
+target/release-bundles/to-digi-rs-deploy-v0.5.0.tar.gz
 ```
 
 ## Image Names
 
 ```text
-to-digi-rs:0.4.0
-ghcr.io/johed-velca/to-digi-rs:0.4.0
+to-digi-rs:0.5.0
+ghcr.io/johed-velca/to-digi-rs:0.5.0
 ```
 
 The deployment Compose file defaults to the GHCR image, but the image can be overridden:
 
 ```bash
-TO_DIGI_RS_IMAGE=to-digi-rs:0.4.0 ./run.sh analyze
+TO_DIGI_RS_IMAGE=to-digi-rs:0.5.0 ./run.sh analyze
 ```
 
 ## Configuration
@@ -117,13 +186,14 @@ Every deployment run gets a command-suffixed output directory:
 output/
 |-- run-20260722-143000-analyze/
 |   |-- logs.txt
-|   `-- analysis-report.txt
+|   |-- analysis-report.txt
+|   `-- analysis-report.json
 `-- run-20260722-150500-import/
     |-- logs.txt
     `-- payload-previews/
 ```
 
-Previous output is preserved. The script prints the final log path and analysis report path when present.
+Previous output is preserved. The script prints the final log path plus both analysis report paths when present.
 
 ## Exit Codes
 
@@ -164,4 +234,4 @@ LOCAL_UID="$(id -u)" LOCAL_GID="$(id -g)" docker compose config
 
 ## Container Publishing
 
-`.github/workflows/publish-container.yml` is configured for semantic-version tags such as `v0.4.0` and manual dispatch. It publishes versioned images only and does not publish `latest` automatically.
+`.github/workflows/publish-container.yml` is configured for semantic-version tags such as `v0.5.0` and manual dispatch. It publishes versioned images only and does not publish `latest` automatically.

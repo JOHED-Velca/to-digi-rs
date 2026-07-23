@@ -217,7 +217,7 @@ mod tests {
         assert!(help.contains("import"));
         assert!(help.contains("test-connection"));
         assert!(help.contains("verify"));
-        assert_eq!(Cli::command().get_version(), Some("0.4.0"));
+        assert_eq!(Cli::command().get_version(), Some("0.5.0"));
     }
 
     #[test]

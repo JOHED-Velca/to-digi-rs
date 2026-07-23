@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-DEFAULT_IMAGE="ghcr.io/johed-velca/to-digi-rs:0.4.0"
+DEFAULT_IMAGE="ghcr.io/johed-velca/to-digi-rs:0.5.0"
 COMPOSE_PROJECT_NAME="to-digi-rs-import"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
 
@@ -39,7 +39,7 @@ command_label() {
 
 needs_config() {
     case "${1:-import}" in
-        import|analyze|verify|test-connection) return 0 ;;
+        import|verify|test-connection) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -107,6 +107,7 @@ mkdir -p "$OUTPUT_DIR" || fail "Unable to create output directory: $OUTPUT_DIR" 
 
 rm -f "$SCRIPT_DIR/logs.txt" || fail "Unable to clean transient logs.txt before execution." 2
 rm -f "$SCRIPT_DIR/analysis-report.txt" || fail "Unable to clean transient analysis-report.txt before execution." 2
+rm -f "$SCRIPT_DIR/analysis-report.json" || fail "Unable to clean transient analysis-report.json before execution." 2
 rm -rf "$SCRIPT_DIR/payload-previews" || fail "Unable to clean transient payload-previews before execution." 2
 mkdir -p "$RUN_DIR" || fail "Unable to create run output directory: $RUN_DIR" 2
 
@@ -131,7 +132,7 @@ log_path=""
 if [ -f "$SCRIPT_DIR/logs.txt" ]; then
     mv "$SCRIPT_DIR/logs.txt" "$RUN_DIR/logs.txt" || warn "Could not archive logs.txt to $RUN_DIR"
     log_path="$RUN_DIR/logs.txt"
-else
+elif [ "$COMMAND_LABEL" != "info" ]; then
     warn "Importer did not create logs.txt."
 fi
 
@@ -139,6 +140,12 @@ analysis_path=""
 if [ -f "$SCRIPT_DIR/analysis-report.txt" ]; then
     mv "$SCRIPT_DIR/analysis-report.txt" "$RUN_DIR/analysis-report.txt" || warn "Could not archive analysis-report.txt to $RUN_DIR"
     analysis_path="$RUN_DIR/analysis-report.txt"
+fi
+
+analysis_json_path=""
+if [ -f "$SCRIPT_DIR/analysis-report.json" ]; then
+    mv "$SCRIPT_DIR/analysis-report.json" "$RUN_DIR/analysis-report.json" || warn "Could not archive analysis-report.json to $RUN_DIR"
+    analysis_json_path="$RUN_DIR/analysis-report.json"
 fi
 
 if [ -d "$SCRIPT_DIR/payload-previews" ]; then
@@ -158,7 +165,10 @@ else
     printf 'Log file:\n<not created>\n'
 fi
 if [ -n "$analysis_path" ]; then
-    printf 'Analysis report:\n%s\n' "$analysis_path"
+    printf 'Text analysis report:\n%s\n' "$analysis_path"
+fi
+if [ -n "$analysis_json_path" ]; then
+    printf 'JSON analysis report:\n%s\n' "$analysis_json_path"
 fi
 
 exit "$import_exit_code"
