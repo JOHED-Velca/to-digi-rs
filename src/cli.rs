@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 
 use crate::config::AppConfig;
@@ -24,14 +26,20 @@ pub enum CliCommand {
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
 pub struct ImportArgs {
     /// Import only the first N valid normalized PLUs
-    #[arg(long, value_parser = parse_positive_usize, conflicts_with = "test")]
+    #[arg(long, value_parser = parse_positive_usize, conflicts_with_all = ["test", "resume"])]
     pub limit: Option<usize>,
     /// Convenience alias for --limit 1
-    #[arg(long)]
+    #[arg(long, conflicts_with = "resume")]
     pub test: bool,
     /// Continue submitting later selected PLUs after a failure or unknown final status
     #[arg(long)]
     pub continue_on_error: bool,
+    /// Resume a previous import manifest instead of selecting PLUs from CLI flags
+    #[arg(long, value_name = "MANIFEST")]
+    pub resume: Option<PathBuf>,
+    /// Retry only confirmed FAILED records during --resume
+    #[arg(long, requires = "resume")]
+    pub retry_failed: bool,
 }
 
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
@@ -54,6 +62,8 @@ pub enum EffectiveCommand {
         limit: Option<usize>,
         continue_on_error: bool,
         test_mode: bool,
+        resume: Option<PathBuf>,
+        retry_failed: bool,
         legacy_used: bool,
         defaulted_from_no_command: bool,
     },
@@ -87,6 +97,8 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
             limit: if args.test { Some(1) } else { args.limit },
             continue_on_error: args.continue_on_error,
             test_mode: args.test,
+            resume: args.resume.clone(),
+            retry_failed: args.retry_failed,
             legacy_used: false,
             defaulted_from_no_command: false,
         },
@@ -108,6 +120,8 @@ fn legacy_effective_command(config: &AppConfig) -> EffectiveCommand {
             },
             continue_on_error: config.import.continue_after_record_failure,
             test_mode: false,
+            resume: None,
+            retry_failed: false,
             legacy_used: true,
             defaulted_from_no_command: true,
         }
@@ -135,6 +149,8 @@ mod tests {
                 limit: None,
                 continue_on_error: false,
                 test_mode: false,
+                resume: None,
+                retry_failed: false,
                 legacy_used: true,
                 defaulted_from_no_command: true
             }
@@ -184,11 +200,76 @@ mod tests {
                 limit: Some(1),
                 continue_on_error: false,
                 test_mode: true,
+                resume: None,
+                retry_failed: false,
                 legacy_used: false,
                 defaulted_from_no_command: false
             }
         );
         assert!(Cli::try_parse_from(["to-digi-rs", "import", "--test", "--limit", "1"]).is_err());
+    }
+
+    #[test]
+    fn resume_parses_and_conflicts_with_selection_flags() {
+        let config = AppConfig::default();
+        let cli = parse(&["to-digi-rs", "import", "--resume", "import-results.json"]);
+
+        assert_eq!(
+            effective_command(&cli, &config),
+            EffectiveCommand::Import {
+                limit: None,
+                continue_on_error: false,
+                test_mode: false,
+                resume: Some(PathBuf::from("import-results.json")),
+                retry_failed: false,
+                legacy_used: false,
+                defaulted_from_no_command: false
+            }
+        );
+        assert!(
+            Cli::try_parse_from([
+                "to-digi-rs",
+                "import",
+                "--resume",
+                "import-results.json",
+                "--limit",
+                "1"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "to-digi-rs",
+                "import",
+                "--resume",
+                "import-results.json",
+                "--test"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn retry_failed_requires_resume_and_continue_on_error_is_allowed() {
+        assert!(Cli::try_parse_from(["to-digi-rs", "import", "--retry-failed"]).is_err());
+
+        let Cli {
+            command: Some(CliCommand::Import(args)),
+        } = parse(&[
+            "to-digi-rs",
+            "import",
+            "--resume",
+            "import-results.json",
+            "--retry-failed",
+            "--continue-on-error",
+        ])
+        else {
+            panic!("expected import");
+        };
+
+        assert_eq!(args.resume, Some(PathBuf::from("import-results.json")));
+        assert!(args.retry_failed);
+        assert!(args.continue_on_error);
     }
 
     #[test]
@@ -217,7 +298,15 @@ mod tests {
         assert!(help.contains("import"));
         assert!(help.contains("test-connection"));
         assert!(help.contains("verify"));
-        assert_eq!(Cli::command().get_version(), Some("0.5.1"));
+        let mut command = CliCommand::augment_subcommands(clap::Command::new("to-digi-rs"));
+        let import_help = command
+            .find_subcommand_mut("import")
+            .expect("import command")
+            .render_long_help()
+            .to_string();
+        assert!(import_help.contains("--resume"));
+        assert!(import_help.contains("--retry-failed"));
+        assert_eq!(Cli::command().get_version(), Some("0.7.0"));
     }
 
     #[test]
@@ -238,6 +327,8 @@ mod tests {
                 limit: Some(1),
                 continue_on_error: true,
                 test_mode: false,
+                resume: None,
+                retry_failed: false,
                 legacy_used: true,
                 defaulted_from_no_command: true
             }
@@ -257,6 +348,8 @@ mod tests {
                 limit: Some(2),
                 continue_on_error: false,
                 test_mode: false,
+                resume: None,
+                retry_failed: false,
                 legacy_used: false,
                 defaulted_from_no_command: false
             }

@@ -1,5 +1,9 @@
 /target/
 /logs.txt
+/import-results.json
+/import-results.json.bak
+/import-results.json.lock
+/import-results.snapshot.json
 /payload-previews/
 /output/
 /config.toml
@@ -9,6 +13,10 @@
 deploy/config.toml
 deploy/plu.mdb
 deploy/logs.txt
+deploy/import-results.json
+deploy/import-results.json.bak
+deploy/import-results.json.lock
+deploy/import-results.snapshot.json
 deploy/payload-previews/
 deploy/output/*
 !deploy/output/.gitkeep

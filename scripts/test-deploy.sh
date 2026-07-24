@@ -53,7 +53,30 @@ if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
     printf 'LOCAL_UID=%s\n' "${LOCAL_UID:-}" >>"$log"
     printf 'LOCAL_GID=%s\n' "${LOCAL_GID:-}" >>"$log"
     printf 'TO_DIGI_RS_IMAGE=%s\n' "${TO_DIGI_RS_IMAGE:-}" >>"$log"
+    printf 'TO_DIGI_RS_IMPORT_MANIFEST_PATH=%s\n' "${TO_DIGI_RS_IMPORT_MANIFEST_PATH:-}" >>"$log"
     printf 'compose-run-ok\n' >logs.txt
+    if [ -n "${TO_DIGI_RS_IMPORT_MANIFEST_PATH:-}" ]; then
+        manifest_path="${TO_DIGI_RS_IMPORT_MANIFEST_PATH#/work/}"
+        mkdir -p "$(dirname "$manifest_path")"
+        printf '{"schema_version":1,"status":"new"}\n' >"$manifest_path"
+    fi
+    resume_path=""
+    previous=""
+    for arg in "$@"; do
+        if [ "$previous" = "--resume" ]; then
+            resume_path="$arg"
+            previous=""
+            continue
+        fi
+        case "$arg" in
+            --resume=*) resume_path="${arg#--resume=}" ;;
+            --resume) previous="--resume" ;;
+        esac
+    done
+    if [ -n "$resume_path" ]; then
+        host_resume_path="${resume_path#/work/}"
+        printf '{"schema_version":1,"status":"resumed"}\n' >"$host_resume_path"
+    fi
     if printf '%s\n' "$*" | grep -Fq ' importer analyze'; then
         printf 'analysis-ok\n' >analysis-report.txt
         printf '{"schema_version":1}\n' >analysis-report.json
@@ -116,10 +139,12 @@ test_resolves_own_directory_and_archives_output() {
     assert_contains "$output" "Importer exit code: 0"
     assert_contains "$output" "$deploy_dir/output/run-"
     [ -f "$deploy_dir"/output/run-*-import/logs.txt ] || fail "import logs.txt was not archived under an import-suffixed directory"
-    assert_contains "$TEST_ROOT/fake-docker.log" "TO_DIGI_RS_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.5.1"
+    assert_contains "$TEST_ROOT/fake-docker.log" "TO_DIGI_RS_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.7.0"
     [ -f "$deploy_dir"/output/run-*/logs.txt ] || fail "logs.txt was not archived"
+    [ -f "$deploy_dir"/output/run-*-import/import-results.json ] || fail "import manifest was not created under the import run directory"
     [ -f "$deploy_dir"/output/run-*/payload-previews/plu-1.json ] || fail "payload preview was not archived"
     [ ! -f "$deploy_dir/logs.txt" ] || fail "root logs.txt was not left behind"
+    assert_contains "$output" "Import manifest:"
 }
 
 test_help_and_version_do_not_require_config_or_plu() {
@@ -183,6 +208,51 @@ test_analyze_archives_analysis_report() {
     assert_contains "$output" "JSON analysis report:"
     [ -f "$deploy_dir"/output/run-*-analyze/analysis-report.txt ] || fail "analysis-report.txt was not archived"
     [ -f "$deploy_dir"/output/run-*-analyze/analysis-report.json ] || fail "analysis-report.json was not archived"
+}
+
+test_resume_translates_relative_manifest_and_archives_snapshot() {
+    local deploy_dir="$TEST_ROOT/deploy-resume-relative"
+    local output="$TEST_ROOT/output-resume-relative.txt"
+    copy_deploy "$deploy_dir"
+    mkdir -p "$deploy_dir/output/run-old-import"
+    printf '{"schema_version":1,"status":"old"}\n' >"$deploy_dir/output/run-old-import/import-results.json"
+
+    run_with_fake_docker "$deploy_dir" "$output" import --resume output/run-old-import/import-results.json
+
+    assert_contains "$TEST_ROOT/fake-docker.log" "importer import --resume /work/output/run-old-import/import-results.json"
+    assert_contains "$output" "Import manifest:"
+    assert_contains "$output" "Import manifest snapshot:"
+    [ -f "$deploy_dir"/output/run-*-resume/logs.txt ] || fail "resume logs were not archived under a resume-suffixed directory"
+    [ -f "$deploy_dir"/output/run-*-resume/import-results.snapshot.json ] || fail "resume snapshot was not archived"
+    assert_contains "$deploy_dir/output/run-old-import/import-results.json" '"status":"resumed"'
+}
+
+test_resume_translates_absolute_manifest_inside_deployment_directory() {
+    local deploy_dir="$TEST_ROOT/deploy-resume-absolute"
+    local output="$TEST_ROOT/output-resume-absolute.txt"
+    copy_deploy "$deploy_dir"
+    mkdir -p "$deploy_dir/output/run-old-import"
+    local manifest="$deploy_dir/output/run-old-import/import-results.json"
+    printf '{"schema_version":1,"status":"old"}\n' >"$manifest"
+
+    run_with_fake_docker "$deploy_dir" "$output" import --resume "$manifest" --retry-failed
+
+    assert_contains "$TEST_ROOT/fake-docker.log" "importer import --resume /work/output/run-old-import/import-results.json --retry-failed"
+    [ -f "$deploy_dir"/output/run-*-resume/import-results.snapshot.json ] || fail "absolute resume snapshot was not archived"
+}
+
+test_resume_rejects_manifest_outside_deployment_directory() {
+    local deploy_dir="$TEST_ROOT/deploy-resume-outside"
+    local output="$TEST_ROOT/output-resume-outside.txt"
+    copy_deploy "$deploy_dir"
+    local outside="$TEST_ROOT/outside-import-results.json"
+    printf '{}\n' >"$outside"
+    set +e
+    run_with_fake_docker "$deploy_dir" "$output" import --resume "$outside"
+    local code=$?
+    set -e
+    [ "$code" -eq 2 ] || fail "outside resume manifest exit code was $code"
+    assert_contains "$output" "Resume manifests must be located inside the deployment directory"
 }
 
 test_missing_config_fails_clearly() {
@@ -282,14 +352,14 @@ test_image_override_uid_gid_and_exit_code_are_preserved() {
     mkdir -p "$fake_dir"
     make_fake_docker "$fake_dir/docker"
     set +e
-    FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1 \
+    FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.7.0 \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
     "$deploy_dir/import.sh" >"$output" 2>&1
     local code=$?
     set -e
     [ "$code" -eq 7 ] || fail "import exit code was not preserved: $code"
     assert_contains "$output" "Importer exit code: 7"
-    assert_contains "$log" "TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1"
+    assert_contains "$log" "TO_DIGI_RS_IMAGE=to-digi-rs:0.7.0"
     assert_contains "$log" "LOCAL_UID="
     assert_contains "$log" "LOCAL_GID="
 }
@@ -320,7 +390,7 @@ test_run_sh_forwards_to_import_sh_with_notice() {
 
 test_package_archive_contains_only_expected_files() {
     local archive
-    archive="$(TO_DIGI_RS_VERSION=0.5.1 "$ROOT_DIR/scripts/package-deploy.sh")"
+    archive="$(TO_DIGI_RS_VERSION=0.7.0 "$ROOT_DIR/scripts/package-deploy.sh")"
     [ -f "$archive" ] || fail "archive was not created"
     local listing="$TEST_ROOT/archive-list.txt"
     tar -tzf "$archive" | sort >"$listing"
@@ -333,6 +403,8 @@ test_package_archive_contains_only_expected_files() {
     assert_contains "$listing" "to-digi-rs-deploy/output/"
     assert_not_contains "$listing" "to-digi-rs-deploy/config.toml"
     assert_not_contains "$listing" "to-digi-rs-deploy/plu.mdb"
+    assert_not_contains "$listing" "to-digi-rs-deploy/import-results.json"
+    assert_not_contains "$listing" "to-digi-rs-deploy/import-results.snapshot.json"
     assert_not_contains "$listing" "target/"
     assert_not_contains "$listing" ".git/"
 }
@@ -342,6 +414,9 @@ test_help_and_version_do_not_require_config_or_plu
 test_test_connection_does_not_require_plu
 test_cli_arguments_are_forwarded
 test_analyze_archives_analysis_report
+test_resume_translates_relative_manifest_and_archives_snapshot
+test_resume_translates_absolute_manifest_inside_deployment_directory
+test_resume_rejects_manifest_outside_deployment_directory
 test_missing_config_fails_clearly
 test_missing_plu_fails_clearly
 test_symlinked_plu_is_rejected_when_supported

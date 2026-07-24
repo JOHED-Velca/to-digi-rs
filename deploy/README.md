@@ -1,10 +1,10 @@
 # to-digi-rs Deployment Bundle
 
-This directory is the portable customer deployment template for `to-digi-rs` v0.5.1.
+This directory is the portable customer deployment template for `to-digi-rs` v0.7.0.
 
 ## Quick Deployment
 
-1. Download and extract `to-digi-rs-deploy-v0.5.1.tar.gz`.
+1. Download and extract `to-digi-rs-deploy-v0.7.0.tar.gz`.
 2. Place the customer Access database beside `import.sh` using the exact filename `plu.mdb`.
 3. Run `./import.sh analyze` before configuring DIGIweb credentials.
 4. Copy `config.example.toml` to `config.toml`.
@@ -18,6 +18,7 @@ This directory is the portable customer deployment template for `to-digi-rs` v0.
 ./import.sh import --test
 ./import.sh import --limit 10
 ./import.sh import --continue-on-error
+./import.sh import --resume output/run-YYYYMMDD-HHMMSS-import/import-results.json
 ./import.sh test-connection
 ./import.sh verify
 ```
@@ -34,7 +35,7 @@ to-digi-rs-deploy/
 `-- output/
 ```
 
-The release bundle ships `config.example.toml`, not a real `config.toml`, and it never includes a real MDB, credentials, tokens, logs, analysis reports, or payload previews.
+The release bundle ships `config.example.toml`, not a real `config.toml`, and it never includes a real MDB, credentials, tokens, logs, manifests, analysis reports, or payload previews.
 
 ## Runner Rename
 
@@ -74,7 +75,9 @@ cp config.example.toml config.toml
 
 `analyze` reads and validates `plu.mdb`, writes `analysis-report.txt` and `analysis-report.json`, and does not authenticate or contact DIGIweb.
 
-`import` is the only command that writes PLUs to DIGIweb. `--test` imports the first valid normalized PLU. `--limit N` imports the first `N` valid normalized PLUs. `--continue-on-error` keeps submitting later selected PLUs after a record failure or unknown status.
+`import` is the only command that writes PLUs to DIGIweb. `--test` imports the first valid normalized PLU. `--limit N` imports the first `N` valid normalized PLUs. `--continue-on-error` keeps submitting later selected PLUs after a record failure or unknown status. Every real import creates `import-results.json` before authentication or PLU submission.
+
+`import --resume MANIFEST` resumes a specific previous run. The manifest controls PLU selection, so do not combine resume with `--limit` or `--test`. `--retry-failed` is valid only with resume and retries only confirmed `FAILED` records.
 
 `test-connection` authenticates only. It does not require `plu.mdb` and does not submit PLUs.
 
@@ -103,21 +106,21 @@ Do not paste the token into `config.toml`, `import.sh`, shell history, or any re
 The default image is:
 
 ```text
-ghcr.io/johed-velca/to-digi-rs:0.5.1
+ghcr.io/johed-velca/to-digi-rs:0.7.0
 ```
 
 For local testing or an offline customer VM, load or build a local image and override the image name without editing `compose.yaml`:
 
 ```bash
-TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1 ./import.sh analyze
+TO_DIGI_RS_IMAGE=to-digi-rs:0.7.0 ./import.sh analyze
 ```
 
 Offline transfer example:
 
 ```bash
-docker save to-digi-rs:0.5.1 -o to-digi-rs-image-0.5.1.tar
-docker load -i to-digi-rs-image-0.5.1.tar
-TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1 ./import.sh import --test
+docker save to-digi-rs:0.7.0 -o to-digi-rs-image-0.7.0.tar
+docker load -i to-digi-rs-image-0.7.0.tar
+TO_DIGI_RS_IMAGE=to-digi-rs:0.7.0 ./import.sh import --test
 ```
 
 ## Output Locations
@@ -132,10 +135,14 @@ output/
 |   `-- analysis-report.json
 `-- run-20260722-150500-import/
     |-- logs.txt
+    |-- import-results.json
     `-- payload-previews/
+`-- run-20260722-151500-resume/
+    |-- logs.txt
+    `-- import-results.snapshot.json
 ```
 
-Previous output is preserved. The script only removes transient root-level `logs.txt`, `analysis-report.txt`, `analysis-report.json`, and `payload-previews/` before starting the next run.
+Previous output is preserved. The script only removes transient root-level `logs.txt`, `analysis-report.txt`, `analysis-report.json`, and `payload-previews/` before starting the next run. It does not remove previous manifests.
 
 ## Analysis Statuses
 
@@ -150,6 +157,28 @@ Warnings exit `0`; `FAIL` exits `2`.
 The JSON report is intended for automation. It includes `schema_version`, `application_version`, source summary, table summaries, department requirements, group requirements, barcode-format summaries, price-category summaries, PluIng/ingredient/nutrition summaries, structured warnings, blocking errors, recommendations, and safety confirmations.
 
 `analyze` checks source prerequisites only. It does not confirm that departments or groups exist in DIGIweb. `verify` adds DIGIweb authentication/readiness checks without writing PLUs. `import` writes valid PLUs.
+
+## Recovery And Resume
+
+When an import is interrupted or incomplete, use the printed manifest path:
+
+```bash
+./import.sh import --resume output/run-20260724-143000-import/import-results.json
+```
+
+Retry confirmed failed records only:
+
+```bash
+./import.sh import --resume output/run-20260724-143000-import/import-results.json --retry-failed
+```
+
+`UNKNOWN_STATUS` and `AMBIGUOUS_SUBMISSION` records are never automatically resent. Known request ids are polled first. Only `NOT_ATTEMPTED` records are submitted during ordinary resume.
+
+Resume validates the current `plu.mdb` size and SHA-256, the DIGIweb base URL, store number, client id, selected normalized PLUs, and canonical payload hashes before authentication. If anything changed, resume is cancelled and no API request is sent.
+
+Manifest updates are atomic and protected by an exclusive file lock. A previous valid manifest is preserved as `import-results.json.bak`. A resume run writes a new `logs.txt` under `output/run-...-resume/` and copies the final manifest state to `import-results.snapshot.json`.
+
+Do not edit `import-results.json` manually. Copy it for inspection or transport, but leave the original manifest unchanged for resume.
 
 ## Exit Codes
 

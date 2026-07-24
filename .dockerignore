@@ -1,5 +1,9 @@
 target/
 logs.txt
+import-results.json
+import-results.json.bak
+import-results.json.lock
+import-results.snapshot.json
 payload-previews/
 output/
 *.mdb
