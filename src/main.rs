@@ -8,6 +8,7 @@ mod logging;
 mod models;
 mod source;
 mod validation;
+mod verification;
 
 use std::path::Path;
 use std::time::Instant;
@@ -33,6 +34,12 @@ use source::schema::MdbSchema;
 use source::{FIXED_SOURCE_FILE, VerifiedSourceFile};
 use validation::issue::Severity;
 use validation::validator::{ValidationReport, valid_plu_candidates, validate_plus};
+use verification::{
+    VerificationDiscoveryInput, build_discovery_blocked_report,
+    render_console_summary as render_verification_console_summary,
+    write_json_report as write_verification_json_report,
+    write_text_report as write_verification_text_report,
+};
 
 #[tokio::main]
 async fn main() {
@@ -102,6 +109,7 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
         } => run_import_command(&config, limit, continue_on_error, test_mode, logger).await,
         EffectiveCommand::TestConnection => run_test_connection(&config, logger).await,
         EffectiveCommand::Verify => run_verify(&config, logger).await,
+        EffectiveCommand::VerifyImport { limit } => run_verify_import(&config, limit, logger),
     }
 }
 
@@ -147,6 +155,16 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
         }
         EffectiveCommand::Verify => {
             logger.kv("PLU write permitted", "no")?;
+        }
+        EffectiveCommand::VerifyImport { limit } => {
+            logger.kv("PLU write permitted", "no")?;
+            logger.kv("Post-import verification mode", "discovery-gated")?;
+            logger.kv(
+                "Verification limit",
+                &limit
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+            )?;
         }
     }
     Ok(())
@@ -616,6 +634,71 @@ async fn run_verify(config: &AppConfig, logger: &mut AuditLogger) -> Result<i32,
     )?;
     logger.flush()?;
     Ok(if source.valid_plus.is_empty() { 2 } else { 0 })
+}
+
+fn run_verify_import(
+    config: &AppConfig,
+    limit: Option<usize>,
+    logger: &mut AuditLogger,
+) -> Result<i32, AppError> {
+    logger.line("Verify-import scope: post-import source-versus-DIGIweb comparison.")?;
+    logger.line("Operational verification is blocked because no confirmed supported PLU read API is available in the supplied project materials.")?;
+    logger.line("No authentication or DIGIweb API request will be attempted.")?;
+    logger.kv(
+        "Verification wait timeout",
+        &format!("{} seconds", config.verification.timeout_seconds),
+    )?;
+    logger.kv(
+        "Verification polling interval",
+        &format!("{} seconds", config.verification.poll_interval_seconds),
+    )?;
+
+    let source = read_source_context(config, logger)?;
+    let selected_plu_numbers = source
+        .valid_plus
+        .iter()
+        .take(limit.unwrap_or(source.valid_plus.len()))
+        .map(|plu| plu.plu_number)
+        .collect::<Vec<_>>();
+    let report = build_discovery_blocked_report(VerificationDiscoveryInput {
+        store_number: config.digiweb.store_number,
+        source_file: FIXED_SOURCE_FILE.to_string(),
+        limit,
+        valid_plu_count: source.valid_plus.len(),
+        selected_plu_numbers,
+        source_rows_discovered: source.dataset.plu_rows.len(),
+        placeholders_ignored: source.placeholder_ignored,
+        invalid_source_rows: source.invalid_source_rows,
+        validation_skipped: source.validation_skipped,
+        poll_interval_seconds: config.verification.poll_interval_seconds,
+        timeout_seconds: config.verification.timeout_seconds,
+    });
+
+    write_verification_text_report(Path::new("verification-report.txt"), &report)?;
+    write_verification_json_report(Path::new("verification-report.json"), &report)?;
+    logger.kv("Text verification report", "verification-report.txt")?;
+    logger.kv("JSON verification report", "verification-report.json")?;
+    logger.kv("Verification status", report.verification_status.as_text())?;
+    logger.kv("Expected PLUs", &report.summary.expected.to_string())?;
+    logger.kv("Confirmed PLUs", &report.summary.confirmed.to_string())?;
+    logger.kv("Missing PLUs", &report.summary.missing.to_string())?;
+    logger.kv("Mismatched PLUs", &report.summary.mismatched.to_string())?;
+    logger.kv("Unverified PLUs", &report.summary.unverified.to_string())?;
+    logger.kv(
+        "Duplicate DIGIweb matches",
+        &report.summary.duplicate.to_string(),
+    )?;
+    logger.kv("PLU write requests attempted", "NO")?;
+    logger.kv("Database access attempted", "NO")?;
+    logger.kv("Authentication attempted", "NO")?;
+    logger.kv("DIGIweb API requests attempted", "NO")?;
+    logger.final_failure(
+        "post-import verification API discovery",
+        "No confirmed supported read-only PLU endpoint is available. See verification-report.txt and docs/digiweb-verification-api.md.",
+        true,
+    )?;
+    print!("{}", render_verification_console_summary(&report));
+    Ok(report.verification_status.exit_code())
 }
 
 fn validate_connection_urls(config: &AppConfig) -> Result<(), AppError> {

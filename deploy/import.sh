@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-DEFAULT_IMAGE="ghcr.io/johed-velca/to-digi-rs:0.5.1"
+DEFAULT_IMAGE="ghcr.io/johed-velca/to-digi-rs:0.6.0"
 COMPOSE_PROJECT_NAME="to-digi-rs-import"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
 
@@ -31,7 +31,7 @@ resolve_script_dir() {
 command_label() {
     local command="${1:-import}"
     case "$command" in
-        import|analyze|verify|test-connection) printf '%s\n' "$command" ;;
+        import|analyze|verify|verify-import|test-connection) printf '%s\n' "$command" ;;
         --help|-h|--version|-V) printf 'info\n' ;;
         *) printf 'cli\n' ;;
     esac
@@ -39,14 +39,14 @@ command_label() {
 
 needs_config() {
     case "${1:-import}" in
-        import|verify|test-connection) return 0 ;;
+        import|verify|verify-import|test-connection) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 needs_source_mdb() {
     case "${1:-import}" in
-        import|analyze|verify) return 0 ;;
+        import|analyze|verify|verify-import) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -108,6 +108,8 @@ mkdir -p "$OUTPUT_DIR" || fail "Unable to create output directory: $OUTPUT_DIR" 
 rm -f "$SCRIPT_DIR/logs.txt" || fail "Unable to clean transient logs.txt before execution." 2
 rm -f "$SCRIPT_DIR/analysis-report.txt" || fail "Unable to clean transient analysis-report.txt before execution." 2
 rm -f "$SCRIPT_DIR/analysis-report.json" || fail "Unable to clean transient analysis-report.json before execution." 2
+rm -f "$SCRIPT_DIR/verification-report.txt" || fail "Unable to clean transient verification-report.txt before execution." 2
+rm -f "$SCRIPT_DIR/verification-report.json" || fail "Unable to clean transient verification-report.json before execution." 2
 rm -rf "$SCRIPT_DIR/payload-previews" || fail "Unable to clean transient payload-previews before execution." 2
 mkdir -p "$RUN_DIR" || fail "Unable to create run output directory: $RUN_DIR" 2
 
@@ -148,6 +150,18 @@ if [ -f "$SCRIPT_DIR/analysis-report.json" ]; then
     analysis_json_path="$RUN_DIR/analysis-report.json"
 fi
 
+verification_path=""
+if [ -f "$SCRIPT_DIR/verification-report.txt" ]; then
+    mv "$SCRIPT_DIR/verification-report.txt" "$RUN_DIR/verification-report.txt" || warn "Could not archive verification-report.txt to $RUN_DIR"
+    verification_path="$RUN_DIR/verification-report.txt"
+fi
+
+verification_json_path=""
+if [ -f "$SCRIPT_DIR/verification-report.json" ]; then
+    mv "$SCRIPT_DIR/verification-report.json" "$RUN_DIR/verification-report.json" || warn "Could not archive verification-report.json to $RUN_DIR"
+    verification_json_path="$RUN_DIR/verification-report.json"
+fi
+
 if [ -d "$SCRIPT_DIR/payload-previews" ]; then
     mv "$SCRIPT_DIR/payload-previews" "$RUN_DIR/payload-previews" || warn "Could not archive payload previews to $RUN_DIR"
 fi
@@ -169,6 +183,12 @@ if [ -n "$analysis_path" ]; then
 fi
 if [ -n "$analysis_json_path" ]; then
     printf 'JSON analysis report:\n%s\n' "$analysis_json_path"
+fi
+if [ -n "$verification_path" ]; then
+    printf 'Text verification report:\n%s\n' "$verification_path"
+fi
+if [ -n "$verification_json_path" ]; then
+    printf 'JSON verification report:\n%s\n' "$verification_json_path"
 fi
 
 exit "$import_exit_code"

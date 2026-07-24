@@ -16,6 +16,13 @@ request_seconds = 30
 poll_interval_seconds = 2
 poll_timeout_seconds = 120
 
+[verification]
+# Used by future operational post-import readback checks after a supported
+# read-only PLU API is confirmed. v0.6.0 verify-import currently stops at the
+# API discovery gate and reports the missing DIGIweb contract details.
+poll_interval_seconds = 2
+timeout_seconds = 60
+
 [import]
 # Deprecated as command selectors in v0.5.1. Use:
 #   ./import.sh analyze

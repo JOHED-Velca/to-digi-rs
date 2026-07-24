@@ -58,6 +58,10 @@ if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
         printf 'analysis-ok\n' >analysis-report.txt
         printf '{"schema_version":1}\n' >analysis-report.json
     fi
+    if printf '%s\n' "$*" | grep -Fq ' importer verify-import'; then
+        printf 'verification-ok\n' >verification-report.txt
+        printf '{"schema_version":1}\n' >verification-report.json
+    fi
     mkdir -p payload-previews
     printf '{"pluno":1}\n' >payload-previews/plu-1.json
     exit "${FAKE_IMPORT_EXIT:-0}"
@@ -116,7 +120,7 @@ test_resolves_own_directory_and_archives_output() {
     assert_contains "$output" "Importer exit code: 0"
     assert_contains "$output" "$deploy_dir/output/run-"
     [ -f "$deploy_dir"/output/run-*-import/logs.txt ] || fail "import logs.txt was not archived under an import-suffixed directory"
-    assert_contains "$TEST_ROOT/fake-docker.log" "TO_DIGI_RS_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.5.1"
+    assert_contains "$TEST_ROOT/fake-docker.log" "TO_DIGI_RS_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.6.0"
     [ -f "$deploy_dir"/output/run-*/logs.txt ] || fail "logs.txt was not archived"
     [ -f "$deploy_dir"/output/run-*/payload-previews/plu-1.json ] || fail "payload preview was not archived"
     [ ! -f "$deploy_dir/logs.txt" ] || fail "root logs.txt was not left behind"
@@ -185,6 +189,20 @@ test_analyze_archives_analysis_report() {
     [ -f "$deploy_dir"/output/run-*-analyze/analysis-report.json ] || fail "analysis-report.json was not archived"
 }
 
+test_verify_import_archives_verification_reports() {
+    local deploy_dir="$TEST_ROOT/deploy-verify-import"
+    local output="$TEST_ROOT/output-verify-import.txt"
+    copy_deploy "$deploy_dir"
+
+    run_with_fake_docker "$deploy_dir" "$output" verify-import --limit 1
+
+    assert_contains "$output" "Text verification report:"
+    assert_contains "$output" "JSON verification report:"
+    [ -f "$deploy_dir"/output/run-*-verify-import/verification-report.txt ] || fail "verification-report.txt was not archived"
+    [ -f "$deploy_dir"/output/run-*-verify-import/verification-report.json ] || fail "verification-report.json was not archived"
+    assert_contains "$TEST_ROOT/fake-docker.log" "importer verify-import --limit 1"
+}
+
 test_missing_config_fails_clearly() {
     local deploy_dir="$TEST_ROOT/deploy-missing-config"
     local output="$TEST_ROOT/output-missing-config.txt"
@@ -198,6 +216,19 @@ test_missing_config_fails_clearly() {
     assert_contains "$output" "Missing required configuration file"
 }
 
+test_verify_import_missing_config_fails_clearly() {
+    local deploy_dir="$TEST_ROOT/deploy-verify-import-missing-config"
+    local output="$TEST_ROOT/output-verify-import-missing-config.txt"
+    copy_deploy "$deploy_dir"
+    rm "$deploy_dir/config.toml"
+    set +e
+    run_with_fake_docker "$deploy_dir" "$output" verify-import
+    local code=$?
+    set -e
+    [ "$code" -eq 2 ] || fail "verify-import missing config exit code was $code"
+    assert_contains "$output" "Missing required configuration file"
+}
+
 test_missing_plu_fails_clearly() {
     local deploy_dir="$TEST_ROOT/deploy-missing-plu"
     local output="$TEST_ROOT/output-missing-plu.txt"
@@ -208,6 +239,19 @@ test_missing_plu_fails_clearly() {
     local code=$?
     set -e
     [ "$code" -eq 2 ] || fail "missing plu exit code was $code"
+    assert_contains "$output" "Missing required source database"
+}
+
+test_verify_import_missing_plu_fails_clearly() {
+    local deploy_dir="$TEST_ROOT/deploy-verify-import-missing-plu"
+    local output="$TEST_ROOT/output-verify-import-missing-plu.txt"
+    copy_deploy "$deploy_dir"
+    rm "$deploy_dir/plu.mdb"
+    set +e
+    run_with_fake_docker "$deploy_dir" "$output" verify-import
+    local code=$?
+    set -e
+    [ "$code" -eq 2 ] || fail "verify-import missing plu exit code was $code"
     assert_contains "$output" "Missing required source database"
 }
 
@@ -282,14 +326,14 @@ test_image_override_uid_gid_and_exit_code_are_preserved() {
     mkdir -p "$fake_dir"
     make_fake_docker "$fake_dir/docker"
     set +e
-    FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1 \
+    FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.6.0 \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
     "$deploy_dir/import.sh" >"$output" 2>&1
     local code=$?
     set -e
     [ "$code" -eq 7 ] || fail "import exit code was not preserved: $code"
     assert_contains "$output" "Importer exit code: 7"
-    assert_contains "$log" "TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1"
+    assert_contains "$log" "TO_DIGI_RS_IMAGE=to-digi-rs:0.6.0"
     assert_contains "$log" "LOCAL_UID="
     assert_contains "$log" "LOCAL_GID="
 }
@@ -318,9 +362,22 @@ test_run_sh_forwards_to_import_sh_with_notice() {
     assert_contains "$TEST_ROOT/fake-docker.log" "importer analyze"
 }
 
+test_run_sh_forwards_verify_import_with_notice() {
+    local deploy_dir="$TEST_ROOT/deploy-wrapper-verify-import"
+    local output="$TEST_ROOT/output-wrapper-verify-import.txt"
+    copy_deploy "$deploy_dir"
+
+    run_wrapper_with_fake_docker "$deploy_dir" "$output" verify-import --limit 1
+
+    assert_contains "$output" "NOTICE: run.sh has been renamed to import.sh."
+    assert_contains "$output" "Forwarding this command for backward compatibility."
+    assert_contains "$output" "Importer exit code: 0"
+    assert_contains "$TEST_ROOT/fake-docker.log" "importer verify-import --limit 1"
+}
+
 test_package_archive_contains_only_expected_files() {
     local archive
-    archive="$(TO_DIGI_RS_VERSION=0.5.1 "$ROOT_DIR/scripts/package-deploy.sh")"
+    archive="$(TO_DIGI_RS_VERSION=0.6.0 "$ROOT_DIR/scripts/package-deploy.sh")"
     [ -f "$archive" ] || fail "archive was not created"
     local listing="$TEST_ROOT/archive-list.txt"
     tar -tzf "$archive" | sort >"$listing"
@@ -333,6 +390,8 @@ test_package_archive_contains_only_expected_files() {
     assert_contains "$listing" "to-digi-rs-deploy/output/"
     assert_not_contains "$listing" "to-digi-rs-deploy/config.toml"
     assert_not_contains "$listing" "to-digi-rs-deploy/plu.mdb"
+    assert_not_contains "$listing" "to-digi-rs-deploy/verification-report.txt"
+    assert_not_contains "$listing" "to-digi-rs-deploy/verification-report.json"
     assert_not_contains "$listing" "target/"
     assert_not_contains "$listing" ".git/"
 }
@@ -342,8 +401,11 @@ test_help_and_version_do_not_require_config_or_plu
 test_test_connection_does_not_require_plu
 test_cli_arguments_are_forwarded
 test_analyze_archives_analysis_report
+test_verify_import_archives_verification_reports
 test_missing_config_fails_clearly
+test_verify_import_missing_config_fails_clearly
 test_missing_plu_fails_clearly
+test_verify_import_missing_plu_fails_clearly
 test_symlinked_plu_is_rejected_when_supported
 test_missing_docker_fails_clearly
 test_docker_daemon_failure_fails_clearly
@@ -351,6 +413,7 @@ test_compose_plugin_failure_fails_clearly
 test_image_override_uid_gid_and_exit_code_are_preserved
 test_existing_output_is_preserved
 test_run_sh_forwards_to_import_sh_with_notice
+test_run_sh_forwards_verify_import_with_notice
 test_package_archive_contains_only_expected_files
 
 printf 'deployment script tests passed\n'

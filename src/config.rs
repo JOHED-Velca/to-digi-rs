@@ -17,6 +17,7 @@ const DEFAULT_REQUEST_STATUS_PATH_TEMPLATE: &str =
 pub struct AppConfig {
     pub digiweb: DigiwebConfig,
     pub timeouts: TimeoutConfig,
+    pub verification: VerificationConfig,
     pub import: ImportConfig,
     pub mapping: MappingConfig,
 }
@@ -47,6 +48,13 @@ pub struct TimeoutConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+pub struct VerificationConfig {
+    pub poll_interval_seconds: u64,
+    pub timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct ImportConfig {
     pub continue_after_record_failure: bool,
     pub send_only_first_plu: bool,
@@ -67,6 +75,7 @@ impl Default for AppConfig {
         Self {
             digiweb: DigiwebConfig::default(),
             timeouts: TimeoutConfig::default(),
+            verification: VerificationConfig::default(),
             import: ImportConfig::default(),
             mapping: MappingConfig::default(),
         }
@@ -97,6 +106,15 @@ impl Default for TimeoutConfig {
             request_seconds: 30,
             poll_interval_seconds: 2,
             poll_timeout_seconds: 120,
+        }
+    }
+}
+
+impl Default for VerificationConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_seconds: 2,
+            timeout_seconds: 60,
         }
     }
 }
@@ -160,6 +178,11 @@ impl AppConfig {
         if self.timeouts.poll_interval_seconds == 0 || self.timeouts.poll_timeout_seconds == 0 {
             return Err(AppError::Config(
                 "poll interval and timeout must be greater than zero".to_string(),
+            ));
+        }
+        if self.verification.poll_interval_seconds == 0 || self.verification.timeout_seconds == 0 {
+            return Err(AppError::Config(
+                "verification poll interval and timeout must be greater than zero".to_string(),
             ));
         }
         validate_optional_numeric_override(
@@ -286,6 +309,26 @@ mod tests {
         assert_eq!(
             config.digiweb.request_status_path_template,
             "/api/thirdpartylinker/api/v1/requests/{request_id}"
+        );
+    }
+
+    #[test]
+    fn verification_defaults_are_bounded_and_nonzero() {
+        let config = AppConfig::default();
+
+        assert_eq!(config.verification.poll_interval_seconds, 2);
+        assert_eq!(config.verification.timeout_seconds, 60);
+        assert!(config.validate_startup().is_ok());
+    }
+
+    #[test]
+    fn zero_verification_polling_values_are_rejected() {
+        let mut config = AppConfig::default();
+
+        config.verification.timeout_seconds = 0;
+
+        assert!(
+            matches!(config.validate_startup(), Err(AppError::Config(message)) if message.contains("verification poll interval"))
         );
     }
 

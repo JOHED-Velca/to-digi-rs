@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${TO_DIGI_RS_VERSION:-0.5.1}"
+VERSION="${TO_DIGI_RS_VERSION:-0.6.0}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/target/release-bundles"
 BUNDLE_NAME="to-digi-rs-deploy"

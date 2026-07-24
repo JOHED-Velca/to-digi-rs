@@ -899,7 +899,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::config::{AppConfig, DigiwebConfig, ImportConfig, MappingConfig, TimeoutConfig};
+    use crate::config::{
+        AppConfig, DigiwebConfig, ImportConfig, MappingConfig, TimeoutConfig, VerificationConfig,
+    };
     use crate::models::plu::{Plu, PriceMode};
 
     #[test]
@@ -1558,6 +1560,7 @@ mod tests {
                 poll_interval_seconds,
                 poll_timeout_seconds,
             },
+            verification: VerificationConfig::default(),
             import: ImportConfig::default(),
             mapping: MappingConfig::default(),
         }

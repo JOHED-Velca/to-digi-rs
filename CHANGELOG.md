@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.0
+
+- Added the `verify-import` command for post-import verification API discovery
+- Added `verify-import --limit N` selection after source normalization and validation
+- Added text and JSON verification discovery reports
+- Added documented DIGIweb read-API evidence and missing contract details
+- Added read-only safety confirmations for blocked verification
+- Preserved the existing pre-import `verify` command
+- Bumped deployment scripts, package metadata, and image examples for v0.6.0
+
 ## v0.5.1
 
 - Added a concise analysis summary directly to the terminal

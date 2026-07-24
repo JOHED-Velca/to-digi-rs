@@ -295,7 +295,7 @@ mod tests {
     fn report() -> AnalysisReport {
         AnalysisReport {
             schema_version: 1,
-            application_version: "0.5.1".to_string(),
+            application_version: "0.6.0".to_string(),
             generated_at: "2026-07-23T00:00:00-04:00".to_string(),
             analysis_status: AnalysisStatus::PassWithWarnings,
             source: SourceSummary {

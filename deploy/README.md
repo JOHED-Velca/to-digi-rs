@@ -1,10 +1,10 @@
 # to-digi-rs Deployment Bundle
 
-This directory is the portable customer deployment template for `to-digi-rs` v0.5.1.
+This directory is the portable customer deployment template for `to-digi-rs` v0.6.0.
 
 ## Quick Deployment
 
-1. Download and extract `to-digi-rs-deploy-v0.5.1.tar.gz`.
+1. Download and extract `to-digi-rs-deploy-v0.6.0.tar.gz`.
 2. Place the customer Access database beside `import.sh` using the exact filename `plu.mdb`.
 3. Run `./import.sh analyze` before configuring DIGIweb credentials.
 4. Copy `config.example.toml` to `config.toml`.
@@ -20,6 +20,7 @@ This directory is the portable customer deployment template for `to-digi-rs` v0.
 ./import.sh import --continue-on-error
 ./import.sh test-connection
 ./import.sh verify
+./import.sh verify-import --limit 1
 ```
 
 Prepared runtime directory:
@@ -67,7 +68,9 @@ cp config.example.toml config.toml
 # edit config.toml and export DIGIWEB_CLIENT_SECRET when ready
 ./import.sh verify
 ./import.sh import --limit 1
+./import.sh verify-import --limit 1
 ./import.sh import
+./import.sh verify-import
 ```
 
 ## Commands
@@ -79,6 +82,8 @@ cp config.example.toml config.toml
 `test-connection` authenticates only. It does not require `plu.mdb` and does not submit PLUs.
 
 `verify` reads the source and authenticates, but does not write PLUs.
+
+`verify-import` is the post-import comparison command. In v0.6.0 it is intentionally stopped at the API discovery gate because the supplied DIGIweb materials do not confirm a supported read-only PLU lookup endpoint. It reads normalized source PLUs, honors `--limit N` after validation, writes `verification-report.txt` and `verification-report.json`, and does not authenticate or call DIGIweb while blocked.
 
 For one release, running `./import.sh` with no command still honors the old `[import]` config booleans and logs a deprecation warning. New scripts should use explicit commands.
 
@@ -103,21 +108,21 @@ Do not paste the token into `config.toml`, `import.sh`, shell history, or any re
 The default image is:
 
 ```text
-ghcr.io/johed-velca/to-digi-rs:0.5.1
+ghcr.io/johed-velca/to-digi-rs:0.6.0
 ```
 
 For local testing or an offline customer VM, load or build a local image and override the image name without editing `compose.yaml`:
 
 ```bash
-TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1 ./import.sh analyze
+TO_DIGI_RS_IMAGE=to-digi-rs:0.6.0 ./import.sh analyze
 ```
 
 Offline transfer example:
 
 ```bash
-docker save to-digi-rs:0.5.1 -o to-digi-rs-image-0.5.1.tar
-docker load -i to-digi-rs-image-0.5.1.tar
-TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1 ./import.sh import --test
+docker save to-digi-rs:0.6.0 -o to-digi-rs-image-0.6.0.tar
+docker load -i to-digi-rs-image-0.6.0.tar
+TO_DIGI_RS_IMAGE=to-digi-rs:0.6.0 ./import.sh import --test
 ```
 
 ## Output Locations
@@ -130,12 +135,16 @@ output/
 |   |-- logs.txt
 |   |-- analysis-report.txt
 |   `-- analysis-report.json
-`-- run-20260722-150500-import/
+|-- run-20260722-150500-import/
+|   |-- logs.txt
+|   `-- payload-previews/
+`-- run-20260722-151000-verify-import/
     |-- logs.txt
-    `-- payload-previews/
+    |-- verification-report.txt
+    `-- verification-report.json
 ```
 
-Previous output is preserved. The script only removes transient root-level `logs.txt`, `analysis-report.txt`, `analysis-report.json`, and `payload-previews/` before starting the next run.
+Previous output is preserved. The script only removes transient root-level `logs.txt`, report files, and `payload-previews/` before starting the next run.
 
 ## Analysis Statuses
 
@@ -150,6 +159,8 @@ Warnings exit `0`; `FAIL` exits `2`.
 The JSON report is intended for automation. It includes `schema_version`, `application_version`, source summary, table summaries, department requirements, group requirements, barcode-format summaries, price-category summaries, PluIng/ingredient/nutrition summaries, structured warnings, blocking errors, recommendations, and safety confirmations.
 
 `analyze` checks source prerequisites only. It does not confirm that departments or groups exist in DIGIweb. `verify` adds DIGIweb authentication/readiness checks without writing PLUs. `import` writes valid PLUs.
+
+`verify-import` is read-only post-import verification. It currently reports `BLOCKED_API_DISCOVERY` and exits `2` until DIGIweb provides the confirmed read-only PLU endpoint and response schema. See `docs/digiweb-verification-api.md` in the source repository for the required API details.
 
 ## Exit Codes
 

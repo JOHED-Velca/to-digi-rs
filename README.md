@@ -6,7 +6,7 @@ It reads only `./plu.mdb`, exports supported Access tables with `mdbtools`, norm
 
 ## Current Workflow
 
-Version `0.5.1` keeps the confirmed MDB mappings and DIGIweb API contract, then expands `analyze` into an offline MDB prerequisite report:
+Version `0.6.0` keeps the confirmed MDB mappings and DIGIweb write/status API contract, then adds a safe post-import verification discovery gate:
 
 ```text
 plu.mdb
@@ -17,9 +17,12 @@ plu.mdb
 -> POST /api/v1/third-party/plus/write only for import
 -> GET /api/thirdpartylinker/api/v1/requests/{request_id}
 -> final SUCCESS/FAIL/unknown-status summary
+-> verify-import source selection and API discovery report
 ```
 
 Confirmed behavior remains unchanged: exact filename `plu.mdb`, read-only MDB access, `Pludata` and `PluIng` mappings, department/group normalization, group `997`, price and barcode mappings, ingredient/nutrition mapping, sequential submission, secret redaction, one-shot execution, no deletion, and no automatic department or group creation.
+
+`verify-import` is intentionally blocked in v0.6.0 because the supplied DIGIweb materials do not confirm a supported read-only PLU lookup API. It writes reports that identify the missing API contract instead of guessing an endpoint.
 
 ## Commands
 
@@ -28,6 +31,7 @@ to-digi-rs analyze
 to-digi-rs import [--limit N] [--test] [--continue-on-error]
 to-digi-rs test-connection
 to-digi-rs verify
+to-digi-rs verify-import [--limit N]
 ```
 
 `analyze` reads and validates `plu.mdb`, writes `analysis-report.txt` and `analysis-report.json`, and does not authenticate or contact DIGIweb. It can run before DIGIweb credentials or URLs are finalized, and it can run without `config.toml` by using built-in source mapping defaults.
@@ -37,6 +41,10 @@ to-digi-rs verify
 `test-connection` authenticates to DIGIweb and does not require `plu.mdb`.
 
 `verify` reads and validates the source, then authenticates to DIGIweb. It does not write PLUs and reports import readiness.
+
+`verify-import` is reserved for post-import source-versus-DIGIweb comparison. In v0.6.0 it reads the normalized source PLUs, applies `--limit` after validation, writes `verification-report.txt` and `verification-report.json`, and exits with `BLOCKED_API_DISCOVERY` until a confirmed PLU read API is supplied. It does not authenticate, call DIGIweb, write PLUs, or access PostgreSQL while blocked.
+
+The API evidence and missing request/response details are documented in [docs/digiweb-verification-api.md](docs/digiweb-verification-api.md).
 
 For one release, running with no command still honors the old `[import]` config booleans and logs a deprecation warning. New automation should use explicit commands.
 
@@ -62,12 +70,16 @@ Recommended installation sequence:
 6. Configure authentication.
 7. Run ./import.sh verify.
 8. Run ./import.sh import --limit 1.
-9. Run ./import.sh import.
+9. Run ./import.sh verify-import --limit 1.
+10. Run ./import.sh import.
+11. Run ./import.sh verify-import.
 ```
+
+A successful Third-Party Linker request status proves that DIGIweb processed the request. It is not proof that every final stored PLU field matches the source. `verify-import` will remain read-only and blocked until the read-side PLU contract is confirmed.
 
 ## Quick Deployment
 
-The v0.5.1 deployment bundle lets the operator run the importer with one command:
+The v0.6.0 deployment bundle lets the operator run the importer with one command:
 
 ```bash
 ./import.sh analyze
@@ -75,9 +87,10 @@ The v0.5.1 deployment bundle lets the operator run the importer with one command
 ./import.sh import
 ./import.sh test-connection
 ./import.sh verify
+./import.sh verify-import --limit 1
 ```
 
-1. Download and extract `to-digi-rs-deploy-v0.5.1.tar.gz`.
+1. Download and extract `to-digi-rs-deploy-v0.6.0.tar.gz`.
 2. Place the source MDB beside `import.sh` using the exact filename `plu.mdb`.
 3. Run `./import.sh analyze`.
 4. Copy `config.example.toml` to `config.toml`.
@@ -145,20 +158,20 @@ bash scripts/package-deploy.sh
 The archive is written to:
 
 ```text
-target/release-bundles/to-digi-rs-deploy-v0.5.1.tar.gz
+target/release-bundles/to-digi-rs-deploy-v0.6.0.tar.gz
 ```
 
 ## Image Names
 
 ```text
-to-digi-rs:0.5.1
-ghcr.io/johed-velca/to-digi-rs:0.5.1
+to-digi-rs:0.6.0
+ghcr.io/johed-velca/to-digi-rs:0.6.0
 ```
 
 The deployment Compose file defaults to the GHCR image, but the image can be overridden:
 
 ```bash
-TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1 ./import.sh analyze
+TO_DIGI_RS_IMAGE=to-digi-rs:0.6.0 ./import.sh analyze
 ```
 
 ## Configuration
@@ -193,12 +206,16 @@ output/
 |   |-- logs.txt
 |   |-- analysis-report.txt
 |   `-- analysis-report.json
-`-- run-20260722-150500-import/
+|-- run-20260722-150500-import/
+|   |-- logs.txt
+|   `-- payload-previews/
+`-- run-20260722-151000-verify-import/
     |-- logs.txt
-    `-- payload-previews/
+    |-- verification-report.txt
+    `-- verification-report.json
 ```
 
-Previous output is preserved. The script prints the final log path plus both analysis report paths when present.
+Previous output is preserved. The script prints the final log path plus analysis and verification report paths when present.
 
 ## Exit Codes
 
@@ -209,6 +226,8 @@ Previous output is preserved. The script prints the final log path plus both ana
 3 = authentication or DIGIweb connection failure
 4 = unexpected internal failure
 ```
+
+`verify-import` currently exits `2` with `BLOCKED_API_DISCOVERY` until the supported read-only PLU API is confirmed. Once implemented, post-import verification will use `0` for PASS and `1` for FAIL or INCOMPLETE.
 
 ## Development
 
@@ -239,4 +258,4 @@ LOCAL_UID="$(id -u)" LOCAL_GID="$(id -g)" docker compose config
 
 ## Container Publishing
 
-`.github/workflows/publish-container.yml` is configured for semantic-version tags such as `v0.5.1` and manual dispatch. It publishes versioned images only and does not publish `latest` automatically.
+`.github/workflows/publish-container.yml` is configured for semantic-version tags such as `v0.6.0` and manual dispatch. It publishes versioned images only and does not publish `latest` automatically.

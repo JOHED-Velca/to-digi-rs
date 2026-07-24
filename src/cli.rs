@@ -17,8 +17,10 @@ pub enum CliCommand {
     Import(ImportArgs),
     /// Test DIGIweb authentication and connectivity
     TestConnection,
-    /// Verify import readiness without writing PLUs
+    /// Check import readiness without writing PLUs
     Verify,
+    /// Compare source PLUs with stored DIGIweb PLUs after import
+    VerifyImport(VerifyImportArgs),
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
@@ -32,6 +34,13 @@ pub struct ImportArgs {
     /// Continue submitting later selected PLUs after a failure or unknown final status
     #[arg(long)]
     pub continue_on_error: bool,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct VerifyImportArgs {
+    /// Verify only the first N valid normalized PLUs
+    #[arg(long, value_parser = parse_positive_usize)]
+    pub limit: Option<usize>,
 }
 
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
@@ -59,6 +68,9 @@ pub enum EffectiveCommand {
     },
     TestConnection,
     Verify,
+    VerifyImport {
+        limit: Option<usize>,
+    },
 }
 
 impl EffectiveCommand {
@@ -68,6 +80,7 @@ impl EffectiveCommand {
             Self::Import { .. } => "import",
             Self::TestConnection => "test-connection",
             Self::Verify => "verify",
+            Self::VerifyImport { .. } => "verify-import",
         }
     }
 
@@ -75,7 +88,7 @@ impl EffectiveCommand {
         match self {
             Self::Analyze { legacy_used } => *legacy_used,
             Self::Import { legacy_used, .. } => *legacy_used,
-            Self::TestConnection | Self::Verify => false,
+            Self::TestConnection | Self::Verify | Self::VerifyImport { .. } => false,
         }
     }
 }
@@ -92,6 +105,9 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
         },
         Some(CliCommand::TestConnection) => EffectiveCommand::TestConnection,
         Some(CliCommand::Verify) => EffectiveCommand::Verify,
+        Some(CliCommand::VerifyImport(args)) => {
+            EffectiveCommand::VerifyImport { limit: args.limit }
+        }
         None => legacy_effective_command(config),
     }
 }
@@ -159,6 +175,10 @@ mod tests {
             parse(&["to-digi-rs", "verify"]).command,
             Some(CliCommand::Verify)
         ));
+        assert!(matches!(
+            parse(&["to-digi-rs", "verify-import"]).command,
+            Some(CliCommand::VerifyImport(_))
+        ));
     }
 
     #[test]
@@ -172,6 +192,19 @@ mod tests {
         assert_eq!(args.limit, Some(2));
 
         assert!(Cli::try_parse_from(["to-digi-rs", "import", "--limit", "0"]).is_err());
+    }
+
+    #[test]
+    fn verify_import_limit_parses_and_zero_fails() {
+        let Cli {
+            command: Some(CliCommand::VerifyImport(args)),
+        } = parse(&["to-digi-rs", "verify-import", "--limit", "1"])
+        else {
+            panic!("expected verify-import");
+        };
+        assert_eq!(args.limit, Some(1));
+
+        assert!(Cli::try_parse_from(["to-digi-rs", "verify-import", "--limit", "0"]).is_err());
     }
 
     #[test]
@@ -217,7 +250,10 @@ mod tests {
         assert!(help.contains("import"));
         assert!(help.contains("test-connection"));
         assert!(help.contains("verify"));
-        assert_eq!(Cli::command().get_version(), Some("0.5.1"));
+        assert!(help.contains("verify-import"));
+        assert!(help.contains("Check import readiness without writing PLUs"));
+        assert!(help.contains("Compare source PLUs with stored DIGIweb PLUs after import"));
+        assert_eq!(Cli::command().get_version(), Some("0.6.0"));
     }
 
     #[test]
