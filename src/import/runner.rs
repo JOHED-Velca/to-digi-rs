@@ -47,13 +47,7 @@ pub async fn run_import(
     let mut manifest = if let Some(path) = resume_manifest {
         logger.line("RESUMING IMPORT")?;
         logger.kv("Manifest", &path.display().to_string())?;
-        let mut manifest = load_manifest(path)?;
-        let _lock = ManifestLock::acquire(path)?;
-        if manifest.mark_restarted_transients_ambiguous() {
-            atomic_write_manifest(path, &manifest)?;
-        }
-        drop(_lock);
-        manifest
+        load_manifest(path)?
     } else {
         let selected = select_records_to_send(plus, options.limit);
         let payloads = build_payloads(&selected, &config)?;
@@ -123,7 +117,23 @@ pub async fn run_import(
     )?;
 
     if resume_manifest.is_some() {
+        let restarted_transients_changed = manifest.mark_restarted_transients_ambiguous();
         let plan = build_resume_plan(&manifest, options.retry_failed);
+        let active_work = plan.items.iter().any(|item| {
+            matches!(
+                item.kind,
+                ResumePlanItemKind::PollExistingRequest
+                    | ResumePlanItemKind::SubmitNotAttempted
+                    | ResumePlanItemKind::RetryConfirmedFailure
+            )
+        });
+        if active_work {
+            manifest.recalculate_summary_for_active_run();
+            atomic_write_manifest(active_manifest_path, &manifest)?;
+        } else if restarted_transients_changed {
+            manifest.recalculate_summary();
+            atomic_write_manifest(active_manifest_path, &manifest)?;
+        }
         logger.kv("Resume manifest controls PLU selection", "yes")?;
         logger.kv(
             "Legacy import-selection flags were ignored",
@@ -206,6 +216,8 @@ pub async fn run_import(
             .collect::<Vec<_>>()
     };
 
+    let mut interrupt_signal = Box::pin(tokio::signal::ctrl_c());
+    let mut interrupted = false;
     for item in plan {
         match item.kind {
             ResumePlanItemKind::SkipAlreadySuccessful | ResumePlanItemKind::SkipFailed => {
@@ -223,16 +235,32 @@ pub async fn run_import(
             }
             ResumePlanItemKind::PollExistingRequest => {
                 let record_index = manifest_record_index(&manifest, item.plu_number)?;
-                poll_manifest_record(
-                    &mut manifest,
-                    record_index,
-                    active_manifest_path,
-                    &client,
-                    &token,
-                    logger,
-                    &format!("[resume:{}]", item.plu_number),
-                )
-                .await?;
+                let progress = format!("[resume:{}]", item.plu_number);
+                let poll_result = tokio::select! {
+                    result = poll_manifest_record(
+                        &mut manifest,
+                        record_index,
+                        active_manifest_path,
+                        &client,
+                        &token,
+                        logger,
+                        &progress,
+                    ) => Some(result),
+                    signal = &mut interrupt_signal => {
+                        if let Err(err) = signal {
+                            Some(Err(AppError::Internal(format!("failed to listen for interrupt signal: {err}"))))
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if let Some(result) = poll_result {
+                    result?;
+                } else {
+                    persist_interrupted_manifest(&mut manifest, active_manifest_path, logger)?;
+                    interrupted = true;
+                    break;
+                }
                 if should_stop_after_manifest_record(&manifest.records[record_index])
                     && !continue_after_record_failure
                 {
@@ -250,19 +278,35 @@ pub async fn run_import(
                         AppError::Internal(format!("selected PLU {} missing", item.plu_number))
                     })?;
                 let payload = &payloads[selection_index - 1];
-                submit_manifest_record(
-                    &mut manifest,
-                    record_index,
-                    active_manifest_path,
-                    &client,
-                    &token,
-                    plu,
-                    payload,
-                    &config,
-                    logger,
-                    &format!("[{selection_index}/{selected_count}]"),
-                )
-                .await?;
+                let progress = format!("[{selection_index}/{selected_count}]");
+                let submit_result = tokio::select! {
+                    result = submit_manifest_record(
+                        &mut manifest,
+                        record_index,
+                        active_manifest_path,
+                        &client,
+                        &token,
+                        plu,
+                        payload,
+                        &config,
+                        logger,
+                        &progress,
+                    ) => Some(result),
+                    signal = &mut interrupt_signal => {
+                        if let Err(err) = signal {
+                            Some(Err(AppError::Internal(format!("failed to listen for interrupt signal: {err}"))))
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if let Some(result) = submit_result {
+                    result?;
+                } else {
+                    persist_interrupted_manifest(&mut manifest, active_manifest_path, logger)?;
+                    interrupted = true;
+                    break;
+                }
                 if should_stop_after_manifest_record(&manifest.records[record_index])
                     && !continue_after_record_failure
                 {
@@ -271,7 +315,11 @@ pub async fn run_import(
             }
         }
     }
-    let status = manifest.run_status();
+    if !interrupted {
+        manifest.recalculate_summary();
+        atomic_write_manifest(active_manifest_path, &manifest)?;
+    }
+    let status = manifest.run_status;
     logger.line(if resume_manifest.is_some() {
         "RESUME COMPLETE"
     } else {
@@ -295,6 +343,17 @@ pub async fn run_import(
         manifest.summary.not_attempted
     );
     Ok(summary_from_manifest(&manifest, plus.len()))
+}
+
+fn persist_interrupted_manifest(
+    manifest: &mut ImportManifest,
+    manifest_path: &Path,
+    logger: &mut AuditLogger,
+) -> Result<(), AppError> {
+    manifest.mark_interrupted();
+    atomic_write_manifest(manifest_path, manifest)?;
+    logger.warning("Import interrupted; recovery manifest was marked interrupted.")?;
+    Ok(())
 }
 
 async fn submit_manifest_record(
@@ -323,7 +382,7 @@ async fn submit_manifest_record(
         let record = &mut manifest.records[record_index];
         record.begin_attempt()?;
     }
-    manifest.recalculate_summary();
+    manifest.recalculate_summary_for_active_run();
     atomic_write_manifest(manifest_path, manifest)?;
 
     match client
@@ -339,7 +398,7 @@ async fn submit_manifest_record(
                         Some(outcome.initial_status.as_str().to_string()),
                     )?;
                 }
-                manifest.recalculate_summary();
+                manifest.recalculate_summary_for_active_run();
                 atomic_write_manifest(manifest_path, manifest)?;
             }
             match outcome.initial_status {
@@ -406,7 +465,7 @@ async fn submit_manifest_record(
             logger.error(format!("{progress} PLU {} failed: {}", plu.plu_number, err))?;
         }
     }
-    manifest.recalculate_summary();
+    manifest.recalculate_summary_for_active_run();
     atomic_write_manifest(manifest_path, manifest)?;
     logger.line(format!(
         "{progress} Duration ms: {}",
@@ -526,7 +585,7 @@ async fn poll_manifest_record(
             ))
         })?;
     manifest.records[record_index].mark_processing("PROCESSING")?;
-    manifest.recalculate_summary();
+    manifest.recalculate_summary_for_active_run();
     atomic_write_manifest(manifest_path, manifest)?;
 
     match client.poll_request_status(token, &request_id, logger).await {
@@ -564,7 +623,7 @@ async fn poll_manifest_record(
             ))?;
         }
     }
-    manifest.recalculate_summary();
+    manifest.recalculate_summary_for_active_run();
     atomic_write_manifest(manifest_path, manifest)?;
     Ok(())
 }

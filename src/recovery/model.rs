@@ -11,6 +11,7 @@ pub struct ImportManifest {
     pub schema_version: u32,
     pub application_version: String,
     pub manifest_id: String,
+    pub run_status: RunStatus,
     pub created_at: DateTime<Local>,
     pub updated_at: DateTime<Local>,
     pub source: SourceIdentity,
@@ -156,14 +157,13 @@ impl RecordStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum RunStatus {
-    #[allow(dead_code)]
     InProgress,
     Success,
     CompletedWithFailures,
     Incomplete,
-    #[allow(dead_code)]
     Interrupted,
 }
 
@@ -231,6 +231,7 @@ impl ImportManifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
             application_version: env!("CARGO_PKG_VERSION").to_string(),
             manifest_id: format!("{}-{}", now.format("%Y%m%d%H%M%S%3f"), std::process::id()),
+            run_status: RunStatus::InProgress,
             created_at: now,
             updated_at: now,
             source,
@@ -245,16 +246,29 @@ impl ImportManifest {
             summary: ManifestSummary::default(),
             records,
         };
-        manifest.recalculate_summary();
+        manifest.recalculate_summary_for_active_run();
         manifest
     }
 
     pub fn recalculate_summary(&mut self) {
         self.summary = ManifestSummary::from_records(&self.records);
+        self.run_status = self.derived_run_status();
         self.updated_at = Local::now();
     }
 
-    pub fn run_status(&self) -> RunStatus {
+    pub fn recalculate_summary_for_active_run(&mut self) {
+        self.summary = ManifestSummary::from_records(&self.records);
+        self.run_status = RunStatus::InProgress;
+        self.updated_at = Local::now();
+    }
+
+    pub fn mark_interrupted(&mut self) {
+        self.summary = ManifestSummary::from_records(&self.records);
+        self.run_status = RunStatus::Interrupted;
+        self.updated_at = Local::now();
+    }
+
+    pub fn derived_run_status(&self) -> RunStatus {
         if self.summary.not_attempted > 0
             || self.summary.submission_started > 0
             || self.summary.request_accepted > 0
@@ -533,29 +547,82 @@ mod tests {
         assert_eq!(summary.ambiguous_submission, 1);
     }
 
-    #[test]
-    fn restarted_transient_submission_becomes_ambiguous() {
-        let source = SourceIdentity {
-            filename: "plu.mdb".to_string(),
-            size_bytes: 1,
-            sha256: "a".repeat(64),
-        };
-        let target = TargetIdentity {
-            base_url: "https://example".to_string(),
-            store_number: 1,
-            client_id: "digi".to_string(),
-        };
-        let mut manifest = ImportManifest::new(
-            source,
-            target,
+    fn manifest_with_records(records: Vec<PluManifestRecord>) -> ImportManifest {
+        ImportManifest::new(
+            SourceIdentity {
+                filename: "plu.mdb".to_string(),
+                size_bytes: 1,
+                sha256: "a".repeat(64),
+            },
+            TargetIdentity {
+                base_url: "https://example".to_string(),
+                store_number: 1,
+                client_id: "digi".to_string(),
+            },
             ManifestOptions {
                 limit: None,
                 continue_on_error: false,
                 test_alias_used: false,
             },
             1,
-            vec![record(RecordStatus::SubmissionStarted)],
-        );
+            records,
+        )
+    }
+
+    #[test]
+    fn new_manifest_starts_in_progress_and_serializes_run_status() {
+        let manifest = manifest_with_records(vec![record(RecordStatus::NotAttempted)]);
+        let json = serde_json::to_string(&manifest).expect("json");
+
+        assert_eq!(manifest.run_status, RunStatus::InProgress);
+        assert!(json.contains("\"run_status\":\"in_progress\""));
+    }
+
+    #[test]
+    fn completed_manifest_with_all_success_persists_success() {
+        let mut manifest = manifest_with_records(vec![record(RecordStatus::Success)]);
+
+        manifest.recalculate_summary();
+
+        assert_eq!(manifest.run_status, RunStatus::Success);
+    }
+
+    #[test]
+    fn completed_manifest_with_failures_persists_completed_with_failures() {
+        let mut manifest = manifest_with_records(vec![
+            record(RecordStatus::Success),
+            record(RecordStatus::Failed),
+        ]);
+
+        manifest.recalculate_summary();
+
+        assert_eq!(manifest.run_status, RunStatus::CompletedWithFailures);
+    }
+
+    #[test]
+    fn completed_manifest_with_pending_records_persists_incomplete() {
+        let mut manifest = manifest_with_records(vec![
+            record(RecordStatus::Success),
+            record(RecordStatus::UnknownStatus),
+        ]);
+
+        manifest.recalculate_summary();
+
+        assert_eq!(manifest.run_status, RunStatus::Incomplete);
+    }
+
+    #[test]
+    fn interrupted_manifest_persists_interrupted() {
+        let mut manifest = manifest_with_records(vec![record(RecordStatus::NotAttempted)]);
+
+        manifest.mark_interrupted();
+
+        assert_eq!(manifest.run_status, RunStatus::Interrupted);
+    }
+
+    #[test]
+    fn restarted_transient_submission_becomes_ambiguous() {
+        let mut manifest = manifest_with_records(vec![record(RecordStatus::SubmissionStarted)]);
 
         assert!(manifest.mark_restarted_transients_ambiguous());
         assert_eq!(

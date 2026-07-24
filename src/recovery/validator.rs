@@ -5,7 +5,7 @@ use chrono::{DateTime, Local};
 use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::recovery::model::{
-    ImportManifest, ManifestSummary, PluManifestRecord, RecordStatus, SourceIdentity,
+    ImportManifest, ManifestSummary, PluManifestRecord, RecordStatus, RunStatus, SourceIdentity,
     TargetIdentity,
 };
 use crate::recovery::{MANIFEST_SCHEMA_VERSION, sha256_json};
@@ -65,6 +65,7 @@ pub fn validate_manifest(manifest: &ImportManifest) -> Result<(), AppError> {
     if recalculated != manifest.summary {
         return invalid_manifest("summary counts do not match records");
     }
+    validate_run_status(manifest)?;
     Ok(())
 }
 
@@ -183,6 +184,26 @@ fn validate_record(record: &PluManifestRecord) -> Result<(), AppError> {
     Ok(())
 }
 
+fn validate_run_status(manifest: &ImportManifest) -> Result<(), AppError> {
+    let derived = manifest.derived_run_status();
+    if manifest.run_status == derived {
+        return Ok(());
+    }
+    if manifest.run_status == RunStatus::InProgress
+        || matches!(
+            (manifest.run_status, derived),
+            (RunStatus::Interrupted, RunStatus::Incomplete)
+        )
+    {
+        return Ok(());
+    }
+    invalid_manifest(format!(
+        "run_status {} does not agree with record states ({})",
+        manifest.run_status.as_text(),
+        derived.as_text()
+    ))
+}
+
 fn validate_hash(name: &str, value: &str) -> Result<(), AppError> {
     if value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit()) {
         Ok(())
@@ -205,7 +226,7 @@ fn invalid_manifest<T>(message: impl AsRef<str>) -> Result<T, AppError> {
 #[cfg(test)]
 mod tests {
     use crate::recovery::model::{
-        ImportManifest, ManifestOptions, PluManifestRecord, RecordStatus, SourceIdentity,
+        ImportManifest, ManifestOptions, PluManifestRecord, RecordStatus, RunStatus, SourceIdentity,
     };
 
     use super::*;
@@ -264,5 +285,33 @@ mod tests {
         manifest.recalculate_summary();
 
         assert!(validate_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn stored_in_progress_with_pending_records_is_valid() {
+        let manifest = manifest();
+
+        assert_eq!(manifest.run_status, RunStatus::InProgress);
+        assert!(validate_manifest(&manifest).is_ok());
+    }
+
+    #[test]
+    fn stored_in_progress_with_completed_records_is_valid_for_crash_recovery() {
+        let mut manifest = manifest();
+        manifest.records[0].status = RecordStatus::Success;
+        manifest.recalculate_summary_for_active_run();
+
+        assert_eq!(manifest.run_status, RunStatus::InProgress);
+        assert!(validate_manifest(&manifest).is_ok());
+    }
+
+    #[test]
+    fn stored_terminal_status_must_match_records() {
+        let mut manifest = manifest();
+        manifest.run_status = RunStatus::Success;
+
+        let error = validate_manifest(&manifest).expect_err("invalid");
+
+        assert!(error.to_string().contains("run_status SUCCESS"));
     }
 }
