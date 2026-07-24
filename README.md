@@ -6,7 +6,7 @@ It reads only `./plu.mdb`, exports supported Access tables with `mdbtools`, norm
 
 ## Current Workflow
 
-Version `0.5.1` keeps the confirmed MDB mappings and DIGIweb API contract, then expands `analyze` into an offline MDB prerequisite report:
+Version `0.7.0` keeps the confirmed MDB mappings and DIGIweb API contract, then adds crash-safe import manifests and resumable imports:
 
 ```text
 plu.mdb
@@ -16,6 +16,7 @@ plu.mdb
 -> DIGIweb authentication when needed
 -> POST /api/v1/third-party/plus/write only for import
 -> GET /api/thirdpartylinker/api/v1/requests/{request_id}
+-> persistent import-results.json state updates
 -> final SUCCESS/FAIL/unknown-status summary
 ```
 
@@ -26,13 +27,16 @@ Confirmed behavior remains unchanged: exact filename `plu.mdb`, read-only MDB ac
 ```bash
 to-digi-rs analyze
 to-digi-rs import [--limit N] [--test] [--continue-on-error]
+to-digi-rs import --resume MANIFEST [--retry-failed] [--continue-on-error]
 to-digi-rs test-connection
 to-digi-rs verify
 ```
 
 `analyze` reads and validates `plu.mdb`, writes `analysis-report.txt` and `analysis-report.json`, and does not authenticate or contact DIGIweb. It can run before DIGIweb credentials or URLs are finalized, and it can run without `config.toml` by using built-in source mapping defaults.
 
-`import` is the only command that writes PLUs to DIGIweb. `--limit N` imports only the first `N` valid normalized PLUs. `--test` is a convenience alias for `--limit 1`. By default the importer stops after the first selected record failure or unknown final status; `--continue-on-error` keeps submitting later selected PLUs.
+`import` is the only command that writes PLUs to DIGIweb. `--limit N` imports only the first `N` valid normalized PLUs. `--test` is a convenience alias for `--limit 1`. By default the importer stops after the first selected record failure or unknown final status; `--continue-on-error` keeps submitting later selected PLUs. Every real import creates an `import-results.json` manifest before authentication or PLU submission.
+
+`import --resume MANIFEST` resumes a specific manifest. The manifest controls the selected PLU scope, so `--resume` cannot be combined with `--limit` or `--test`. `--retry-failed` is valid only with `--resume` and retries only confirmed `FAILED` records.
 
 `test-connection` authenticates to DIGIweb and does not require `plu.mdb`.
 
@@ -63,21 +67,23 @@ Recommended installation sequence:
 7. Run ./import.sh verify.
 8. Run ./import.sh import --limit 1.
 9. Run ./import.sh import.
+10. If the run is interrupted or incomplete, resume the printed manifest path.
 ```
 
 ## Quick Deployment
 
-The v0.5.1 deployment bundle lets the operator run the importer with one command:
+The v0.7.0 deployment bundle lets the operator run the importer with one command:
 
 ```bash
 ./import.sh analyze
 ./import.sh import --test
 ./import.sh import
+./import.sh import --resume output/run-YYYYMMDD-HHMMSS-import/import-results.json
 ./import.sh test-connection
 ./import.sh verify
 ```
 
-1. Download and extract `to-digi-rs-deploy-v0.5.1.tar.gz`.
+1. Download and extract `to-digi-rs-deploy-v0.7.0.tar.gz`.
 2. Place the source MDB beside `import.sh` using the exact filename `plu.mdb`.
 3. Run `./import.sh analyze`.
 4. Copy `config.example.toml` to `config.toml`.
@@ -86,7 +92,7 @@ The v0.5.1 deployment bundle lets the operator run the importer with one command
 7. Run `./import.sh verify`, then the desired import command.
 8. Read the printed output path under `output/run-...-COMMAND/`.
 
-The template lives in [deploy](deploy). It does not include a real `config.toml`, real MDB, credentials, logs, analysis reports, or payload previews.
+The template lives in [deploy](deploy). It does not include a real `config.toml`, real MDB, credentials, logs, manifests, analysis reports, or payload previews.
 
 ## Runner Rename
 
@@ -136,6 +142,44 @@ Warnings still exit `0`; `FAIL` exits `2`.
 
 `analyze` checks source prerequisites only. It does not claim that departments or groups already exist in DIGIweb. `verify` adds DIGIweb authentication and import-readiness checks but still does not write PLUs. `import` writes valid PLUs.
 
+## Recovery And Resume
+
+Each real import writes a manifest:
+
+```text
+output/run-20260724-143000-import/import-results.json
+```
+
+The manifest records schema version, application version, source filename, source size, source SHA-256, non-secret target identity, selected PLU order, per-PLU payload hashes, request ids, state, and attempt history. It never stores client secrets, access tokens, authorization headers, full PLU payloads, full ingredients, or full nutrition payloads.
+
+Resume with:
+
+```bash
+./import.sh import --resume output/run-20260724-143000-import/import-results.json
+```
+
+Retry confirmed failed records only:
+
+```bash
+./import.sh import --resume output/run-20260724-143000-import/import-results.json --retry-failed
+```
+
+State meanings:
+
+```text
+SUCCESS = confirmed completed by DIGIweb
+FAILED = DIGIweb returned a confirmed failure
+NOT_ATTEMPTED = safe to submit during resume
+UNKNOWN_STATUS = request id exists, but final status is unresolved
+AMBIGUOUS_SUBMISSION = submission may have reached DIGIweb without a request id
+```
+
+`UNKNOWN_STATUS` and `AMBIGUOUS_SUBMISSION` are never automatically resent. Resume polls known request ids first, then submits only safe `NOT_ATTEMPTED` records. `AMBIGUOUS_SUBMISSION` requires manual review.
+
+On resume, the tool validates that the current `plu.mdb` size and SHA-256 match the manifest, the DIGIweb base URL/store/client id match, the normalized selected PLUs match, and every canonical payload hash still matches. If any identity check fails, resume stops before authentication or API submission.
+
+Manifest updates are atomic: the new JSON is written to a temporary file, flushed, parsed, the previous valid manifest is preserved as `import-results.json.bak`, and the live manifest is replaced. The manifest is locked with an exclusive OS file lock while it is updated. Editing manifests manually is unsupported because it can break state-machine and payload-hash safety.
+
 ## Build The Deployment Bundle
 
 ```bash
@@ -145,20 +189,20 @@ bash scripts/package-deploy.sh
 The archive is written to:
 
 ```text
-target/release-bundles/to-digi-rs-deploy-v0.5.1.tar.gz
+target/release-bundles/to-digi-rs-deploy-v0.7.0.tar.gz
 ```
 
 ## Image Names
 
 ```text
-to-digi-rs:0.5.1
-ghcr.io/johed-velca/to-digi-rs:0.5.1
+to-digi-rs:0.7.0
+ghcr.io/johed-velca/to-digi-rs:0.7.0
 ```
 
 The deployment Compose file defaults to the GHCR image, but the image can be overridden:
 
 ```bash
-TO_DIGI_RS_IMAGE=to-digi-rs:0.5.1 ./import.sh analyze
+TO_DIGI_RS_IMAGE=to-digi-rs:0.7.0 ./import.sh analyze
 ```
 
 ## Configuration
@@ -195,10 +239,14 @@ output/
 |   `-- analysis-report.json
 `-- run-20260722-150500-import/
     |-- logs.txt
+    |-- import-results.json
     `-- payload-previews/
+`-- run-20260722-151500-resume/
+    |-- logs.txt
+    `-- import-results.snapshot.json
 ```
 
-Previous output is preserved. The script prints the final log path plus both analysis report paths when present.
+Previous output is preserved. The script prints the final log path, analysis report paths, import manifest path, and resume snapshot path when present.
 
 ## Exit Codes
 
@@ -239,4 +287,4 @@ LOCAL_UID="$(id -u)" LOCAL_GID="$(id -g)" docker compose config
 
 ## Container Publishing
 
-`.github/workflows/publish-container.yml` is configured for semantic-version tags such as `v0.5.1` and manual dispatch. It publishes versioned images only and does not publish `latest` automatically.
+`.github/workflows/publish-container.yml` is configured for semantic-version tags such as `v0.7.0` and manual dispatch. It publishes versioned images only and does not publish `latest` automatically.

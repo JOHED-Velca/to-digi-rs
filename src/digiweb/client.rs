@@ -22,6 +22,13 @@ pub struct DigiwebStatusResponse {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluSubmissionOutcome {
+    pub request_id: Option<String>,
+    pub initial_status: ProcessingStatus,
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[allow(dead_code)]
 pub struct PluSubmissionResponse {
@@ -115,6 +122,7 @@ impl DigiwebClient {
         self.upsert_plu_internal(token, payload, logger, None).await
     }
 
+    #[allow(dead_code)]
     pub async fn upsert_plu_with_progress(
         &self,
         token: &AccessToken,
@@ -124,6 +132,70 @@ impl DigiwebClient {
     ) -> Result<(Option<String>, ProcessingStatus, Option<String>), AppError> {
         self.upsert_plu_internal(token, payload, logger, Some(progress_label))
             .await
+    }
+
+    pub async fn submit_plu_once(
+        &self,
+        token: &AccessToken,
+        payload: &DigiwebPluPayload,
+        logger: &mut AuditLogger,
+        progress_label: &str,
+    ) -> Result<PluSubmissionOutcome, AppError> {
+        let url = self.join_base_path(self.config.plu_upsert_path()?)?;
+        let response = self
+            .http
+            .post(&url)
+            .header("Authorization", token.bearer_value())
+            .json(payload)
+            .send()
+            .await
+            .map_err(|err| AppError::Network(err.to_string()))?;
+        let captured = capture_response(
+            "PLU submission response",
+            "POST",
+            &url,
+            true,
+            true,
+            response,
+            logger,
+        )
+        .await?;
+
+        if !captured.status.is_success() {
+            return Err(http_error("PLU submission", &captured));
+        }
+
+        match interpret_plu_submission(&captured)? {
+            SubmissionInterpretation::Final {
+                request_id,
+                status,
+                message,
+            } => Ok(PluSubmissionOutcome {
+                request_id,
+                initial_status: status,
+                message,
+            }),
+            SubmissionInterpretation::Async {
+                request_id,
+                message,
+                ..
+            } => {
+                logger.line(format!("{progress_label} Request submitted: {request_id}"))?;
+                Ok(PluSubmissionOutcome {
+                    request_id: Some(request_id),
+                    initial_status: ProcessingStatus::Processing,
+                    message,
+                })
+            }
+            SubmissionInterpretation::Unknown {
+                request_id,
+                message,
+            } => Ok(PluSubmissionOutcome {
+                request_id,
+                initial_status: ProcessingStatus::SubmittedStatusUnknown,
+                message: Some(message),
+            }),
+        }
     }
 
     async fn upsert_plu_internal(

@@ -6,10 +6,11 @@ mod error;
 mod import;
 mod logging;
 mod models;
+mod recovery;
 mod source;
 mod validation;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use analysis::model::ReferenceTableSnapshot;
@@ -26,6 +27,8 @@ use error::AppError;
 use import::runner::{ImportRunOptions, run_import};
 use logging::{AuditLogger, FinalImportLog};
 use models::plu::Plu;
+use recovery::validator::target_identity;
+use recovery::{DEFAULT_MANIFEST_PATH, SourceIdentity, sha256_file};
 use source::SourceDataset;
 use source::mapping::{normalize_dataset, validate_source_schema};
 use source::mdb_tools::MdbTools;
@@ -98,8 +101,21 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
             limit,
             continue_on_error,
             test_mode,
+            resume,
+            retry_failed,
             ..
-        } => run_import_command(&config, limit, continue_on_error, test_mode, logger).await,
+        } => {
+            run_import_command(
+                &config,
+                limit,
+                continue_on_error,
+                test_mode,
+                resume.as_deref(),
+                retry_failed,
+                logger,
+            )
+            .await
+        }
         EffectiveCommand::TestConnection => run_test_connection(&config, logger).await,
         EffectiveCommand::Verify => run_verify(&config, logger).await,
     }
@@ -118,6 +134,8 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
             limit,
             continue_on_error,
             test_mode,
+            resume,
+            retry_failed,
             legacy_used,
             defaulted_from_no_command,
         } => {
@@ -127,12 +145,21 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
             if *test_mode {
                 logger.line("Test mode enabled: equivalent to --limit 1.")?;
             }
-            logger.kv(
-                "Import limit",
-                &limit
+            let import_limit = if resume.is_some() {
+                "manifest-controlled".to_string()
+            } else {
+                limit
                     .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_string()),
-            )?;
+                    .unwrap_or_else(|| "none".to_string())
+            };
+            logger.kv("Import limit", &import_limit)?;
+            if let Some(path) = resume {
+                logger.kv("Resume manifest", &path.display().to_string())?;
+                logger.kv(
+                    "Retry confirmed failed records",
+                    if *retry_failed { "true" } else { "false" },
+                )?;
+            }
             logger.kv(
                 "Continue on error",
                 if *continue_on_error { "true" } else { "false" },
@@ -447,6 +474,8 @@ async fn run_import_command(
     limit: Option<usize>,
     continue_on_error: bool,
     test_mode: bool,
+    resume_manifest: Option<&Path>,
+    retry_failed: bool,
     logger: &mut AuditLogger,
 ) -> Result<i32, AppError> {
     let source = read_source_context(config, logger)?;
@@ -463,19 +492,29 @@ async fn run_import_command(
         logger.line("Validation warnings are present; continuing because no blocking validation errors were found.")?;
     }
 
-    let client_secret = load_client_secret(config)?;
-    logger.kv(
-        "Client secret",
-        client_secret_log_message(config, std::env::var("DIGIWEB_CLIENT_SECRET").is_ok()),
-    )?;
+    let source_identity = SourceIdentity {
+        filename: FIXED_SOURCE_FILE.to_string(),
+        size_bytes: source.source_file_size_bytes,
+        sha256: sha256_file(Path::new(FIXED_SOURCE_FILE))?,
+    };
+    let target_identity = target_identity(config);
+    let manifest_path = manifest_path_from_environment(resume_manifest)?;
+    if resume_manifest.is_none() {
+        logger.kv("Import manifest", &manifest_path.display().to_string())?;
+    }
+
     let summary = run_import(
         config.clone(),
-        client_secret,
         &source.valid_plus,
+        source_identity,
+        target_identity,
+        &manifest_path,
+        resume_manifest,
         ImportRunOptions {
             limit,
             continue_after_record_failure: continue_on_error,
             test_mode,
+            retry_failed,
         },
         logger,
     )
@@ -624,6 +663,18 @@ fn validate_connection_urls(config: &AppConfig) -> Result<(), AppError> {
     reqwest::Url::parse(config.token_url()?)
         .map_err(|err| AppError::Config(format!("invalid digiweb.token_url: {err}")))?;
     Ok(())
+}
+
+fn manifest_path_from_environment(resume_manifest: Option<&Path>) -> Result<PathBuf, AppError> {
+    if let Some(path) = resume_manifest {
+        return Ok(path.to_path_buf());
+    }
+    std::env::var("TO_DIGI_RS_IMPORT_MANIFEST_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| Some(PathBuf::from(DEFAULT_MANIFEST_PATH)))
+        .ok_or_else(|| AppError::Config("import manifest path could not be resolved".to_string()))
 }
 
 struct SourceContext {

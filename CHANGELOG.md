@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.7.0
+
+- Added persistent import-results.json manifests
+- Added resumable imports
+- Added crash-safe atomic manifest updates
+- Added source and payload identity validation
+- Added recovery of existing request-status polling
+- Added explicit retry for confirmed failed requests
+- Added protection against resending unknown submissions
+- Added per-PLU attempt history
+- Added manifest locking and consistency validation
+- Added resume logs and final manifest snapshots
+
 ## v0.5.1
 
 - Added a concise analysis summary directly to the terminal
