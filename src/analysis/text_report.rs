@@ -31,6 +31,16 @@ pub fn render_text_report(report: &AnalysisReport) -> String {
         &mut out,
         format!("Analysis status: {}", report.analysis_status.as_text()),
     );
+    if let Some(sanitization) = &report.sanitization {
+        line(
+            &mut out,
+            format!("Sanitization profile: {}", sanitization.profile_name),
+        );
+        line(
+            &mut out,
+            format!("PLUs recovered by profile: {}", sanitization.recovered_plus),
+        );
+    }
     blank(&mut out);
 
     section(&mut out, "1. Source summary");
@@ -107,6 +117,41 @@ pub fn render_text_report(report: &AnalysisReport) -> String {
         line(&mut out, format!("- {plu}"));
     }
     blank(&mut out);
+
+    if let Some(sanitization) = &report.sanitization {
+        section(&mut out, "3a. Sanitization");
+        line(&mut out, format!("Profile: {}", sanitization.profile_name));
+        line(
+            &mut out,
+            format!("Profile SHA-256: {}", sanitization.profile_sha256),
+        );
+        line(
+            &mut out,
+            format!("PLUs changed: {}", sanitization.records_changed),
+        );
+        line(
+            &mut out,
+            format!("PLUs recovered by profile: {}", sanitization.recovered_plus),
+        );
+        line(
+            &mut out,
+            format!(
+                "Still invalid after sanitization: {}",
+                sanitization.still_invalid_plus
+            ),
+        );
+        line(
+            &mut out,
+            format!(
+                "Existing nonempty values changed: {}",
+                sanitization.nonempty_values_changed
+            ),
+        );
+        for (field, count) in &sanitization.fields_changed {
+            line(&mut out, format!("- {field}: {count}"));
+        }
+        blank(&mut out);
+    }
 
     section(&mut out, "4. Required departments");
     line(
@@ -555,9 +600,10 @@ mod tests {
     fn text_report_contains_safety_confirmation_and_no_secrets() {
         let report = AnalysisReport {
             schema_version: 1,
-            application_version: "0.7.0".to_string(),
+            application_version: "0.8.0".to_string(),
             generated_at: "2026-07-23T00:00:00-04:00".to_string(),
             analysis_status: AnalysisStatus::Pass,
+            sanitization: None,
             source: SourceSummary {
                 exact_filename: "plu.mdb".to_string(),
                 file_size_bytes: 10,

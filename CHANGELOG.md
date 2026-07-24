@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.8.0
+
+- Added profile-driven PLU sanitization
+- Added offline sanitization analysis and reports
+- Added safe fill-only rules for configured empty fields
+- Added reusable customer TOML profiles
+- Added Starsky sanitization profile
+- Added sanitized analysis, readiness verification, and import
+- Added sanitization profile identity to recovery manifests
+- Added profile snapshots for resumable sanitized imports
+- Added backward compatibility with v0.7.0 manifests
+- Preserved the original MDB without modification
+
 ## v0.7.0
 
 - Added persistent import-results.json manifests

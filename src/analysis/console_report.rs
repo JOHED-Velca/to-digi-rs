@@ -34,6 +34,20 @@ pub fn render_console_summary(
         &mut out,
         format!("Invalid PLUs: {}", report.summary.invalid_plus),
     );
+    if let Some(sanitization) = &report.sanitization {
+        line(
+            &mut out,
+            format!("Sanitization profile: {}", sanitization.profile_name),
+        );
+        line(
+            &mut out,
+            format!("PLUs recovered by profile: {}", sanitization.recovered_plus),
+        );
+        line(
+            &mut out,
+            "Profile-provided values are applied in memory only.",
+        );
+    }
     line(&mut out, format!("Warnings: {}", report.warnings.len()));
     line(
         &mut out,
@@ -295,9 +309,10 @@ mod tests {
     fn report() -> AnalysisReport {
         AnalysisReport {
             schema_version: 1,
-            application_version: "0.7.0".to_string(),
+            application_version: "0.8.0".to_string(),
             generated_at: "2026-07-23T00:00:00-04:00".to_string(),
             analysis_status: AnalysisStatus::PassWithWarnings,
+            sanitization: None,
             source: SourceSummary {
                 exact_filename: "plu.mdb".to_string(),
                 file_size_bytes: 10,

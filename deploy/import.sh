@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-DEFAULT_IMAGE="ghcr.io/johed-velca/to-digi-rs:0.7.0"
+DEFAULT_IMAGE="ghcr.io/johed-velca/to-digi-rs:0.8.0"
 COMPOSE_PROJECT_NAME="to-digi-rs-import"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
 
@@ -38,7 +38,7 @@ command_label() {
                 printf 'import\n'
             fi
             ;;
-        analyze|verify|test-connection) printf '%s\n' "$command" ;;
+        analyze|verify|test-connection|sanitize) printf '%s\n' "$command" ;;
         --help|-h|--version|-V) printf 'info\n' ;;
         *) printf 'cli\n' ;;
     esac
@@ -49,6 +49,42 @@ has_resume_arg() {
     for arg in "$@"; do
         case "$arg" in
             --resume|--resume=*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+has_arg_name() {
+    local name="$1"
+    shift
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            "$name") return 0 ;;
+            "$name"=*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+path_arg_value() {
+    local name="$1"
+    shift
+    local previous=""
+    local arg
+    for arg in "$@"; do
+        if [ "$previous" = "$name" ]; then
+            printf '%s\n' "$arg"
+            return 0
+        fi
+        case "$arg" in
+            "$name"=*)
+                printf '%s\n' "${arg#*=}"
+                return 0
+                ;;
+            "$name")
+                previous="$name"
+                ;;
         esac
     done
     return 1
@@ -73,6 +109,34 @@ resume_arg_value() {
         esac
     done
     return 1
+}
+
+translate_path_arg() {
+    local name="$1"
+    local translated_path="$2"
+    shift 2
+    local previous=""
+    FORWARDED_ARGS=()
+    local arg
+    for arg in "$@"; do
+        if [ "$previous" = "$name" ]; then
+            FORWARDED_ARGS+=("$translated_path")
+            previous=""
+            continue
+        fi
+        case "$arg" in
+            "$name"=*)
+                FORWARDED_ARGS+=("$name=$translated_path")
+                ;;
+            "$name")
+                FORWARDED_ARGS+=("$arg")
+                previous="$name"
+                ;;
+            *)
+                FORWARDED_ARGS+=("$arg")
+                ;;
+        esac
+    done
 }
 
 translate_resume_args() {
@@ -111,9 +175,30 @@ needs_config() {
 
 needs_source_mdb() {
     case "${1:-import}" in
-        import|analyze|verify) return 0 ;;
+        import|analyze|verify|sanitize) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+resolve_safe_deploy_path() {
+    local value="$1"
+    local label="$2"
+    local host_path=""
+    case "$value" in
+        /*) host_path="$value" ;;
+        *) host_path="$SCRIPT_DIR/$value" ;;
+    esac
+    local parent
+    parent="$(cd -P "$(dirname "$host_path")" >/dev/null 2>&1 && pwd)" || fail "Missing $label: $value" 2
+    host_path="$parent/$(basename "$host_path")"
+    case "$host_path/" in
+        "$SCRIPT_DIR"/*) ;;
+        *) fail "Sanitization profiles must be located inside the deployment directory." 2 ;;
+    esac
+    [ ! -L "$host_path" ] || fail "$label must be a regular file, not a symbolic link: $host_path" 2
+    [ -f "$host_path" ] || fail "Missing $label: $host_path" 2
+    [ -r "$host_path" ] || fail "$label is not readable: $host_path" 2
+    printf '%s\n' "$host_path"
 }
 
 require_linux() {
@@ -173,6 +258,9 @@ mkdir -p "$OUTPUT_DIR" || fail "Unable to create output directory: $OUTPUT_DIR" 
 rm -f "$SCRIPT_DIR/logs.txt" || fail "Unable to clean transient logs.txt before execution." 2
 rm -f "$SCRIPT_DIR/analysis-report.txt" || fail "Unable to clean transient analysis-report.txt before execution." 2
 rm -f "$SCRIPT_DIR/analysis-report.json" || fail "Unable to clean transient analysis-report.json before execution." 2
+rm -f "$SCRIPT_DIR/sanitization-report.txt" || fail "Unable to clean transient sanitization-report.txt before execution." 2
+rm -f "$SCRIPT_DIR/sanitization-report.json" || fail "Unable to clean transient sanitization-report.json before execution." 2
+rm -f "$SCRIPT_DIR/sanitization-profile.snapshot.toml" || fail "Unable to clean transient sanitization-profile.snapshot.toml before execution." 2
 rm -rf "$SCRIPT_DIR/payload-previews" || fail "Unable to clean transient payload-previews before execution." 2
 mkdir -p "$RUN_DIR" || fail "Unable to create run output directory: $RUN_DIR" 2
 
@@ -188,7 +276,10 @@ TO_DIGI_RS_IMPORT_MANIFEST_PATH=""
 FORWARDED_ARGS=("$@")
 resume_host_path=""
 resume_container_path=""
+profile_host_path=""
+profile_container_path=""
 if [ "$COMMAND_LABEL" = "resume" ]; then
+    ! has_arg_name "--sanitize-profile" "$@" || fail "--resume cannot be combined with --sanitize-profile." 2
     resume_value="$(resume_arg_value "$@")" || fail "Missing value for --resume." 2
     case "$resume_value" in
         /*) resume_host_path="$resume_value" ;;
@@ -206,7 +297,21 @@ if [ "$COMMAND_LABEL" = "resume" ]; then
     [ -w "$resume_host_path" ] || fail "Resume manifest is not writable: $resume_host_path" 2
     resume_container_path="/work${resume_host_path#"$SCRIPT_DIR"}"
     translate_resume_args "$resume_container_path" "$@"
+elif [ "${1:-}" = "sanitize" ]; then
+    profile_value="$(path_arg_value "--profile" "$@")" || fail "sanitize requires --profile." 2
+    profile_host_path="$(resolve_safe_deploy_path "$profile_value" "sanitization profile")" || exit $?
+    profile_container_path="/work${profile_host_path#"$SCRIPT_DIR"}"
+    translate_path_arg "--profile" "$profile_container_path" "$@"
+elif has_arg_name "--sanitize-profile" "$@"; then
+    profile_value="$(path_arg_value "--sanitize-profile" "$@")" || fail "Missing value for --sanitize-profile." 2
+    profile_host_path="$(resolve_safe_deploy_path "$profile_value" "sanitization profile")" || exit $?
+    profile_container_path="/work${profile_host_path#"$SCRIPT_DIR"}"
+    translate_path_arg "--sanitize-profile" "$profile_container_path" "$@"
 elif [ "${1:-import}" = "import" ] || [ "$#" -eq 0 ]; then
+    TO_DIGI_RS_IMPORT_MANIFEST_PATH="/work/output/$RUN_ID/import-results.json"
+fi
+
+if [ "$COMMAND_LABEL" = "import" ] && [ -z "$TO_DIGI_RS_IMPORT_MANIFEST_PATH" ]; then
     TO_DIGI_RS_IMPORT_MANIFEST_PATH="/work/output/$RUN_ID/import-results.json"
 fi
 
@@ -238,6 +343,27 @@ analysis_json_path=""
 if [ -f "$SCRIPT_DIR/analysis-report.json" ]; then
     mv "$SCRIPT_DIR/analysis-report.json" "$RUN_DIR/analysis-report.json" || warn "Could not archive analysis-report.json to $RUN_DIR"
     analysis_json_path="$RUN_DIR/analysis-report.json"
+fi
+
+sanitization_path=""
+if [ -f "$SCRIPT_DIR/sanitization-report.txt" ]; then
+    mv "$SCRIPT_DIR/sanitization-report.txt" "$RUN_DIR/sanitization-report.txt" || warn "Could not archive sanitization-report.txt to $RUN_DIR"
+    sanitization_path="$RUN_DIR/sanitization-report.txt"
+fi
+
+sanitization_json_path=""
+if [ -f "$SCRIPT_DIR/sanitization-report.json" ]; then
+    mv "$SCRIPT_DIR/sanitization-report.json" "$RUN_DIR/sanitization-report.json" || warn "Could not archive sanitization-report.json to $RUN_DIR"
+    sanitization_json_path="$RUN_DIR/sanitization-report.json"
+fi
+
+sanitization_snapshot_path=""
+if [ -f "$SCRIPT_DIR/sanitization-profile.snapshot.toml" ]; then
+    mv "$SCRIPT_DIR/sanitization-profile.snapshot.toml" "$RUN_DIR/sanitization-profile.snapshot.toml" || warn "Could not archive sanitization profile snapshot to $RUN_DIR"
+    chmod 600 "$RUN_DIR/sanitization-profile.snapshot.toml" 2>/dev/null || true
+    sanitization_snapshot_path="$RUN_DIR/sanitization-profile.snapshot.toml"
+elif [ -f "$RUN_DIR/sanitization-profile.snapshot.toml" ]; then
+    sanitization_snapshot_path="$RUN_DIR/sanitization-profile.snapshot.toml"
 fi
 
 if [ -d "$SCRIPT_DIR/payload-previews" ]; then
@@ -274,6 +400,15 @@ if [ -n "$analysis_path" ]; then
 fi
 if [ -n "$analysis_json_path" ]; then
     printf 'JSON analysis report:\n%s\n' "$analysis_json_path"
+fi
+if [ -n "$sanitization_path" ]; then
+    printf 'Text sanitization report:\n%s\n' "$sanitization_path"
+fi
+if [ -n "$sanitization_json_path" ]; then
+    printf 'JSON sanitization report:\n%s\n' "$sanitization_json_path"
+fi
+if [ -n "$sanitization_snapshot_path" ]; then
+    printf 'Sanitization profile snapshot:\n%s\n' "$sanitization_snapshot_path"
 fi
 if [ -n "$manifest_path" ]; then
     printf 'Import manifest:\n%s\n' "$manifest_path"

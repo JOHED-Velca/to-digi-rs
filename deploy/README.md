@@ -1,10 +1,10 @@
 # to-digi-rs Deployment Bundle
 
-This directory is the portable customer deployment template for `to-digi-rs` v0.7.0.
+This directory is the portable customer deployment template for `to-digi-rs` v0.8.0.
 
 ## Quick Deployment
 
-1. Download and extract `to-digi-rs-deploy-v0.7.0.tar.gz`.
+1. Download and extract `to-digi-rs-deploy-v0.8.0.tar.gz`.
 2. Place the customer Access database beside `import.sh` using the exact filename `plu.mdb`.
 3. Run `./import.sh analyze` before configuring DIGIweb credentials.
 4. Copy `config.example.toml` to `config.toml`.
@@ -15,12 +15,15 @@ This directory is the portable customer deployment template for `to-digi-rs` v0.
 
 ```bash
 ./import.sh analyze
+./import.sh sanitize --profile profiles/starsky.toml
+./import.sh analyze --sanitize-profile profiles/starsky.toml
 ./import.sh import --test
 ./import.sh import --limit 10
+./import.sh import --sanitize-profile profiles/starsky.toml --limit 1
 ./import.sh import --continue-on-error
 ./import.sh import --resume output/run-YYYYMMDD-HHMMSS-import/import-results.json
 ./import.sh test-connection
-./import.sh verify
+./import.sh verify --sanitize-profile profiles/starsky.toml
 ```
 
 Prepared runtime directory:
@@ -30,6 +33,9 @@ to-digi-rs-deploy/
 |-- compose.yaml
 |-- import.sh
 |-- run.sh
+|-- profiles/
+|   |-- example.toml
+|   `-- starsky.toml
 |-- config.toml
 |-- plu.mdb
 `-- output/
@@ -83,7 +89,36 @@ cp config.example.toml config.toml
 
 `verify` reads the source and authenticates, but does not write PLUs.
 
+`sanitize --profile PROFILE` is always a preview command. It reads the exact `plu.mdb`, applies fill-only rules in memory, writes sanitization reports, and never authenticates, contacts DIGIweb, submits PLUs, or modifies the MDB.
+
+`--sanitize-profile PROFILE` is available for `analyze`, `verify`, and `import`. No profile means the existing strict behavior. Profiles must be selected explicitly and must live inside the deployment directory. `import --resume` cannot be combined with `--sanitize-profile`; resume uses the profile snapshot recorded by the original manifest.
+
 For one release, running `./import.sh` with no command still honors the old `[import]` config booleans and logs a deprecation warning. New scripts should use explicit commands.
+
+## Sanitization Profiles
+
+Profiles are versioned TOML files. Schema version 1 supports only these target fields: `department`, `barcode`, `barcode_format`, and `print_format_code`. Supported actions are `set_constant` and `copy_field` from `plu_code` with `numeric_no_padding`. Profiles cannot overwrite nonempty values, clear fields, delete PLUs, run scripts, interpolate environment variables, or store secrets.
+
+Generic workflow:
+
+```bash
+./import.sh sanitize --profile profiles/example.toml
+./import.sh analyze --sanitize-profile profiles/example.toml
+./import.sh verify --sanitize-profile profiles/example.toml
+./import.sh import --sanitize-profile profiles/example.toml --limit 1
+./import.sh import --sanitize-profile profiles/example.toml
+```
+
+Starsky workflow:
+
+```bash
+./import.sh sanitize --profile profiles/starsky.toml
+./import.sh analyze --sanitize-profile profiles/starsky.toml
+./import.sh verify --sanitize-profile profiles/starsky.toml
+./import.sh import --sanitize-profile profiles/starsky.toml --limit 1
+```
+
+The Starsky profile fills empty Department with `1`, empty Barcode with the normalized PLU code, empty Barcode Format with `05`, and empty Print Format Code with `00`. Do not reuse Starsky rules for another customer unless their source-data rules have been confirmed. To create another profile, copy `profiles/example.toml`, choose a new `profile_name`, adjust constants, and run `sanitize` first.
 
 ## GHCR Login
 
@@ -106,21 +141,21 @@ Do not paste the token into `config.toml`, `import.sh`, shell history, or any re
 The default image is:
 
 ```text
-ghcr.io/johed-velca/to-digi-rs:0.7.0
+ghcr.io/johed-velca/to-digi-rs:0.8.0
 ```
 
 For local testing or an offline customer VM, load or build a local image and override the image name without editing `compose.yaml`:
 
 ```bash
-TO_DIGI_RS_IMAGE=to-digi-rs:0.7.0 ./import.sh analyze
+TO_DIGI_RS_IMAGE=to-digi-rs:0.8.0 ./import.sh analyze
 ```
 
 Offline transfer example:
 
 ```bash
-docker save to-digi-rs:0.7.0 -o to-digi-rs-image-0.7.0.tar
-docker load -i to-digi-rs-image-0.7.0.tar
-TO_DIGI_RS_IMAGE=to-digi-rs:0.7.0 ./import.sh import --test
+docker save to-digi-rs:0.8.0 -o to-digi-rs-image-0.8.0.tar
+docker load -i to-digi-rs-image-0.8.0.tar
+TO_DIGI_RS_IMAGE=to-digi-rs:0.8.0 ./import.sh import --test
 ```
 
 ## Output Locations
@@ -133,16 +168,22 @@ output/
 |   |-- logs.txt
 |   |-- analysis-report.txt
 |   `-- analysis-report.json
+|-- run-20260722-144500-sanitize/
+|   |-- logs.txt
+|   |-- sanitization-report.txt
+|   |-- sanitization-report.json
+|   `-- sanitization-profile.snapshot.toml
 `-- run-20260722-150500-import/
     |-- logs.txt
     |-- import-results.json
+    |-- sanitization-profile.snapshot.toml
     `-- payload-previews/
 `-- run-20260722-151500-resume/
     |-- logs.txt
     `-- import-results.snapshot.json
 ```
 
-Previous output is preserved. The script only removes transient root-level `logs.txt`, `analysis-report.txt`, `analysis-report.json`, and `payload-previews/` before starting the next run. It does not remove previous manifests.
+Previous output is preserved. The script only removes transient root-level `logs.txt`, reports, profile snapshots, and `payload-previews/` before starting the next run. It does not remove previous manifests.
 
 ## Analysis Statuses
 
@@ -176,6 +217,8 @@ Retry confirmed failed records only:
 
 Resume validates the current `plu.mdb` size and SHA-256, the DIGIweb base URL, store number, client id, selected normalized PLUs, and canonical payload hashes before authentication. If anything changed, resume is cancelled and no API request is sent.
 
+For sanitized imports, resume also validates the stored `sanitization-profile.snapshot.toml` and its SHA-256 before authentication. The original external profile path is not required.
+
 Manifest updates are atomic and protected by an exclusive file lock. A previous valid manifest is preserved as `import-results.json.bak`. A resume run writes a new `logs.txt` under `output/run-...-resume/` and copies the final manifest state to `import-results.snapshot.json`.
 
 Do not edit `import-results.json` manually. Copy it for inspection or transport, but leave the original manifest unchanged for resume.
@@ -205,6 +248,8 @@ Do not edit `import-results.json` manually. Copy it for inspection or transport,
 `Missing config.toml`: copy `config.example.toml` to `config.toml` and fill in the customer values. `analyze`, `--help`, and `--version` do not require this file.
 
 `Missing plu.mdb`: place the source database beside `import.sh` using the exact lowercase filename `plu.mdb`. `test-connection`, `--help`, and `--version` do not require the database.
+
+`Invalid sanitization profile path`: place profiles under the deployment directory, normally under `profiles/`. Symlinks, directories, traversal outside the deployment directory, and outside absolute paths are rejected.
 
 `plu.mdb is a symbolic link`: replace it with a regular file. The importer rejects symlinked databases.
 

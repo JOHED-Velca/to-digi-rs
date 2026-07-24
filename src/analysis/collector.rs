@@ -3,12 +3,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::Local;
 
 use crate::analysis::model::{
-    AnalysisBlockingError, AnalysisReport, AnalysisStatus, AnalysisWarning, BarcodeFormatAnalysis,
-    DepartmentRequirement, GroupRequirement, IngredientAnalysis, NutritionAnalysis,
-    PluClassification, PluFieldCount, PriceCategoryAnalysis, ReferenceMatchStatus,
-    ReferenceTableSnapshot, SafetyConfirmation, SourceSummary, TableAnalysis, TableStatus,
+    AnalysisBlockingError, AnalysisReport, AnalysisSanitization, AnalysisStatus, AnalysisWarning,
+    BarcodeFormatAnalysis, DepartmentRequirement, GroupRequirement, IngredientAnalysis,
+    NutritionAnalysis, PluClassification, PluFieldCount, PriceCategoryAnalysis,
+    ReferenceMatchStatus, ReferenceTableSnapshot, SafetyConfirmation, SourceSummary, TableAnalysis,
+    TableStatus,
 };
 use crate::models::plu::{Plu, PriceMode};
+use crate::sanitization::SanitizationIntegration;
 use crate::source::{SourceDataset, SourceRow};
 use crate::validation::issue::{Severity, ValidationIssue};
 use crate::validation::validator::ValidationReport;
@@ -36,6 +38,7 @@ pub struct AnalysisInput<'a> {
     pub reference_tables: &'a [ReferenceTableSnapshot],
     pub nutrition_fallback_to_pluing: bool,
     pub nutrition_source_table: &'a str,
+    pub sanitization: Option<&'a SanitizationIntegration>,
 }
 
 pub fn collect_analysis(input: AnalysisInput<'_>) -> AnalysisReport {
@@ -99,6 +102,16 @@ pub fn collect_analysis(input: AnalysisInput<'_>) -> AnalysisReport {
         application_version: env!("CARGO_PKG_VERSION").to_string(),
         generated_at: Local::now().to_rfc3339(),
         analysis_status,
+        sanitization: input.sanitization.map(|sanitization| AnalysisSanitization {
+            profile_name: sanitization.profile.profile_name.clone(),
+            profile_version: sanitization.profile.profile_version,
+            profile_sha256: sanitization.profile_sha256.clone(),
+            records_changed: sanitization.engine_report.changed_plus,
+            recovered_plus: sanitization.recovered_plus,
+            still_invalid_plus: sanitization.after_invalid,
+            nonempty_values_changed: sanitization.engine_report.nonempty_values_changed,
+            fields_changed: sanitization.engine_report.field_changes.clone(),
+        }),
         source,
         summary,
         tables,
@@ -1038,6 +1051,7 @@ mod tests {
             reference_tables: refs,
             nutrition_fallback_to_pluing: true,
             nutrition_source_table: "PluIng",
+            sanitization: None,
         })
     }
 

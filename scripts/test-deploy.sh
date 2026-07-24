@@ -81,6 +81,11 @@ if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
         printf 'analysis-ok\n' >analysis-report.txt
         printf '{"schema_version":1}\n' >analysis-report.json
     fi
+    if printf '%s\n' "$*" | grep -Fq ' importer sanitize'; then
+        printf 'sanitize-ok\n' >sanitization-report.txt
+        printf '{"schema_version":1}\n' >sanitization-report.json
+        printf 'profile_version = 1\nprofile_name = "test"\n' >sanitization-profile.snapshot.toml
+    fi
     mkdir -p payload-previews
     printf '{"pluno":1}\n' >payload-previews/plu-1.json
     exit "${FAKE_IMPORT_EXIT:-0}"
@@ -98,6 +103,9 @@ copy_deploy() {
     cp "$ROOT_DIR/deploy/import.sh" "$dir/import.sh"
     cp "$ROOT_DIR/deploy/run.sh" "$dir/run.sh"
     cp "$ROOT_DIR/deploy/config.example.toml" "$dir/config.toml"
+    mkdir -p "$dir/profiles"
+    cp "$ROOT_DIR/profiles/example.toml" "$dir/profiles/example.toml"
+    cp "$ROOT_DIR/profiles/starsky.toml" "$dir/profiles/starsky.toml"
     mkdir -p "$dir/output"
     printf 'mdb\n' >"$dir/plu.mdb"
     chmod +x "$dir/import.sh" "$dir/run.sh"
@@ -139,7 +147,7 @@ test_resolves_own_directory_and_archives_output() {
     assert_contains "$output" "Importer exit code: 0"
     assert_contains "$output" "$deploy_dir/output/run-"
     [ -f "$deploy_dir"/output/run-*-import/logs.txt ] || fail "import logs.txt was not archived under an import-suffixed directory"
-    assert_contains "$TEST_ROOT/fake-docker.log" "TO_DIGI_RS_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.7.0"
+    assert_contains "$TEST_ROOT/fake-docker.log" "TO_DIGI_RS_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.8.0"
     [ -f "$deploy_dir"/output/run-*/logs.txt ] || fail "logs.txt was not archived"
     [ -f "$deploy_dir"/output/run-*-import/import-results.json ] || fail "import manifest was not created under the import run directory"
     [ -f "$deploy_dir"/output/run-*/payload-previews/plu-1.json ] || fail "payload preview was not archived"
@@ -210,6 +218,34 @@ test_analyze_archives_analysis_report() {
     [ -f "$deploy_dir"/output/run-*-analyze/analysis-report.json ] || fail "analysis-report.json was not archived"
 }
 
+test_sanitize_translates_profile_and_archives_reports() {
+    local deploy_dir="$TEST_ROOT/deploy-sanitize"
+    local output="$TEST_ROOT/output-sanitize.txt"
+    copy_deploy "$deploy_dir"
+    rm "$deploy_dir/config.toml"
+
+    run_with_fake_docker "$deploy_dir" "$output" sanitize --profile profiles/starsky.toml --dry-run
+
+    assert_contains "$TEST_ROOT/fake-docker.log" "importer sanitize --profile /work/profiles/starsky.toml --dry-run"
+    assert_contains "$output" "Text sanitization report:"
+    assert_contains "$output" "JSON sanitization report:"
+    assert_contains "$output" "Sanitization profile snapshot:"
+    [ -f "$deploy_dir"/output/run-*-sanitize/sanitization-report.txt ] || fail "sanitization-report.txt was not archived"
+    [ -f "$deploy_dir"/output/run-*-sanitize/sanitization-report.json ] || fail "sanitization-report.json was not archived"
+    [ -f "$deploy_dir"/output/run-*-sanitize/sanitization-profile.snapshot.toml ] || fail "sanitization profile snapshot was not archived"
+}
+
+test_analyze_translates_sanitize_profile() {
+    local deploy_dir="$TEST_ROOT/deploy-analyze-sanitize"
+    local output="$TEST_ROOT/output-analyze-sanitize.txt"
+    copy_deploy "$deploy_dir"
+    rm "$deploy_dir/config.toml"
+
+    run_with_fake_docker "$deploy_dir" "$output" analyze --sanitize-profile profiles/example.toml
+
+    assert_contains "$TEST_ROOT/fake-docker.log" "importer analyze --sanitize-profile /work/profiles/example.toml"
+}
+
 test_resume_translates_relative_manifest_and_archives_snapshot() {
     local deploy_dir="$TEST_ROOT/deploy-resume-relative"
     local output="$TEST_ROOT/output-resume-relative.txt"
@@ -253,6 +289,36 @@ test_resume_rejects_manifest_outside_deployment_directory() {
     set -e
     [ "$code" -eq 2 ] || fail "outside resume manifest exit code was $code"
     assert_contains "$output" "Resume manifests must be located inside the deployment directory"
+}
+
+test_profile_outside_deployment_directory_is_rejected() {
+    local deploy_dir="$TEST_ROOT/deploy-profile-outside"
+    local output="$TEST_ROOT/output-profile-outside.txt"
+    copy_deploy "$deploy_dir"
+    local outside="$TEST_ROOT/outside-profile.toml"
+    printf 'profile_version = 1\nprofile_name = "outside"\n' >"$outside"
+    set +e
+    run_with_fake_docker "$deploy_dir" "$output" sanitize --profile "$outside"
+    local code=$?
+    set -e
+    [ "$code" -eq 2 ] || fail "outside profile exit code was $code"
+    assert_contains "$output" "Sanitization profiles must be located inside the deployment directory"
+}
+
+test_symlinked_profile_is_rejected_when_supported() {
+    local deploy_dir="$TEST_ROOT/deploy-profile-symlink"
+    local output="$TEST_ROOT/output-profile-symlink.txt"
+    copy_deploy "$deploy_dir"
+    rm "$deploy_dir/profiles/starsky.toml"
+    if ! ln -s "$ROOT_DIR/profiles/starsky.toml" "$deploy_dir/profiles/starsky.toml" 2>/dev/null; then
+        return 0
+    fi
+    set +e
+    run_with_fake_docker "$deploy_dir" "$output" sanitize --profile profiles/starsky.toml
+    local code=$?
+    set -e
+    [ "$code" -eq 2 ] || fail "symlink profile exit code was $code"
+    assert_contains "$output" "sanitization profile must be a regular file, not a symbolic link"
 }
 
 test_missing_config_fails_clearly() {
@@ -352,14 +418,14 @@ test_image_override_uid_gid_and_exit_code_are_preserved() {
     mkdir -p "$fake_dir"
     make_fake_docker "$fake_dir/docker"
     set +e
-    FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.7.0 \
+    FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.8.0 \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
     "$deploy_dir/import.sh" >"$output" 2>&1
     local code=$?
     set -e
     [ "$code" -eq 7 ] || fail "import exit code was not preserved: $code"
     assert_contains "$output" "Importer exit code: 7"
-    assert_contains "$log" "TO_DIGI_RS_IMAGE=to-digi-rs:0.7.0"
+    assert_contains "$log" "TO_DIGI_RS_IMAGE=to-digi-rs:0.8.0"
     assert_contains "$log" "LOCAL_UID="
     assert_contains "$log" "LOCAL_GID="
 }
@@ -390,7 +456,7 @@ test_run_sh_forwards_to_import_sh_with_notice() {
 
 test_package_archive_contains_only_expected_files() {
     local archive
-    archive="$(TO_DIGI_RS_VERSION=0.7.0 "$ROOT_DIR/scripts/package-deploy.sh")"
+    archive="$(TO_DIGI_RS_VERSION=0.8.0 "$ROOT_DIR/scripts/package-deploy.sh")"
     [ -f "$archive" ] || fail "archive was not created"
     local listing="$TEST_ROOT/archive-list.txt"
     tar -tzf "$archive" | sort >"$listing"
@@ -400,6 +466,8 @@ test_package_archive_contains_only_expected_files() {
     assert_contains "$listing" "to-digi-rs-deploy/import.sh"
     assert_contains "$listing" "to-digi-rs-deploy/run.sh"
     assert_contains "$listing" "to-digi-rs-deploy/README.md"
+    assert_contains "$listing" "to-digi-rs-deploy/profiles/example.toml"
+    assert_contains "$listing" "to-digi-rs-deploy/profiles/starsky.toml"
     assert_contains "$listing" "to-digi-rs-deploy/output/"
     assert_not_contains "$listing" "to-digi-rs-deploy/config.toml"
     assert_not_contains "$listing" "to-digi-rs-deploy/plu.mdb"
@@ -414,9 +482,13 @@ test_help_and_version_do_not_require_config_or_plu
 test_test_connection_does_not_require_plu
 test_cli_arguments_are_forwarded
 test_analyze_archives_analysis_report
+test_sanitize_translates_profile_and_archives_reports
+test_analyze_translates_sanitize_profile
 test_resume_translates_relative_manifest_and_archives_snapshot
 test_resume_translates_absolute_manifest_inside_deployment_directory
 test_resume_rejects_manifest_outside_deployment_directory
+test_profile_outside_deployment_directory_is_rejected
+test_symlinked_profile_is_rejected_when_supported
 test_missing_config_fails_clearly
 test_missing_plu_fails_clearly
 test_symlinked_plu_is_rejected_when_supported

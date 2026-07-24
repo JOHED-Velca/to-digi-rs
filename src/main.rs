@@ -7,6 +7,7 @@ mod import;
 mod logging;
 mod models;
 mod recovery;
+mod sanitization;
 mod source;
 mod validation;
 
@@ -22,6 +23,7 @@ use cli::{Cli, EffectiveCommand, effective_command};
 use config::{AppConfig, client_secret_log_message, load_client_secret};
 use digiweb::auth::authenticate;
 use digiweb::client::DigiwebClient;
+use digiweb::payload::DigiwebPluPayload;
 use digiweb::preflight::collect_required_references;
 use error::AppError;
 use import::runner::{ImportRunOptions, run_import};
@@ -29,6 +31,10 @@ use logging::{AuditLogger, FinalImportLog};
 use models::plu::Plu;
 use recovery::validator::target_identity;
 use recovery::{DEFAULT_MANIFEST_PATH, SourceIdentity, sha256_file};
+use sanitization::{
+    SanitizationIntegration, SanitizationProfile, SanitizationReportInput, apply_profile,
+    load_profile_from_safe_path, validate_profile_path, write_sanitization_reports,
+};
 use source::SourceDataset;
 use source::mapping::{normalize_dataset, validate_source_schema};
 use source::mdb_tools::MdbTools;
@@ -66,10 +72,17 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
     let config_exists = config_path.exists();
     let config = AppConfig::load(config_path)?;
     let command = effective_command(cli, &config);
-    if matches!(command, EffectiveCommand::Analyze { .. }) && !config_exists {
+    if matches!(
+        command,
+        EffectiveCommand::Analyze { .. } | EffectiveCommand::Sanitize { .. }
+    ) && !config_exists
+    {
         logger.line("config.toml not found; using built-in analysis mapping defaults.")?;
     }
-    if !matches!(command, EffectiveCommand::Analyze { .. }) {
+    if !matches!(
+        command,
+        EffectiveCommand::Analyze { .. } | EffectiveCommand::Sanitize { .. }
+    ) {
         if !config_exists {
             return Err(AppError::Config(format!(
                 "config.toml is required for the '{}' command",
@@ -79,7 +92,10 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
         config.validate_startup()?;
     }
     log_command(&command, logger)?;
-    if !matches!(command, EffectiveCommand::Analyze { .. }) {
+    if !matches!(
+        command,
+        EffectiveCommand::Analyze { .. } | EffectiveCommand::Sanitize { .. }
+    ) {
         logger.kv("DIGIweb target URL", &config.digiweb.base_url)?;
         if config.digiweb.allow_invalid_certificates {
             logger.warning("TLS certificate validation is disabled.")?;
@@ -96,13 +112,16 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
     }
 
     match command {
-        EffectiveCommand::Analyze { .. } => run_analyze(&config, logger),
+        EffectiveCommand::Analyze {
+            sanitize_profile, ..
+        } => run_analyze(&config, logger, sanitize_profile.as_deref()),
         EffectiveCommand::Import {
             limit,
             continue_on_error,
             test_mode,
             resume,
             retry_failed,
+            sanitize_profile,
             ..
         } => {
             run_import_command(
@@ -112,23 +131,32 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
                 test_mode,
                 resume.as_deref(),
                 retry_failed,
+                sanitize_profile.as_deref(),
                 logger,
             )
             .await
         }
+        EffectiveCommand::Sanitize { profile, .. } => run_sanitize(&config, logger, &profile),
         EffectiveCommand::TestConnection => run_test_connection(&config, logger).await,
-        EffectiveCommand::Verify => run_verify(&config, logger).await,
+        EffectiveCommand::Verify { sanitize_profile } => {
+            run_verify(&config, logger, sanitize_profile.as_deref()).await
+        }
     }
 }
 
 fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(), AppError> {
     logger.kv("Command", command.name())?;
     match command {
-        EffectiveCommand::Analyze { .. } => {
+        EffectiveCommand::Analyze {
+            sanitize_profile, ..
+        } => {
             logger.kv("Network access permitted", "no")?;
             logger.kv("Authentication attempted", "NO")?;
             logger.kv("DIGIweb API requests attempted", "NO")?;
             logger.kv("Source database modified", "NO")?;
+            if let Some(path) = sanitize_profile {
+                logger.kv("Sanitization profile", &path.display().to_string())?;
+            }
         }
         EffectiveCommand::Import {
             limit,
@@ -136,6 +164,7 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
             test_mode,
             resume,
             retry_failed,
+            sanitize_profile,
             legacy_used,
             defaulted_from_no_command,
         } => {
@@ -160,6 +189,9 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
                     if *retry_failed { "true" } else { "false" },
                 )?;
             }
+            if let Some(path) = sanitize_profile {
+                logger.kv("Sanitization profile", &path.display().to_string())?;
+            }
             logger.kv(
                 "Continue on error",
                 if *continue_on_error { "true" } else { "false" },
@@ -169,11 +201,22 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
                 if *legacy_used { "yes" } else { "no" },
             )?;
         }
+        EffectiveCommand::Sanitize { profile, dry_run } => {
+            logger.kv("Network access permitted", "no")?;
+            logger.kv("Authentication attempted", "NO")?;
+            logger.kv("DIGIweb API requests attempted", "NO")?;
+            logger.kv("Source database modified", "NO")?;
+            logger.kv("Sanitization profile", &profile.display().to_string())?;
+            logger.kv("Dry run", if *dry_run { "true" } else { "implicit" })?;
+        }
         EffectiveCommand::TestConnection => {
             logger.kv("PLU write permitted", "no")?;
         }
-        EffectiveCommand::Verify => {
+        EffectiveCommand::Verify { sanitize_profile } => {
             logger.kv("PLU write permitted", "no")?;
+            if let Some(path) = sanitize_profile {
+                logger.kv("Sanitization profile", &path.display().to_string())?;
+            }
         }
     }
     Ok(())
@@ -182,6 +225,7 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
 fn read_source_context(
     config: &AppConfig,
     logger: &mut AuditLogger,
+    sanitization_profile: Option<SanitizationProfile>,
 ) -> Result<SourceContext, AppError> {
     let source_path = Path::new(FIXED_SOURCE_FILE);
     logger.kv("Path checked for source file", "./plu.mdb")?;
@@ -203,6 +247,11 @@ fn read_source_context(
             message: err.to_string(),
         })?
         .len();
+    let source_identity = SourceIdentity {
+        filename: FIXED_SOURCE_FILE.to_string(),
+        size_bytes: source_file_size_bytes,
+        sha256: sha256_file(Path::new(FIXED_SOURCE_FILE))?,
+    };
     let (mut schema, dataset) =
         MdbTools::read_dataset(source_file.path(), &config.mapping, logger)?;
     let reference_tables = read_reference_tables(source_file.path(), &mut schema, logger)?;
@@ -220,8 +269,68 @@ fn read_source_context(
         &dataset.nutrition_rows.len().to_string(),
     )?;
 
-    let normalization_report =
+    let raw_normalization_report =
         normalize_dataset(&dataset, &config.mapping, config.digiweb.store_number)?;
+    let raw_validation_report = validate_plus(&raw_normalization_report.plus);
+    let raw_valid_plus =
+        valid_plu_candidates(&raw_normalization_report.plus, &raw_validation_report);
+    let raw_valid_count = raw_valid_plus.len();
+    let raw_valid_numbers = raw_valid_plus
+        .iter()
+        .map(|plu| plu.plu_number)
+        .collect::<Vec<_>>();
+    let raw_before_invalid = counted_invalid_rows(
+        &raw_normalization_report,
+        &raw_validation_report,
+        raw_valid_count,
+    );
+    drop(raw_valid_plus);
+    let (effective_dataset, normalization_report, mut sanitization) =
+        if let Some(profile) = sanitization_profile {
+            logger.line(format!("Sanitization profile: {}", profile.profile_name))?;
+            logger.line("Profile-provided values will be applied in memory.")?;
+            logger.line("Source MDB will not be modified.")?;
+            let sanitized = apply_profile(&dataset, &profile)?;
+            let normalization_report = normalize_dataset(
+                &sanitized.dataset,
+                &config.mapping,
+                config.digiweb.store_number,
+            )?;
+            let validation_report = validate_plus(&normalization_report.plus);
+            let valid_plus = valid_plu_candidates(&normalization_report.plus, &validation_report);
+            let after_invalid =
+                counted_invalid_rows(&normalization_report, &validation_report, valid_plus.len());
+            let after_numbers = valid_plus
+                .iter()
+                .map(|plu| plu.plu_number)
+                .collect::<Vec<_>>();
+            let mut integration = sanitization::report::integration_from_parts(
+                profile,
+                sanitized.report,
+                raw_valid_count,
+                raw_before_invalid,
+                valid_plus.len(),
+                after_invalid,
+                &raw_valid_numbers,
+                &after_numbers,
+            )?;
+            integration.still_invalid_plus =
+                still_invalid_plu_numbers(&normalization_report, &validation_report, &valid_plus);
+            logger.kv(
+                "PLUs recovered by sanitization",
+                &integration.recovered_plus.to_string(),
+            )?;
+            logger.kv(
+                "Existing nonempty values changed",
+                &integration
+                    .engine_report
+                    .nonempty_values_changed
+                    .to_string(),
+            )?;
+            (sanitized.dataset, normalization_report, Some(integration))
+        } else {
+            (dataset, raw_normalization_report, None)
+        };
     let placeholder_ignored = normalization_report
         .row_issues
         .iter()
@@ -388,6 +497,15 @@ fn read_source_context(
         }
     }
     logger.kv("Valid PLUs available", &valid_plus.len().to_string())?;
+    if let Some(sanitization) = &mut sanitization {
+        sanitization.after_valid = valid_plus.len();
+        sanitization.after_invalid = invalid_source_rows;
+        sanitization.still_invalid_plus = still_invalid_plu_numbers_from_issues(
+            &normalization_report.row_issues,
+            &validation_report,
+            &valid_plus,
+        );
+    }
     logger.kv(
         "Empty placeholder PLUs ignored",
         &placeholder_ignored.to_string(),
@@ -398,10 +516,12 @@ fn read_source_context(
     )?;
     Ok(SourceContext {
         schema,
-        dataset,
+        dataset: effective_dataset,
         plus,
         valid_plus,
         validation_report,
+        source_identity,
+        sanitization,
         placeholder_ignored,
         invalid_source_rows,
         validation_skipped,
@@ -424,13 +544,18 @@ fn read_source_context(
     })
 }
 
-fn run_analyze(config: &AppConfig, logger: &mut AuditLogger) -> Result<i32, AppError> {
+fn run_analyze(
+    config: &AppConfig,
+    logger: &mut AuditLogger,
+    sanitize_profile_path: Option<&Path>,
+) -> Result<i32, AppError> {
     logger.line("ANALYSIS ONLY")?;
     logger.line("Network access permitted: NO")?;
     logger.line("Authentication attempted: NO")?;
     logger.line("DIGIweb API requests attempted: NO")?;
     logger.line("Source database modified: NO")?;
-    let source = read_source_context(config, logger)?;
+    let profile = load_optional_sanitization_profile(sanitize_profile_path)?;
+    let source = read_source_context(config, logger, profile)?;
     let report = build_analysis_report(&source);
     write_text_report(Path::new("analysis-report.txt"), &report)?;
     write_json_report(Path::new("analysis-report.json"), &report)?;
@@ -469,6 +594,224 @@ fn run_analyze(config: &AppConfig, logger: &mut AuditLogger) -> Result<i32, AppE
     Ok(report.analysis_status.exit_code())
 }
 
+fn run_sanitize(
+    config: &AppConfig,
+    logger: &mut AuditLogger,
+    profile_path: &Path,
+) -> Result<i32, AppError> {
+    logger.line("SANITIZATION PREVIEW")?;
+    logger.line("Network access permitted: NO")?;
+    logger.line("Authentication attempted: NO")?;
+    logger.line("DIGIweb API requests attempted: NO")?;
+    logger.line("Source database modified: NO")?;
+    let profile = load_profile_from_safe_path(profile_path)?;
+    let source = read_source_context(config, logger, Some(profile))?;
+    let sanitization = source.sanitization.as_ref().ok_or_else(|| {
+        AppError::Internal("sanitize command did not produce a sanitization report".to_string())
+    })?;
+    let report = sanitization::report::build_report(SanitizationReportInput {
+        source: source.source_identity.clone(),
+        profile: &sanitization.profile,
+        profile_sha256: &sanitization.profile_sha256,
+        engine_report: &sanitization.engine_report,
+        before_valid: sanitization.before_valid,
+        before_invalid: sanitization.before_invalid,
+        after_valid: sanitization.after_valid,
+        after_invalid: sanitization.after_invalid,
+        recovered_plus: sanitization.recovered_plus,
+        still_invalid_plus: &sanitization.still_invalid_plus,
+    });
+    write_sanitization_reports(
+        Path::new("sanitization-report.txt"),
+        Path::new("sanitization-report.json"),
+        Path::new("sanitization-profile.snapshot.toml"),
+        &report,
+        &sanitization.normalized_profile_toml,
+    )?;
+    logger.kv("Text sanitization report", "sanitization-report.txt")?;
+    logger.kv("JSON sanitization report", "sanitization-report.json")?;
+    logger.kv(
+        "Sanitization profile snapshot",
+        "sanitization-profile.snapshot.toml",
+    )?;
+    print_sanitization_summary(&report);
+    Ok(if report.summary.still_invalid_plus == 0 {
+        0
+    } else {
+        1
+    })
+}
+
+fn load_optional_sanitization_profile(
+    path: Option<&Path>,
+) -> Result<Option<SanitizationProfile>, AppError> {
+    path.map(load_profile_from_safe_path).transpose()
+}
+
+fn profile_for_import_or_resume(
+    resume_manifest: Option<&Path>,
+    sanitize_profile_path: Option<&Path>,
+) -> Result<Option<SanitizationProfile>, AppError> {
+    if let Some(path) = resume_manifest {
+        if sanitize_profile_path.is_some() {
+            return Err(AppError::Config(
+                "--resume cannot be combined with --sanitize-profile; the manifest controls the original sanitization profile.".to_string(),
+            ));
+        }
+        let manifest = recovery::load_manifest(path)?;
+        if !manifest.sanitization.enabled {
+            return Ok(None);
+        }
+        let snapshot_name = manifest
+            .sanitization
+            .profile_snapshot
+            .as_deref()
+            .unwrap_or("");
+        let snapshot_path = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(snapshot_name);
+        validate_profile_path(&snapshot_path).map_err(|_| {
+            AppError::Config(
+                "The sanitization profile recorded by this manifest is missing or has changed.\n\nResume was cancelled before authentication or API submission."
+                    .to_string(),
+            )
+        })?;
+        let snapshot_contents = std::fs::read_to_string(&snapshot_path).map_err(|_| {
+            AppError::Config(
+                "The sanitization profile recorded by this manifest is missing or has changed.\n\nResume was cancelled before authentication or API submission."
+                    .to_string(),
+            )
+        })?;
+        let actual_hash = sanitization::report::sha256_text(&snapshot_contents);
+        if Some(actual_hash) != manifest.sanitization.profile_sha256 {
+            return Err(AppError::Config(
+                "The sanitization profile recorded by this manifest is missing or has changed.\n\nResume was cancelled before authentication or API submission."
+                    .to_string(),
+            ));
+        }
+        let profile: SanitizationProfile = toml::from_str(&snapshot_contents).map_err(|_| {
+            AppError::Config(
+                "The sanitization profile recorded by this manifest is missing or has changed.\n\nResume was cancelled before authentication or API submission."
+                    .to_string(),
+            )
+        })?;
+        profile.validate()?;
+        Ok(Some(profile))
+    } else {
+        load_optional_sanitization_profile(sanitize_profile_path)
+    }
+}
+
+fn print_sanitization_summary(report: &sanitization::SanitizationReport) {
+    println!("SANITIZATION ANALYSIS COMPLETE");
+    println!();
+    println!("Profile: {}", report.profile.name);
+    println!("Source PLUs: {}", report.summary.source_plus);
+    println!();
+    println!("PLUs requiring changes: {}", report.summary.changed_plus);
+    println!("PLUs unchanged: {}", report.summary.unchanged_plus);
+    println!("Placeholder PLUs: {}", report.summary.placeholder_plus);
+    println!();
+    println!("Proposed changes:");
+    for (field, count) in &report.field_changes {
+        println!("- {}: {} PLUs", field, count);
+    }
+    println!();
+    println!("Before sanitization:");
+    println!("- Valid PLUs: {}", report.summary.before_valid_plus);
+    println!("- Invalid PLUs: {}", report.summary.before_invalid_plus);
+    println!();
+    println!("After sanitization:");
+    println!("- Valid PLUs: {}", report.summary.after_valid_plus);
+    println!("- Still invalid: {}", report.summary.still_invalid_plus);
+    println!();
+    println!("Recovered by profile: {}", report.summary.recovered_plus);
+    println!(
+        "Existing nonempty values changed: {}",
+        report.summary.nonempty_values_changed
+    );
+    println!();
+    println!("plu.mdb modified: NO");
+    println!("Authentication attempted: NO");
+    println!("DIGIweb API requests attempted: NO");
+    println!();
+    println!("Text sanitization report:");
+    println!("sanitization-report.txt");
+    println!("JSON sanitization report:");
+    println!("sanitization-report.json");
+    println!("Profile snapshot:");
+    println!("sanitization-profile.snapshot.toml");
+}
+
+fn counted_invalid_rows(
+    normalization_report: &source::mapping::NormalizationReport,
+    validation_report: &ValidationReport,
+    valid_count: usize,
+) -> usize {
+    let placeholder_ignored = normalization_report
+        .row_issues
+        .iter()
+        .filter(|issue| is_empty_placeholder_issue(issue))
+        .count();
+    let invalid_source_rows = normalization_report
+        .row_issues
+        .len()
+        .saturating_sub(placeholder_ignored);
+    let validation_skipped = normalization_report.plus.len().saturating_sub(valid_count);
+    counted_invalid_rows_from_counts(invalid_source_rows, validation_skipped)
+        + validation_report
+            .issues
+            .iter()
+            .filter(|issue| issue.severity == Severity::Error && issue.plu_number.is_none())
+            .count()
+}
+
+fn counted_invalid_rows_from_counts(
+    invalid_source_rows: usize,
+    validation_skipped: usize,
+) -> usize {
+    invalid_source_rows + validation_skipped
+}
+
+fn still_invalid_plu_numbers(
+    normalization_report: &source::mapping::NormalizationReport,
+    validation_report: &ValidationReport,
+    valid_plus: &[Plu],
+) -> Vec<u64> {
+    still_invalid_plu_numbers_from_issues(
+        &normalization_report.row_issues,
+        validation_report,
+        valid_plus,
+    )
+}
+
+fn still_invalid_plu_numbers_from_issues(
+    row_issues: &[validation::issue::ValidationIssue],
+    validation_report: &ValidationReport,
+    valid_plus: &[Plu],
+) -> Vec<u64> {
+    let valid = valid_plus
+        .iter()
+        .map(|plu| plu.plu_number)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut values = row_issues
+        .iter()
+        .filter_map(|issue| issue.plu_number)
+        .chain(
+            validation_report
+                .issues
+                .iter()
+                .filter_map(|issue| issue.plu_number),
+        )
+        .filter(|plu| !valid.contains(plu))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    values.sort_unstable();
+    values
+}
+
 async fn run_import_command(
     config: &AppConfig,
     limit: Option<usize>,
@@ -476,9 +819,11 @@ async fn run_import_command(
     test_mode: bool,
     resume_manifest: Option<&Path>,
     retry_failed: bool,
+    sanitize_profile_path: Option<&Path>,
     logger: &mut AuditLogger,
 ) -> Result<i32, AppError> {
-    let source = read_source_context(config, logger)?;
+    let profile = profile_for_import_or_resume(resume_manifest, sanitize_profile_path)?;
+    let source = read_source_context(config, logger, profile)?;
     if source.valid_plus.is_empty() {
         logger.final_failure("validation", "no valid PLUs are available to send", true)?;
         return Ok(2);
@@ -492,11 +837,6 @@ async fn run_import_command(
         logger.line("Validation warnings are present; continuing because no blocking validation errors were found.")?;
     }
 
-    let source_identity = SourceIdentity {
-        filename: FIXED_SOURCE_FILE.to_string(),
-        size_bytes: source.source_file_size_bytes,
-        sha256: sha256_file(Path::new(FIXED_SOURCE_FILE))?,
-    };
     let target_identity = target_identity(config);
     let manifest_path = manifest_path_from_environment(resume_manifest)?;
     if resume_manifest.is_none() {
@@ -506,10 +846,11 @@ async fn run_import_command(
     let summary = run_import(
         config.clone(),
         &source.valid_plus,
-        source_identity,
+        source.source_identity.clone(),
         target_identity,
         &manifest_path,
         resume_manifest,
+        source.sanitization.clone(),
         ImportRunOptions {
             limit,
             continue_after_record_failure: continue_on_error,
@@ -618,10 +959,19 @@ async fn run_test_connection(
     Ok(0)
 }
 
-async fn run_verify(config: &AppConfig, logger: &mut AuditLogger) -> Result<i32, AppError> {
+async fn run_verify(
+    config: &AppConfig,
+    logger: &mut AuditLogger,
+    sanitize_profile_path: Option<&Path>,
+) -> Result<i32, AppError> {
     logger.line("Verify scope: import-readiness verification only; no source-versus-DIGIweb post-import comparison is attempted.")?;
-    let source = read_source_context(config, logger)?;
+    let profile = load_optional_sanitization_profile(sanitize_profile_path)?;
+    let source = read_source_context(config, logger, profile)?;
     let analysis_report = build_analysis_report(&source);
+    for plu in &source.valid_plus {
+        DigiwebPluPayload::from_plu(plu, &config.digiweb)?;
+    }
+    logger.kv("Payload validation", "PASSED")?;
     validate_connection_urls(config)?;
     let client_secret = load_client_secret(config)?;
     logger.kv(
@@ -643,6 +993,18 @@ async fn run_verify(config: &AppConfig, logger: &mut AuditLogger) -> Result<i32,
         },
     )?;
     logger.kv("DIGIweb authentication", "PASSED")?;
+    if let Some(sanitization) = &source.sanitization {
+        logger.kv("Sanitization profile", &sanitization.profile.profile_name)?;
+        logger.kv("Sanitization profile hash", &sanitization.profile_sha256)?;
+        logger.kv(
+            "PLUs recovered by sanitization",
+            &sanitization.recovered_plus.to_string(),
+        )?;
+        logger.kv(
+            "PLUs still invalid after sanitization",
+            &sanitization.after_invalid.to_string(),
+        )?;
+    }
     logger.kv("DIGIweb department/group existence", "NOT CHECKED")?;
     logger.kv("Write operation attempted", "NO")?;
     logger.kv(
@@ -683,6 +1045,8 @@ struct SourceContext {
     plus: Vec<Plu>,
     valid_plus: Vec<Plu>,
     validation_report: ValidationReport,
+    source_identity: SourceIdentity,
+    sanitization: Option<SanitizationIntegration>,
     placeholder_ignored: usize,
     invalid_source_rows: usize,
     validation_skipped: usize,
@@ -721,6 +1085,7 @@ fn build_analysis_report(source: &SourceContext) -> analysis::model::AnalysisRep
         reference_tables: &source.reference_tables,
         nutrition_fallback_to_pluing: source.nutrition_fallback_to_pluing,
         nutrition_source_table: &source.nutrition_source_table,
+        sanitization: source.sanitization.as_ref(),
     })
 }
 

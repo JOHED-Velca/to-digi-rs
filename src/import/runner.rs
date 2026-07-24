@@ -18,6 +18,7 @@ use crate::recovery::{
     ManifestLock, atomic_write_manifest, build_resume_plan, load_manifest, sha256_json,
     validate_resume_compatibility,
 };
+use crate::sanitization::SanitizationIntegration;
 use chrono::Local;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub async fn run_import(
     target_identity: TargetIdentity,
     manifest_path: &Path,
     resume_manifest: Option<&Path>,
+    sanitization: Option<SanitizationIntegration>,
     options: ImportRunOptions,
     logger: &mut AuditLogger,
 ) -> Result<ImportSummary, AppError> {
@@ -65,7 +67,7 @@ pub async fn run_import(
                 ))
             })
             .collect::<Result<Vec<_>, AppError>>()?;
-        let manifest = ImportManifest::new(
+        let mut manifest = ImportManifest::new(
             source_identity.clone(),
             target_identity.clone(),
             ManifestOptions {
@@ -76,6 +78,15 @@ pub async fn run_import(
             plus.len(),
             records,
         );
+        if let Some(sanitization) = &sanitization {
+            let snapshot_name = "sanitization-profile.snapshot.toml";
+            let snapshot_path = manifest_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(snapshot_name);
+            write_profile_snapshot(&snapshot_path, &sanitization.normalized_profile_toml)?;
+            manifest.sanitization = sanitization.manifest_metadata(snapshot_name);
+        }
         atomic_write_manifest(manifest_path, &manifest)?;
         logger.line("IMPORT RUN CREATED")?;
         logger.kv("Manifest", &manifest_path.display().to_string())?;
@@ -662,6 +673,34 @@ fn prepare_payload_preview_dir_in_dir(base_dir: &Path, enabled: bool) -> Result<
                 ))
             })?;
         }
+    }
+    Ok(())
+}
+
+fn write_profile_snapshot(path: &Path, contents: &str) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            AppError::Logging(format!(
+                "failed to create profile snapshot directory '{}': {err}",
+                parent.display()
+            ))
+        })?;
+    }
+    fs::write(path, contents).map_err(|err| {
+        AppError::Logging(format!(
+            "failed to write sanitization profile snapshot '{}': {err}",
+            path.display()
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|err| {
+            AppError::Logging(format!(
+                "failed to set sanitization profile snapshot permissions '{}': {err}",
+                path.display()
+            ))
+        })?;
     }
     Ok(())
 }

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 use crate::source::SourceRow;
@@ -33,6 +35,8 @@ pub struct AnalysisReport {
     pub application_version: String,
     pub generated_at: String,
     pub analysis_status: AnalysisStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sanitization: Option<AnalysisSanitization>,
     pub source: SourceSummary,
     pub summary: PluClassification,
     pub tables: Vec<TableAnalysis>,
@@ -46,6 +50,18 @@ pub struct AnalysisReport {
     pub blocking_errors: Vec<AnalysisBlockingError>,
     pub recommended_actions: Vec<String>,
     pub safety: SafetyConfirmation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AnalysisSanitization {
+    pub profile_name: String,
+    pub profile_version: u32,
+    pub profile_sha256: String,
+    pub records_changed: usize,
+    pub recovered_plus: usize,
+    pub still_invalid_plus: usize,
+    pub nonempty_values_changed: usize,
+    pub fields_changed: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

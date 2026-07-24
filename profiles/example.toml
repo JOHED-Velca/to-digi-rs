@@ -1,0 +1,33 @@
+profile_version = 1
+profile_name = "example"
+description = "Example fill-only PLU sanitization profile; confirm values before customer use"
+
+[safety]
+fill_empty_only = true
+preserve_nonempty_values = true
+reject_invalid_results = true
+
+[[rules]]
+field = "department"
+when = "empty"
+action = "set_constant"
+value = "1"
+
+[[rules]]
+field = "barcode"
+when = "empty"
+action = "copy_field"
+source_field = "plu_code"
+normalization = "numeric_no_padding"
+
+[[rules]]
+field = "barcode_format"
+when = "empty"
+action = "set_constant"
+value = "05"
+
+[[rules]]
+field = "print_format_code"
+when = "empty"
+action = "set_constant"
+value = "00"

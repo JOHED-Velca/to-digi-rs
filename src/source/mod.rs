@@ -75,7 +75,7 @@ impl SourceRow {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SourceDataset {
     pub plu_rows: Vec<SourceRow>,
     pub ingredient_rows: Vec<SourceRow>,

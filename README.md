@@ -6,11 +6,12 @@ It reads only `./plu.mdb`, exports supported Access tables with `mdbtools`, norm
 
 ## Current Workflow
 
-Version `0.7.0` keeps the confirmed MDB mappings and DIGIweb API contract, then adds crash-safe import manifests and resumable imports:
+Version `0.8.0` keeps the confirmed MDB mappings, DIGIweb API contract, crash-safe manifests, and resumable imports, then adds explicit profile-driven sanitization for repairable empty PLU fields:
 
 ```text
 plu.mdb
 -> mdbtools inspection/export
+-> optional in-memory sanitization profile
 -> Pludata + PluIng normalization
 -> validation
 -> DIGIweb authentication when needed
@@ -26,10 +27,14 @@ Confirmed behavior remains unchanged: exact filename `plu.mdb`, read-only MDB ac
 
 ```bash
 to-digi-rs analyze
+to-digi-rs analyze --sanitize-profile profiles/starsky.toml
+to-digi-rs sanitize --profile profiles/starsky.toml [--dry-run]
 to-digi-rs import [--limit N] [--test] [--continue-on-error]
+to-digi-rs import --sanitize-profile profiles/starsky.toml [--limit N] [--continue-on-error]
 to-digi-rs import --resume MANIFEST [--retry-failed] [--continue-on-error]
 to-digi-rs test-connection
 to-digi-rs verify
+to-digi-rs verify --sanitize-profile profiles/starsky.toml
 ```
 
 `analyze` reads and validates `plu.mdb`, writes `analysis-report.txt` and `analysis-report.json`, and does not authenticate or contact DIGIweb. It can run before DIGIweb credentials or URLs are finalized, and it can run without `config.toml` by using built-in source mapping defaults.
@@ -41,6 +46,10 @@ to-digi-rs verify
 `test-connection` authenticates to DIGIweb and does not require `plu.mdb`.
 
 `verify` reads and validates the source, then authenticates to DIGIweb. It does not write PLUs and reports import readiness.
+
+`sanitize --profile PROFILE` is always offline. It previews configured fill-only changes, writes `sanitization-report.txt`, `sanitization-report.json`, and `sanitization-profile.snapshot.toml`, never authenticates, never contacts DIGIweb, and never modifies `plu.mdb`.
+
+`--sanitize-profile PROFILE` is explicit and optional for `analyze`, `verify`, and `import`. No profile means the existing strict behavior. Profiles can fill only configured empty fields in memory; they never replace nonempty source values and never delete PLUs. `import --resume` cannot be combined with `--sanitize-profile` because the recovery manifest uses the original profile snapshot.
 
 For one release, running with no command still honors the old `[import]` config booleans and logs a deprecation warning. New automation should use explicit commands.
 
@@ -72,18 +81,20 @@ Recommended installation sequence:
 
 ## Quick Deployment
 
-The v0.7.0 deployment bundle lets the operator run the importer with one command:
+The v0.8.0 deployment bundle lets the operator run the importer with one command:
 
 ```bash
 ./import.sh analyze
+./import.sh sanitize --profile profiles/starsky.toml
+./import.sh analyze --sanitize-profile profiles/starsky.toml
 ./import.sh import --test
 ./import.sh import
 ./import.sh import --resume output/run-YYYYMMDD-HHMMSS-import/import-results.json
 ./import.sh test-connection
-./import.sh verify
+./import.sh verify --sanitize-profile profiles/starsky.toml
 ```
 
-1. Download and extract `to-digi-rs-deploy-v0.7.0.tar.gz`.
+1. Download and extract `to-digi-rs-deploy-v0.8.0.tar.gz`.
 2. Place the source MDB beside `import.sh` using the exact filename `plu.mdb`.
 3. Run `./import.sh analyze`.
 4. Copy `config.example.toml` to `config.toml`.
@@ -93,6 +104,31 @@ The v0.7.0 deployment bundle lets the operator run the importer with one command
 8. Read the printed output path under `output/run-...-COMMAND/`.
 
 The template lives in [deploy](deploy). It does not include a real `config.toml`, real MDB, credentials, logs, manifests, analysis reports, or payload previews.
+
+## Sanitization Profiles
+
+Profiles are TOML files under `profiles/`. Schema version 1 supports only fill-empty rules for `department`, `barcode`, `barcode_format`, and `print_format_code`. Actions are limited to `set_constant` and `copy_field` from approved source `plu_code` with `numeric_no_padding` normalization.
+
+Generic workflow:
+
+```bash
+./import.sh sanitize --profile profiles/example.toml
+./import.sh analyze --sanitize-profile profiles/example.toml
+./import.sh verify --sanitize-profile profiles/example.toml
+./import.sh import --sanitize-profile profiles/example.toml --limit 1
+./import.sh import --sanitize-profile profiles/example.toml
+```
+
+Starsky workflow:
+
+```bash
+./import.sh sanitize --profile profiles/starsky.toml
+./import.sh analyze --sanitize-profile profiles/starsky.toml
+./import.sh verify --sanitize-profile profiles/starsky.toml
+./import.sh import --sanitize-profile profiles/starsky.toml --limit 1
+```
+
+Starsky rules fill empty Department with `1`, empty Barcode with the normalized PLU code, empty Barcode Format with `05`, and empty Print Format Code with `00`. These rules must not be reused for another customer unless their source-data rules have been confirmed. To create a new customer profile, copy `profiles/example.toml`, change `profile_name`, description, and constants, then run `sanitize` before any `verify` or `import`.
 
 ## Runner Rename
 
@@ -152,6 +188,8 @@ output/run-20260724-143000-import/import-results.json
 
 The manifest records schema version, application version, source filename, source size, source SHA-256, non-secret target identity, selected PLU order, per-PLU payload hashes, request ids, state, and attempt history. It never stores client secrets, access tokens, authorization headers, full PLU payloads, full ingredients, or full nutrition payloads.
 
+For sanitized imports, schema-version 2 manifests also record profile name, profile version, profile SHA-256, profile snapshot filename, records changed, and per-field fill counts. The source identity remains the hash of the unchanged original `plu.mdb`. v0.8.0 can resume schema-version 1 manifests as unsanitized v0.7.0 imports.
+
 Resume with:
 
 ```bash
@@ -189,20 +227,20 @@ bash scripts/package-deploy.sh
 The archive is written to:
 
 ```text
-target/release-bundles/to-digi-rs-deploy-v0.7.0.tar.gz
+target/release-bundles/to-digi-rs-deploy-v0.8.0.tar.gz
 ```
 
 ## Image Names
 
 ```text
-to-digi-rs:0.7.0
-ghcr.io/johed-velca/to-digi-rs:0.7.0
+to-digi-rs:0.8.0
+ghcr.io/johed-velca/to-digi-rs:0.8.0
 ```
 
 The deployment Compose file defaults to the GHCR image, but the image can be overridden:
 
 ```bash
-TO_DIGI_RS_IMAGE=to-digi-rs:0.7.0 ./import.sh analyze
+TO_DIGI_RS_IMAGE=to-digi-rs:0.8.0 ./import.sh analyze
 ```
 
 ## Configuration
@@ -287,4 +325,4 @@ LOCAL_UID="$(id -u)" LOCAL_GID="$(id -g)" docker compose config
 
 ## Container Publishing
 
-`.github/workflows/publish-container.yml` is configured for semantic-version tags such as `v0.7.0` and manual dispatch. It publishes versioned images only and does not publish `latest` automatically.
+`.github/workflows/publish-container.yml` is configured for semantic-version tags such as `v0.8.0` and manual dispatch. It publishes versioned images only and does not publish `latest` automatically.

@@ -20,7 +20,7 @@ pub use store::{atomic_write_manifest, load_manifest};
 pub use validator::validate_resume_compatibility;
 
 pub const DEFAULT_MANIFEST_PATH: &str = "import-results.json";
-pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 pub fn sha256_file(path: &Path) -> Result<String, AppError> {
     let file = File::open(path).map_err(|err| AppError::InvalidSourceFile {

@@ -12,11 +12,14 @@ use crate::recovery::{MANIFEST_SCHEMA_VERSION, sha256_json};
 use crate::{digiweb::payload::DigiwebPluPayload, models::plu::Plu};
 
 pub fn validate_manifest(manifest: &ImportManifest) -> Result<(), AppError> {
-    if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
+    if manifest.schema_version == 0 || manifest.schema_version > MANIFEST_SCHEMA_VERSION {
         return invalid_manifest(format!(
             "unsupported schema version {}",
             manifest.schema_version
         ));
+    }
+    if manifest.schema_version == 1 && manifest.sanitization.enabled {
+        return invalid_manifest("schema version 1 manifests cannot enable sanitization");
     }
     if manifest.application_version.trim().is_empty() {
         return invalid_manifest("application version is missing");
@@ -66,6 +69,7 @@ pub fn validate_manifest(manifest: &ImportManifest) -> Result<(), AppError> {
         return invalid_manifest("summary counts do not match records");
     }
     validate_run_status(manifest)?;
+    validate_sanitization(manifest)?;
     Ok(())
 }
 
@@ -204,6 +208,47 @@ fn validate_run_status(manifest: &ImportManifest) -> Result<(), AppError> {
     ))
 }
 
+fn validate_sanitization(manifest: &ImportManifest) -> Result<(), AppError> {
+    if !manifest.sanitization.enabled {
+        return Ok(());
+    }
+    if manifest.schema_version < 2 {
+        return invalid_manifest("sanitized imports require schema version 2");
+    }
+    if manifest
+        .sanitization
+        .profile_name
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
+        return invalid_manifest("sanitization profile_name is missing");
+    }
+    if manifest.sanitization.profile_version != Some(1) {
+        return invalid_manifest("sanitization profile_version must be 1");
+    }
+    validate_hash(
+        "sanitization.profile_sha256",
+        manifest
+            .sanitization
+            .profile_sha256
+            .as_deref()
+            .unwrap_or(""),
+    )?;
+    if manifest
+        .sanitization
+        .profile_snapshot
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
+        return invalid_manifest("sanitization profile snapshot is missing");
+    }
+    Ok(())
+}
+
 fn validate_hash(name: &str, value: &str) -> Result<(), AppError> {
     if value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit()) {
         Ok(())
@@ -313,5 +358,30 @@ mod tests {
         let error = validate_manifest(&manifest).expect_err("invalid");
 
         assert!(error.to_string().contains("run_status SUCCESS"));
+    }
+
+    #[test]
+    fn schema_version_one_manifest_is_valid_when_unsanitized() {
+        let mut manifest = manifest();
+        manifest.schema_version = 1;
+        manifest.sanitization = Default::default();
+
+        assert!(validate_manifest(&manifest).is_ok());
+    }
+
+    #[test]
+    fn schema_version_two_sanitization_metadata_is_validated() {
+        let mut manifest = manifest();
+        manifest.sanitization.enabled = true;
+        manifest.sanitization.profile_name = Some("starsky".to_string());
+        manifest.sanitization.profile_version = Some(1);
+        manifest.sanitization.profile_sha256 = Some("c".repeat(64));
+        manifest.sanitization.profile_snapshot =
+            Some("sanitization-profile.snapshot.toml".to_string());
+
+        assert!(validate_manifest(&manifest).is_ok());
+
+        manifest.sanitization.profile_sha256 = Some("not-a-hash".to_string());
+        assert!(validate_manifest(&manifest).is_err());
     }
 }

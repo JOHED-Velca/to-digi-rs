@@ -5,12 +5,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 use crate::recovery::{MANIFEST_SCHEMA_VERSION, sanitize_manifest_error};
+use crate::sanitization::SanitizationManifestMetadata;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportManifest {
     pub schema_version: u32,
     pub application_version: String,
     pub manifest_id: String,
+    #[serde(default = "default_run_status")]
     pub run_status: RunStatus,
     pub created_at: DateTime<Local>,
     pub updated_at: DateTime<Local>,
@@ -19,6 +21,8 @@ pub struct ImportManifest {
     pub options: ManifestOptions,
     pub selection: ManifestSelection,
     pub summary: ManifestSummary,
+    #[serde(default)]
+    pub sanitization: SanitizationManifestMetadata,
     pub records: Vec<PluManifestRecord>,
 }
 
@@ -167,6 +171,10 @@ pub enum RunStatus {
     Interrupted,
 }
 
+fn default_run_status() -> RunStatus {
+    RunStatus::Incomplete
+}
+
 impl RunStatus {
     pub fn as_text(self) -> &'static str {
         match self {
@@ -244,6 +252,7 @@ impl ImportManifest {
                 selected_order,
             },
             summary: ManifestSummary::default(),
+            sanitization: SanitizationManifestMetadata::default(),
             records,
         };
         manifest.recalculate_summary_for_active_run();

@@ -28,9 +28,10 @@ mod tests {
     fn json_report_is_parseable_and_contains_schema_version() {
         let report = AnalysisReport {
             schema_version: 1,
-            application_version: "0.7.0".to_string(),
+            application_version: "0.8.0".to_string(),
             generated_at: "2026-07-23T00:00:00-04:00".to_string(),
             analysis_status: AnalysisStatus::Pass,
+            sanitization: None,
             source: SourceSummary {
                 exact_filename: "plu.mdb".to_string(),
                 file_size_bytes: 10,
@@ -102,7 +103,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
 
         assert_eq!(parsed["schema_version"], 1);
-        assert_eq!(parsed["application_version"], "0.7.0");
+        assert_eq!(parsed["application_version"], "0.8.0");
         assert!(!json.contains("Authorization"));
     }
 }
