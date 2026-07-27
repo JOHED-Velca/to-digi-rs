@@ -15,6 +15,7 @@ plu.mdb
 -> Pludata + PluIng normalization
 -> validation
 -> DIGIweb authentication when needed
+-> automatic access-token refresh during import
 -> POST /api/v1/third-party/plus/write only for import
 -> GET /api/thirdpartylinker/api/v1/requests/{request_id}
 -> persistent import-results.json state updates
@@ -39,7 +40,7 @@ to-digi-rs verify --sanitize-profile profiles/starsky.toml
 
 `analyze` reads and validates `plu.mdb`, writes `analysis-report.txt` and `analysis-report.json`, and does not authenticate or contact DIGIweb. It can run before DIGIweb credentials or URLs are finalized, and it can run without `config.toml` by using built-in source mapping defaults.
 
-`import` is the only command that writes PLUs to DIGIweb. `--limit N` imports only the first `N` valid normalized PLUs. `--test` is a convenience alias for `--limit 1`. By default the importer stops after the first selected record failure or unknown final status; `--continue-on-error` keeps submitting later selected PLUs. Every real import creates an `import-results.json` manifest before authentication or PLU submission.
+`import` is the only command that writes PLUs to DIGIweb. `--limit N` imports only the first `N` valid normalized PLUs. `--test` is a convenience alias for `--limit 1`. By default the importer stops after the first selected record failure or unknown final status; `--continue-on-error` keeps submitting later selected PLUs. Authentication failures are treated as systemic: a `401 Unauthorized` during PLU submission or request-status polling triggers bounded token refresh and retry, and an unrecoverable authentication failure stops the run regardless of `--continue-on-error`. Every real import creates an `import-results.json` manifest before authentication or PLU submission.
 
 `import --resume MANIFEST` resumes a specific manifest. The manifest controls the selected PLU scope, so `--resume` cannot be combined with `--limit` or `--test`. `--retry-failed` is valid only with `--resume` and retries only confirmed `FAILED` records.
 
@@ -252,6 +253,8 @@ export DIGIWEB_CLIENT_SECRET='secret-provided-by-the-operator'
 ```
 
 `DIGIWEB_CLIENT_SECRET` takes precedence over `digiweb.client_secret`. The config value is a development fallback only. Secrets, tokens, and authorization headers are not logged.
+
+During import, DIGIweb access tokens are refreshed automatically when the token response includes near-expiration metadata or when DIGIweb returns `401 Unauthorized`. A `401` before a PLU request ID exists is retried with refreshed credentials because DIGIweb rejected the request. A `401` while polling status retries the same existing request ID and never creates a second PLU submission. If authentication cannot be restored after bounded retries, the recovery manifest is preserved and later PLUs remain not attempted.
 
 The old `[import]` options are deprecated as command selectors. Explicit CLI flags override them:
 

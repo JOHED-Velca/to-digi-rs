@@ -81,7 +81,7 @@ cp config.example.toml config.toml
 
 `analyze` reads and validates `plu.mdb`, writes `analysis-report.txt` and `analysis-report.json`, and does not authenticate or contact DIGIweb.
 
-`import` is the only command that writes PLUs to DIGIweb. `--test` imports the first valid normalized PLU. `--limit N` imports the first `N` valid normalized PLUs. `--continue-on-error` keeps submitting later selected PLUs after a record failure or unknown status. Every real import creates `import-results.json` before authentication or PLU submission.
+`import` is the only command that writes PLUs to DIGIweb. `--test` imports the first valid normalized PLU. `--limit N` imports the first `N` valid normalized PLUs. `--continue-on-error` keeps submitting later selected PLUs after a record failure or unknown status. A `401 Unauthorized` during PLU submission or request-status polling triggers bounded access-token refresh and retry. If authentication cannot be restored, the import stops regardless of `--continue-on-error`, preserves the recovery manifest, and leaves later PLUs not attempted. Every real import creates `import-results.json` before authentication or PLU submission.
 
 `import --resume MANIFEST` resumes a specific previous run. The manifest controls PLU selection, so do not combine resume with `--limit` or `--test`. `--retry-failed` is valid only with resume and retries only confirmed `FAILED` records.
 

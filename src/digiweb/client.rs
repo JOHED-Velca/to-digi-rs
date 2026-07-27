@@ -7,7 +7,7 @@ use serde_json::Value;
 use tokio::time::sleep;
 
 use crate::config::AppConfig;
-use crate::digiweb::auth::AccessToken;
+use crate::digiweb::auth::{AccessToken, AuthSession, MAX_AUTHENTICATED_REQUEST_ATTEMPTS};
 use crate::digiweb::payload::DigiwebPluPayload;
 use crate::digiweb::status::ProcessingStatus;
 use crate::error::AppError;
@@ -134,6 +134,7 @@ impl DigiwebClient {
             .await
     }
 
+    #[allow(dead_code)]
     pub async fn submit_plu_once(
         &self,
         token: &AccessToken,
@@ -183,6 +184,98 @@ impl DigiwebClient {
                 logger.line(format!("{progress_label} Request submitted: {request_id}"))?;
                 Ok(PluSubmissionOutcome {
                     request_id: Some(request_id),
+                    initial_status: ProcessingStatus::Processing,
+                    message,
+                })
+            }
+            SubmissionInterpretation::Unknown {
+                request_id,
+                message,
+            } => Ok(PluSubmissionOutcome {
+                request_id,
+                initial_status: ProcessingStatus::SubmittedStatusUnknown,
+                message: Some(message),
+            }),
+        }
+    }
+
+    pub async fn submit_plu_with_auth_session(
+        &self,
+        auth: &mut AuthSession,
+        payload: &DigiwebPluPayload,
+        logger: &mut AuditLogger,
+        progress_label: &str,
+    ) -> Result<PluSubmissionOutcome, AppError> {
+        let url = self.join_base_path(self.config.plu_upsert_path()?)?;
+        for attempt in 1..=MAX_AUTHENTICATED_REQUEST_ATTEMPTS {
+            let bearer = auth.bearer_value_for_request(logger).await?;
+            let response = self
+                .http
+                .post(&url)
+                .header("Authorization", bearer)
+                .json(payload)
+                .send()
+                .await
+                .map_err(|err| AppError::Network(err.to_string()))?;
+            let captured = capture_response(
+                "PLU submission response",
+                "POST",
+                &url,
+                true,
+                true,
+                response,
+                logger,
+            )
+            .await?;
+
+            if captured.status == StatusCode::UNAUTHORIZED {
+                if attempt == MAX_AUTHENTICATED_REQUEST_ATTEMPTS {
+                    return Err(AppError::Auth(format!(
+                        "PLU submission returned repeated HTTP 401 Unauthorized after {attempt} authenticated attempt(s)"
+                    )));
+                }
+                auth.refresh_after_unauthorized(logger, "PLU submission")
+                    .await?;
+                logger.line("Retrying the same PLU submission with refreshed credentials.")?;
+                continue;
+            }
+
+            if !captured.status.is_success() {
+                return Err(http_error("PLU submission", &captured));
+            }
+
+            return self.interpret_plu_submission_capture(captured, logger, progress_label);
+        }
+
+        Err(AppError::Auth(
+            "PLU submission authentication retry loop ended unexpectedly".to_string(),
+        ))
+    }
+
+    fn interpret_plu_submission_capture(
+        &self,
+        captured: CapturedHttpResponse,
+        logger: &mut AuditLogger,
+        progress_label: &str,
+    ) -> Result<PluSubmissionOutcome, AppError> {
+        match interpret_plu_submission(&captured)? {
+            SubmissionInterpretation::Final {
+                request_id,
+                status,
+                message,
+            } => Ok(PluSubmissionOutcome {
+                request_id,
+                initial_status: status,
+                message,
+            }),
+            SubmissionInterpretation::Async {
+                request_id,
+                message,
+                ..
+            } => {
+                logger.line(format!("{progress_label} Request submitted: {request_id}"))?;
+                Ok(PluSubmissionOutcome {
+                    request_id: Some(request_id.clone()),
                     initial_status: ProcessingStatus::Processing,
                     message,
                 })
@@ -326,6 +419,25 @@ impl DigiwebClient {
             .await
     }
 
+    pub async fn poll_request_status_with_auth_session(
+        &self,
+        auth: &mut AuthSession,
+        request_id: &str,
+        logger: &mut AuditLogger,
+    ) -> Result<DigiwebStatusResponse, AppError> {
+        let template = self.config.digiweb.request_status_path_template.trim();
+        if template.is_empty() {
+            return Err(AppError::Config(
+                "digiweb.request_status_path_template is required for PROCESSING responses"
+                    .to_string(),
+            ));
+        }
+        let path = template.replace("{request_id}", request_id);
+        let url = self.join_base_path(&path)?;
+        self.poll_url_with_auth_session(auth, &url, request_id, logger, None)
+            .await
+    }
+
     #[allow(dead_code)]
     pub async fn poll_location(
         &self,
@@ -415,6 +527,108 @@ impl DigiwebClient {
             if status_response.status != ProcessingStatus::Processing {
                 return Ok(status_response);
             }
+            if Instant::now() >= deadline {
+                return Ok(DigiwebStatusResponse {
+                    id: None,
+                    status: ProcessingStatus::UnknownOrTimeout,
+                    method: None,
+                    message: Some(format!(
+                        "request did not complete within {} seconds",
+                        self.config.timeouts.poll_timeout_seconds
+                    )),
+                });
+            }
+            sleep(Duration::from_secs(
+                self.config.timeouts.poll_interval_seconds,
+            ))
+            .await;
+        }
+    }
+
+    async fn poll_url_with_auth_session(
+        &self,
+        auth: &mut AuthSession,
+        url: &str,
+        status_reference: &str,
+        logger: &mut AuditLogger,
+        progress_label: Option<&str>,
+    ) -> Result<DigiwebStatusResponse, AppError> {
+        let deadline =
+            Instant::now() + Duration::from_secs(self.config.timeouts.poll_timeout_seconds);
+        loop {
+            for attempt in 1..=MAX_AUTHENTICATED_REQUEST_ATTEMPTS {
+                let bearer = auth.bearer_value_for_request(logger).await?;
+                let response = self
+                    .http
+                    .get(url)
+                    .header("Authorization", bearer)
+                    .send()
+                    .await
+                    .map_err(|err| AppError::Network(err.to_string()))?;
+                let captured = capture_response(
+                    "Asynchronous request-status response",
+                    "GET",
+                    url,
+                    true,
+                    false,
+                    response,
+                    logger,
+                )
+                .await?;
+                if let Some(label) = progress_label {
+                    logger.line(format!("{label} Polling request {status_reference}"))?;
+                    logger.line(format!("{label} HTTP {}", format_status(captured.status)))?;
+                }
+
+                if captured.status == StatusCode::UNAUTHORIZED {
+                    if attempt == MAX_AUTHENTICATED_REQUEST_ATTEMPTS {
+                        return Err(AppError::Auth(format!(
+                            "status request {status_reference} returned repeated HTTP 401 Unauthorized after {attempt} authenticated attempt(s)"
+                        )));
+                    }
+                    auth.refresh_after_unauthorized(logger, "polling an existing request")
+                        .await?;
+                    logger.line("Retrying status lookup for the same request ID.")?;
+                    continue;
+                }
+
+                if !captured.status.is_success() {
+                    logger.kv(
+                        "Detailed non-success status response body",
+                        &sanitize_response_body(&captured.body),
+                    )?;
+                    return Err(http_error(
+                        &format!("status request {status_reference}"),
+                        &captured,
+                    ));
+                }
+                let status_response = match interpret_status_response(&captured) {
+                    Ok(status_response) => status_response,
+                    Err(err) => {
+                        logger.kv(
+                            "Detailed undecodable status response body",
+                            &sanitize_response_body(&captured.body),
+                        )?;
+                        return Err(err);
+                    }
+                };
+                if let Some(label) = progress_label {
+                    let status_for_log = status_text_for_log(&captured)
+                        .unwrap_or_else(|| status_response.status.as_str().to_string());
+                    logger.line(format!("{label} DIGIweb status: {}", status_for_log))?;
+                }
+                if status_response.status == ProcessingStatus::Fail {
+                    logger.kv(
+                        "Detailed failed status response body",
+                        &sanitize_response_body(&captured.body),
+                    )?;
+                }
+                if status_response.status != ProcessingStatus::Processing {
+                    return Ok(status_response);
+                }
+                break;
+            }
+
             if Instant::now() >= deadline {
                 return Ok(DigiwebStatusResponse {
                     id: None,
@@ -1210,6 +1424,316 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_session_initial_authentication_succeeds() {
+        let server = TestServer::start(vec![token_response("token-a", Some(300))]).await;
+        let client =
+            DigiwebClient::new(test_config(&server.base_url, "/status/{request_id}", 1, 5))
+                .expect("client");
+
+        let session = AuthSession::start(
+            client.http(),
+            &test_config(&server.base_url, "/status/{request_id}", 1, 5),
+            secrecy::SecretString::new("client-secret".to_string()),
+        )
+        .await
+        .expect("auth");
+
+        assert_eq!(session.refresh_count(), 0);
+        assert_eq!(server.handled_requests().await, 1);
+    }
+
+    #[tokio::test]
+    async fn normal_post_succeeds_without_refresh() {
+        let server = TestServer::start(vec![
+            token_response("token-a", Some(300)),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"status":"SUCCESS"}"#,
+            ),
+        ])
+        .await;
+        let config = test_config(&server.base_url, "/status/{request_id}", 1, 5);
+        let client = DigiwebClient::new(config.clone()).expect("client");
+        let mut session = AuthSession::start(
+            client.http(),
+            &config,
+            secrecy::SecretString::new("client-secret".to_string()),
+        )
+        .await
+        .expect("auth");
+        let mut logger = test_logger();
+
+        let outcome = client
+            .submit_plu_with_auth_session(&mut session, &test_payload(), &mut logger, "[1/1]")
+            .await
+            .expect("submit");
+
+        assert_eq!(outcome.initial_status, ProcessingStatus::Success);
+        assert_eq!(session.refresh_count(), 0);
+        assert_eq!(server.handled_requests().await, 2);
+    }
+
+    #[tokio::test]
+    async fn post_401_refreshes_and_retries_same_payload() {
+        let server = TestServer::start(vec![
+            token_response("token-a", Some(300)),
+            raw_response(401, "Unauthorized", &[], ""),
+            token_response("token-b", Some(300)),
+            raw_response(
+                201,
+                "Created",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"abc","status":"TODO"}"#,
+            ),
+        ])
+        .await;
+        let config = test_config(&server.base_url, "/status/{request_id}", 1, 5);
+        let client = DigiwebClient::new(config.clone()).expect("client");
+        let mut session = AuthSession::start(
+            client.http(),
+            &config,
+            secrecy::SecretString::new("client-secret".to_string()),
+        )
+        .await
+        .expect("auth");
+        let mut logger = test_logger();
+
+        let outcome = client
+            .submit_plu_with_auth_session(&mut session, &test_payload(), &mut logger, "[1/1]")
+            .await
+            .expect("submit");
+        let requests = server.request_texts().await;
+
+        assert_eq!(outcome.request_id.as_deref(), Some("abc"));
+        assert_eq!(outcome.initial_status, ProcessingStatus::Processing);
+        assert_eq!(session.refresh_count(), 1);
+        assert_eq!(server.handled_requests().await, 4);
+        assert!(request_has_authorization(&requests[1], "Bearer token-a"));
+        assert!(request_has_authorization(&requests[3], "Bearer token-b"));
+        assert_eq!(request_body(&requests[1]), request_body(&requests[3]));
+    }
+
+    #[tokio::test]
+    async fn refreshed_token_is_reused_by_following_plu() {
+        let server = TestServer::start(vec![
+            token_response("token-a", Some(300)),
+            raw_response(401, "Unauthorized", &[], ""),
+            token_response("token-b", Some(300)),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"status":"SUCCESS"}"#,
+            ),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"status":"SUCCESS"}"#,
+            ),
+        ])
+        .await;
+        let config = test_config(&server.base_url, "/status/{request_id}", 1, 5);
+        let client = DigiwebClient::new(config.clone()).expect("client");
+        let mut session = AuthSession::start(
+            client.http(),
+            &config,
+            secrecy::SecretString::new("client-secret".to_string()),
+        )
+        .await
+        .expect("auth");
+        let mut logger = test_logger();
+
+        client
+            .submit_plu_with_auth_session(&mut session, &test_payload(), &mut logger, "[1/2]")
+            .await
+            .expect("first submit");
+        client
+            .submit_plu_with_auth_session(&mut session, &test_payload(), &mut logger, "[2/2]")
+            .await
+            .expect("second submit");
+        let requests = server.request_texts().await;
+
+        assert_eq!(session.refresh_count(), 1);
+        assert!(request_has_authorization(&requests[3], "Bearer token-b"));
+        assert!(request_has_authorization(&requests[4], "Bearer token-b"));
+    }
+
+    #[tokio::test]
+    async fn repeated_post_401_retries_are_bounded() {
+        let server = TestServer::start(vec![
+            token_response("token-a", Some(300)),
+            raw_response(401, "Unauthorized", &[], ""),
+            token_response("token-b", Some(300)),
+            raw_response(401, "Unauthorized", &[], ""),
+            token_response("token-c", Some(300)),
+            raw_response(401, "Unauthorized", &[], ""),
+        ])
+        .await;
+        let config = test_config(&server.base_url, "/status/{request_id}", 1, 5);
+        let client = DigiwebClient::new(config.clone()).expect("client");
+        let mut session = AuthSession::start(
+            client.http(),
+            &config,
+            secrecy::SecretString::new("client-secret".to_string()),
+        )
+        .await
+        .expect("auth");
+        let mut logger = test_logger();
+
+        let err = client
+            .submit_plu_with_auth_session(&mut session, &test_payload(), &mut logger, "[1/1]")
+            .await
+            .expect_err("auth error");
+
+        assert!(matches!(err, AppError::Auth(_)));
+        assert!(err.to_string().contains("repeated HTTP 401"));
+        assert_eq!(session.refresh_count(), 2);
+        assert_eq!(server.handled_requests().await, 6);
+    }
+
+    #[tokio::test]
+    async fn refresh_endpoint_failure_stops_submission() {
+        let server = TestServer::start(vec![
+            token_response("token-a", Some(300)),
+            raw_response(401, "Unauthorized", &[], ""),
+            raw_response(500, "Internal Server Error", &[], ""),
+        ])
+        .await;
+        let config = test_config(&server.base_url, "/status/{request_id}", 1, 5);
+        let client = DigiwebClient::new(config.clone()).expect("client");
+        let mut session = AuthSession::start(
+            client.http(),
+            &config,
+            secrecy::SecretString::new("client-secret".to_string()),
+        )
+        .await
+        .expect("auth");
+        let mut logger = test_logger();
+
+        let err = client
+            .submit_plu_with_auth_session(&mut session, &test_payload(), &mut logger, "[1/1]")
+            .await
+            .expect_err("auth error");
+
+        assert!(matches!(err, AppError::Auth(_)));
+        assert_eq!(server.handled_requests().await, 3);
+    }
+
+    #[tokio::test]
+    async fn status_get_401_refreshes_and_polls_same_request_id() {
+        let server = TestServer::start(vec![
+            token_response("token-a", Some(300)),
+            raw_response(401, "Unauthorized", &[], ""),
+            token_response("token-b", Some(300)),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"abc","status":"SUCCESS"}"#,
+            ),
+        ])
+        .await;
+        let config = test_config(&server.base_url, "/status/{request_id}", 1, 5);
+        let client = DigiwebClient::new(config.clone()).expect("client");
+        let mut session = AuthSession::start(
+            client.http(),
+            &config,
+            secrecy::SecretString::new("client-secret".to_string()),
+        )
+        .await
+        .expect("auth");
+        let mut logger = test_logger();
+
+        let status = client
+            .poll_request_status_with_auth_session(&mut session, "abc", &mut logger)
+            .await
+            .expect("poll");
+        let request_lines = server.request_lines().await;
+
+        assert_eq!(status.status, ProcessingStatus::Success);
+        assert_eq!(session.refresh_count(), 1);
+        assert_eq!(request_lines[1], "GET /status/abc HTTP/1.1");
+        assert_eq!(request_lines[3], "GET /status/abc HTTP/1.1");
+        assert!(
+            !request_lines
+                .iter()
+                .any(|line| { line.starts_with("POST /api/v1/third-party/plus/write ") })
+        );
+    }
+
+    #[tokio::test]
+    async fn proactive_refresh_occurs_when_token_is_near_expiration() {
+        let server = TestServer::start(vec![
+            token_response("token-a", Some(10)),
+            token_response("token-b", Some(300)),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"status":"SUCCESS"}"#,
+            ),
+        ])
+        .await;
+        let config = test_config(&server.base_url, "/status/{request_id}", 1, 5);
+        let client = DigiwebClient::new(config.clone()).expect("client");
+        let mut session = AuthSession::start(
+            client.http(),
+            &config,
+            secrecy::SecretString::new("client-secret".to_string()),
+        )
+        .await
+        .expect("auth");
+        let mut logger = test_logger();
+
+        let outcome = client
+            .submit_plu_with_auth_session(&mut session, &test_payload(), &mut logger, "[1/1]")
+            .await
+            .expect("submit");
+        let requests = server.request_texts().await;
+
+        assert_eq!(outcome.initial_status, ProcessingStatus::Success);
+        assert_eq!(session.refresh_count(), 1);
+        assert!(request_has_authorization(&requests[2], "Bearer token-b"));
+    }
+
+    #[tokio::test]
+    async fn reactive_refresh_works_without_expiration_metadata() {
+        let server = TestServer::start(vec![
+            token_response("token-a", None),
+            raw_response(401, "Unauthorized", &[], ""),
+            token_response("token-b", None),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"status":"SUCCESS"}"#,
+            ),
+        ])
+        .await;
+        let config = test_config(&server.base_url, "/status/{request_id}", 1, 5);
+        let client = DigiwebClient::new(config.clone()).expect("client");
+        let mut session = AuthSession::start(
+            client.http(),
+            &config,
+            secrecy::SecretString::new("client-secret".to_string()),
+        )
+        .await
+        .expect("auth");
+        let mut logger = test_logger();
+
+        let outcome = client
+            .submit_plu_with_auth_session(&mut session, &test_payload(), &mut logger, "[1/1]")
+            .await
+            .expect("submit");
+
+        assert_eq!(outcome.initial_status, ProcessingStatus::Success);
+        assert_eq!(session.refresh_count(), 1);
+    }
+
+    #[tokio::test]
     async fn html_from_incorrect_status_route_is_unknown_not_plu_failure() {
         let html = format!(
             "<!doctype html><html><body><app-root></app-root>{}</body></html>",
@@ -1737,6 +2261,16 @@ mod tests {
         response
     }
 
+    fn token_response(token: &str, expires_in: Option<u64>) -> String {
+        let body = match expires_in {
+            Some(seconds) => format!(
+                r#"{{"access_token":"{token}","token_type":"Bearer","expires_in":{seconds}}}"#
+            ),
+            None => format!(r#"{{"access_token":"{token}","token_type":"Bearer"}}"#),
+        };
+        raw_response(200, "OK", &[("Content-Type", "application/json")], &body)
+    }
+
     struct TestServer {
         base_url: String,
         handled_requests: std::sync::Arc<tokio::sync::Mutex<usize>>,
@@ -1803,5 +2337,9 @@ mod tests {
             };
             name.eq_ignore_ascii_case("authorization") && value.trim() == expected_value
         })
+    }
+
+    fn request_body(request: &str) -> &str {
+        request.split("\r\n\r\n").nth(1).unwrap_or_default()
     }
 }

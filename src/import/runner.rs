@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{AppConfig, client_secret_log_message, load_client_secret};
-use crate::digiweb::auth::authenticate;
+use crate::digiweb::auth::AuthSession;
 use crate::digiweb::client::DigiwebClient;
 use crate::digiweb::payload::DigiwebPluPayload;
 use crate::digiweb::status::ProcessingStatus;
@@ -211,7 +211,7 @@ pub async fn run_import(
         "Client secret",
         client_secret_log_message(&config, std::env::var("DIGIWEB_CLIENT_SECRET").is_ok()),
     )?;
-    let token = authenticate(client.http(), &config, &client_secret).await?;
+    let mut auth_session = AuthSession::start(client.http(), &config, client_secret).await?;
     logger.kv("Authentication result", "SUCCESS")?;
 
     let plan = if resume_manifest.is_some() {
@@ -253,7 +253,7 @@ pub async fn run_import(
                         record_index,
                         active_manifest_path,
                         &client,
-                        &token,
+                        &mut auth_session,
                         logger,
                         &progress,
                     ) => Some(result),
@@ -296,7 +296,7 @@ pub async fn run_import(
                         record_index,
                         active_manifest_path,
                         &client,
-                        &token,
+                        &mut auth_session,
                         plu,
                         payload,
                         &config,
@@ -372,7 +372,7 @@ async fn submit_manifest_record(
     record_index: usize,
     manifest_path: &Path,
     client: &DigiwebClient,
-    token: &crate::digiweb::auth::AccessToken,
+    auth_session: &mut crate::digiweb::auth::AuthSession,
     plu: &Plu,
     payload: &DigiwebPluPayload,
     config: &AppConfig,
@@ -396,11 +396,17 @@ async fn submit_manifest_record(
     manifest.recalculate_summary_for_active_run();
     atomic_write_manifest(manifest_path, manifest)?;
 
+    let refresh_count_before = auth_session.refresh_count();
     match client
-        .submit_plu_once(token, payload, logger, progress)
+        .submit_plu_with_auth_session(auth_session, payload, logger, progress)
         .await
     {
         Ok(outcome) => {
+            manifest.records[record_index].set_authentication_retries(
+                auth_session
+                    .refresh_count()
+                    .saturating_sub(refresh_count_before),
+            );
             if let Some(request_id) = outcome.request_id.clone() {
                 {
                     let record = &mut manifest.records[record_index];
@@ -435,7 +441,7 @@ async fn submit_manifest_record(
                         record_index,
                         manifest_path,
                         client,
-                        token,
+                        auth_session,
                         logger,
                         progress,
                     )
@@ -465,11 +471,34 @@ async fn submit_manifest_record(
             }
         }
         Err(err) if matches!(err, AppError::Network(_)) => {
+            manifest.records[record_index].set_authentication_retries(
+                auth_session
+                    .refresh_count()
+                    .saturating_sub(refresh_count_before),
+            );
             manifest.records[record_index].mark_ambiguous(err.to_string())?;
             logger.error(format!(
                 "{progress} PLU {} submission is ambiguous after network error: {}",
                 plu.plu_number, err
             ))?;
+        }
+        Err(err) if matches!(err, AppError::Auth(_)) => {
+            manifest.records[record_index].set_authentication_retries(
+                auth_session
+                    .refresh_count()
+                    .saturating_sub(refresh_count_before),
+            );
+            manifest.records[record_index].mark_failed(err.stage(), err.to_string())?;
+            manifest.recalculate_summary_for_active_run();
+            atomic_write_manifest(manifest_path, manifest)?;
+            logger.error(format!("{progress} PLU {} failed: {}", plu.plu_number, err))?;
+            logger.error("IMPORT STOPPED - AUTHENTICATION COULD NOT BE RESTORED")?;
+            logger.line("No additional PLUs were submitted.")?;
+            logger.line("The recovery manifest was preserved.")?;
+            println!("IMPORT STOPPED - AUTHENTICATION COULD NOT BE RESTORED");
+            println!("No additional PLUs were submitted.");
+            println!("The recovery manifest was preserved.");
+            return Err(err);
         }
         Err(err) => {
             manifest.records[record_index].mark_failed(err.stage(), err.to_string())?;
@@ -582,7 +611,7 @@ async fn poll_manifest_record(
     record_index: usize,
     manifest_path: &Path,
     client: &DigiwebClient,
-    token: &crate::digiweb::auth::AccessToken,
+    auth_session: &mut crate::digiweb::auth::AuthSession,
     logger: &mut AuditLogger,
     progress: &str,
 ) -> Result<(), AppError> {
@@ -599,12 +628,26 @@ async fn poll_manifest_record(
     manifest.recalculate_summary_for_active_run();
     atomic_write_manifest(manifest_path, manifest)?;
 
-    match client.poll_request_status(token, &request_id, logger).await {
+    let refresh_count_before = auth_session.refresh_count();
+    match client
+        .poll_request_status_with_auth_session(auth_session, &request_id, logger)
+        .await
+    {
         Ok(response) if response.status == ProcessingStatus::Success => {
+            manifest.records[record_index].set_authentication_retries(
+                auth_session
+                    .refresh_count()
+                    .saturating_sub(refresh_count_before),
+            );
             manifest.records[record_index].mark_success(response.status.as_str())?;
             logger.line(format!("{progress} Final status: SUCCESS"))?;
         }
         Ok(response) if response.status == ProcessingStatus::Fail => {
+            manifest.records[record_index].set_authentication_retries(
+                auth_session
+                    .refresh_count()
+                    .saturating_sub(refresh_count_before),
+            );
             manifest.records[record_index].mark_failed(
                 "DIGIweb processing",
                 response
@@ -614,6 +657,11 @@ async fn poll_manifest_record(
             logger.line(format!("{progress} Final status: FAIL"))?;
         }
         Ok(response) => {
+            manifest.records[record_index].set_authentication_retries(
+                auth_session
+                    .refresh_count()
+                    .saturating_sub(refresh_count_before),
+            );
             manifest.records[record_index].mark_unknown(
                 response.message.unwrap_or_else(|| {
                     format!("DIGIweb final status {}", response.status.as_str())
@@ -624,7 +672,35 @@ async fn poll_manifest_record(
                 request_id
             ))?;
         }
+        Err(err) if matches!(err, AppError::Auth(_)) => {
+            manifest.records[record_index].set_authentication_retries(
+                auth_session
+                    .refresh_count()
+                    .saturating_sub(refresh_count_before),
+            );
+            manifest.records[record_index].mark_unknown(format!(
+                "status polling failed for existing request {request_id}: {err}"
+            ))?;
+            manifest.recalculate_summary_for_active_run();
+            atomic_write_manifest(manifest_path, manifest)?;
+            logger.warning(format!(
+                "{progress} Existing request {} status remains unknown: {}",
+                request_id, err
+            ))?;
+            logger.error("IMPORT STOPPED - AUTHENTICATION COULD NOT BE RESTORED")?;
+            logger.line("No additional PLUs were submitted.")?;
+            logger.line("The recovery manifest was preserved.")?;
+            println!("IMPORT STOPPED - AUTHENTICATION COULD NOT BE RESTORED");
+            println!("No additional PLUs were submitted.");
+            println!("The recovery manifest was preserved.");
+            return Err(err);
+        }
         Err(err) => {
+            manifest.records[record_index].set_authentication_retries(
+                auth_session
+                    .refresh_count()
+                    .saturating_sub(refresh_count_before),
+            );
             manifest.records[record_index].mark_unknown(format!(
                 "status polling failed for existing request {request_id}: {err}"
             ))?;
@@ -756,6 +832,7 @@ mod tests {
 
     use super::*;
     use crate::models::plu::PriceMode;
+    use crate::recovery::load_manifest;
 
     fn plu(plu_number: u64) -> Plu {
         Plu {
@@ -916,5 +993,151 @@ mod tests {
         prepare_payload_preview_dir_in_dir(temp.path(), false).expect("disabled");
 
         assert!(!temp.path().join("payload-previews").exists());
+    }
+
+    #[tokio::test]
+    async fn unrecoverable_submission_auth_failure_stops_even_with_continue_on_error() {
+        let server = TestServer::start(vec![
+            token_response("token-a"),
+            raw_response(401, "Unauthorized", &[], ""),
+            token_response("token-b"),
+            raw_response(401, "Unauthorized", &[], ""),
+            token_response("token-c"),
+            raw_response(401, "Unauthorized", &[], ""),
+        ])
+        .await;
+        let mut config = test_import_config(&server.base_url);
+        config.import.write_payload_preview = false;
+        config.import.continue_after_record_failure = true;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = temp.path().join("import-results.json");
+        let log_path = temp.path().join("logs.txt");
+        let mut logger = AuditLogger::create(&log_path).expect("logger");
+        let records = vec![plu(1), plu(2), plu(3)];
+
+        let err = run_import(
+            config,
+            &records,
+            SourceIdentity {
+                filename: "plu.mdb".to_string(),
+                size_bytes: 123,
+                sha256: "0".repeat(64),
+            },
+            TargetIdentity {
+                base_url: server.base_url.clone(),
+                store_number: 1,
+                client_id: "digi".to_string(),
+            },
+            &manifest_path,
+            None,
+            None,
+            ImportRunOptions {
+                limit: None,
+                continue_after_record_failure: true,
+                test_mode: false,
+                retry_failed: false,
+            },
+            &mut logger,
+        )
+        .await
+        .expect_err("auth failure");
+        logger.flush().expect("flush");
+
+        let manifest = load_manifest(&manifest_path).expect("manifest");
+        let log = fs::read_to_string(log_path).expect("log");
+        assert!(matches!(err, AppError::Auth(_)));
+        assert_eq!(manifest.summary.failed, 1);
+        assert_eq!(manifest.summary.not_attempted, 2);
+        assert_eq!(manifest.records[0].attempt_count, 1);
+        assert_eq!(manifest.records[0].attempts[0].authentication_retries, 2);
+        assert_eq!(manifest.records[0].request_id, None);
+        assert_eq!(manifest.records[1].status, RecordStatus::NotAttempted);
+        assert_eq!(manifest.records[2].status, RecordStatus::NotAttempted);
+        assert!(log.contains("IMPORT STOPPED - AUTHENTICATION COULD NOT BE RESTORED"));
+        assert!(!log.contains("token-a"));
+        assert!(!log.contains("token-b"));
+        assert!(!log.contains("client-secret"));
+    }
+
+    fn test_import_config(base_url: &str) -> AppConfig {
+        AppConfig {
+            digiweb: crate::config::DigiwebConfig {
+                base_url: base_url.to_string(),
+                client_id: "digi".to_string(),
+                client_secret: "client-secret".to_string(),
+                log_credentials_for_testing: false,
+                token_url: format!("{base_url}/token"),
+                store_number: 1,
+                allow_invalid_certificates: false,
+                plu_upsert_path: "/api/v1/third-party/plus/write".to_string(),
+                request_status_path_template: "/status/{request_id}".to_string(),
+                plu_barcode_type: String::new(),
+                plu_barcode_ref_no: String::new(),
+            },
+            timeouts: crate::config::TimeoutConfig {
+                request_seconds: 5,
+                poll_interval_seconds: 1,
+                poll_timeout_seconds: 5,
+            },
+            import: crate::config::ImportConfig::default(),
+            mapping: crate::config::MappingConfig::default(),
+        }
+    }
+
+    fn token_response(token: &str) -> String {
+        raw_response(
+            200,
+            "OK",
+            &[("Content-Type", "application/json")],
+            &format!(r#"{{"access_token":"{token}","expires_in":300}}"#),
+        )
+    }
+
+    fn raw_response(
+        status_code: u16,
+        reason: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> String {
+        let mut response = format!("HTTP/1.1 {status_code} {reason}\r\n");
+        let has_content_length = headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-length"));
+        for (name, value) in headers {
+            response.push_str(&format!("{name}: {value}\r\n"));
+        }
+        if !has_content_length {
+            response.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+        response.push_str("Connection: close\r\n\r\n");
+        response.push_str(body);
+        response
+    }
+
+    struct TestServer {
+        base_url: String,
+    }
+
+    impl TestServer {
+        async fn start(responses: Vec<String>) -> Self {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::net::TcpListener;
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            tokio::spawn(async move {
+                for response in responses {
+                    let Ok((mut stream, _peer)) = listener.accept().await else {
+                        return;
+                    };
+                    let mut buffer = [0_u8; 4096];
+                    let _ = stream.read(&mut buffer).await.unwrap_or_default();
+                    let _ = stream.write_all(response.as_bytes()).await;
+                }
+            });
+            Self {
+                base_url: format!("http://{addr}"),
+            }
+        }
     }
 }

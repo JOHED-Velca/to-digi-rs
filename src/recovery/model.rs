@@ -91,6 +91,8 @@ pub struct PluManifestRecord {
 pub struct AttemptRecord {
     pub attempt_number: u32,
     pub started_at: DateTime<Local>,
+    #[serde(default)]
+    pub authentication_retries: u32,
     pub request_id: Option<String>,
     pub submission_result: AttemptSubmissionResult,
     pub last_remote_status: Option<String>,
@@ -407,6 +409,7 @@ impl PluManifestRecord {
         self.attempts.push(AttemptRecord {
             attempt_number: self.attempt_count,
             started_at: now,
+            authentication_retries: 0,
             request_id: None,
             submission_result: AttemptSubmissionResult::Started,
             last_remote_status: None,
@@ -415,6 +418,12 @@ impl PluManifestRecord {
             error_message: None,
         });
         Ok(())
+    }
+
+    pub fn set_authentication_retries(&mut self, retries: u32) {
+        if let Some(attempt) = self.attempts.last_mut() {
+            attempt.authentication_retries = retries;
+        }
     }
 
     pub fn mark_request_accepted(
