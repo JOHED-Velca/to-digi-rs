@@ -1,6 +1,6 @@
 profile_version = 1
 profile_name = "example"
-description = "Example fill-only PLU sanitization profile; confirm values before customer use"
+description = "Example PLU sanitization profile; confirm values before customer use"
 
 [safety]
 fill_empty_only = true
@@ -31,3 +31,16 @@ field = "print_format_code"
 when = "empty"
 action = "set_constant"
 value = "00"
+
+# Optional explicit rule for source Pludata."Best Before" -> DIGIweb plusellingdateterm.
+# Enable only when the customer wants invalid selling-date terms rewritten in memory.
+# With this example configuration, 0 is preserved as disabled/default, 1..999 are
+# preserved, and empty, malformed, negative, or >999 values become 0.
+#
+# [selling_date_term]
+# enabled = true
+# allow_zero = true
+# minimum = 1
+# maximum = 999
+# invalid_value = 0
+# empty_value = 0

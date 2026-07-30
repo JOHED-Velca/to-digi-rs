@@ -12,6 +12,7 @@
 - Added profile snapshots for resumable sanitized imports
 - Added backward compatibility with v0.7.0 manifests
 - Added automatic DIGIweb access-token refresh during import submission and status polling
+- Added profile-driven Best Before normalization for DIGIweb selling-date terms
 - Preserved the original MDB without modification
 
 ## v0.7.0

@@ -1,6 +1,6 @@
 profile_version = 1
 profile_name = "starsky"
-description = "Starsky defaults for missing required PLU fields"
+description = "Starsky defaults for missing required PLU fields and invalid Best Before terms"
 
 [safety]
 fill_empty_only = true
@@ -31,3 +31,11 @@ field = "print_format_code"
 when = "empty"
 action = "set_constant"
 value = "00"
+
+[selling_date_term]
+enabled = true
+allow_zero = true
+minimum = 1
+maximum = 999
+invalid_value = 0
+empty_value = 0

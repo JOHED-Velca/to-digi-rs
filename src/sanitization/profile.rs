@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SanitizationProfile {
     pub profile_version: u32,
     pub profile_name: String,
@@ -15,9 +16,12 @@ pub struct SanitizationProfile {
     pub safety: SanitizationSafety,
     #[serde(default)]
     pub rules: Vec<SanitizationRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selling_date_term: Option<SellingDateTermRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SanitizationSafety {
     pub fill_empty_only: bool,
     pub preserve_nonempty_values: bool,
@@ -25,6 +29,7 @@ pub struct SanitizationSafety {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SanitizationRule {
     pub field: TargetField,
     pub when: RuleCondition,
@@ -35,6 +40,17 @@ pub struct SanitizationRule {
     pub source_field: Option<SourceField>,
     #[serde(default)]
     pub normalization: Option<CopyNormalization>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SellingDateTermRule {
+    pub enabled: bool,
+    pub allow_zero: bool,
+    pub minimum: u32,
+    pub maximum: u32,
+    pub invalid_value: u32,
+    pub empty_value: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -210,6 +226,9 @@ impl SanitizationProfile {
                 }
             }
         }
+        if let Some(rule) = &self.selling_date_term {
+            validate_selling_date_term_rule(rule)?;
+        }
         Ok(())
     }
 
@@ -217,6 +236,34 @@ impl SanitizationProfile {
         toml::to_string_pretty(self)
             .map_err(|err| AppError::Internal(format!("profile serialization failed: {err}")))
     }
+}
+
+fn validate_selling_date_term_rule(rule: &SellingDateTermRule) -> Result<(), AppError> {
+    if rule.minimum == 0 {
+        return Err(AppError::Config(
+            "selling_date_term.minimum must be greater than zero".to_string(),
+        ));
+    }
+    if rule.maximum < rule.minimum {
+        return Err(AppError::Config(
+            "selling_date_term.maximum must be greater than or equal to minimum".to_string(),
+        ));
+    }
+    for (field, value) in [
+        ("empty_value", rule.empty_value),
+        ("invalid_value", rule.invalid_value),
+    ] {
+        if !selling_date_result_allowed(rule, value) {
+            return Err(AppError::Config(format!(
+                "selling_date_term.{field} must be 0 when allow_zero is true or in the configured allowed range"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn selling_date_result_allowed(rule: &SellingDateTermRule, value: u32) -> bool {
+    (rule.allow_zero && value == 0) || (rule.minimum..=rule.maximum).contains(&value)
 }
 
 fn validate_constant(rule: &SanitizationRule) -> Result<(), AppError> {
@@ -284,6 +331,7 @@ mod tests {
                 source_field: None,
                 normalization: None,
             }],
+            selling_date_term: None,
         }
     }
 
@@ -306,6 +354,87 @@ value = "1"
 "#;
         let profile: SanitizationProfile = toml::from_str(toml).expect("parse");
         profile.validate().expect("valid");
+        assert!(profile.selling_date_term.is_none());
+    }
+
+    #[test]
+    fn selling_date_term_section_parses_and_serializes() {
+        let toml = r#"
+profile_version = 1
+profile_name = "starsky"
+
+[safety]
+fill_empty_only = true
+preserve_nonempty_values = true
+reject_invalid_results = true
+
+[selling_date_term]
+enabled = true
+allow_zero = true
+minimum = 1
+maximum = 999
+invalid_value = 0
+empty_value = 0
+"#;
+        let profile: SanitizationProfile = toml::from_str(toml).expect("parse");
+        profile.validate().expect("valid");
+        let normalized = profile.normalized_toml().expect("toml");
+        assert!(normalized.contains("[selling_date_term]"));
+        assert!(normalized.contains("maximum = 999"));
+    }
+
+    #[test]
+    fn normalized_profile_changes_when_selling_date_rule_changes() {
+        let mut profile = base_profile();
+        profile.selling_date_term = Some(SellingDateTermRule {
+            enabled: true,
+            allow_zero: true,
+            minimum: 1,
+            maximum: 999,
+            invalid_value: 0,
+            empty_value: 0,
+        });
+        let original = profile.normalized_toml().expect("toml");
+
+        profile.selling_date_term.as_mut().expect("rule").maximum = 365;
+        let changed = profile.normalized_toml().expect("toml");
+
+        assert_ne!(
+            crate::sanitization::report::sha256_text(&original),
+            crate::sanitization::report::sha256_text(&changed)
+        );
+    }
+
+    #[test]
+    fn invalid_selling_date_term_configuration_is_rejected() {
+        let mut profile = base_profile();
+        profile.selling_date_term = Some(SellingDateTermRule {
+            enabled: true,
+            allow_zero: false,
+            minimum: 1,
+            maximum: 999,
+            invalid_value: 0,
+            empty_value: 0,
+        });
+
+        let err = profile.validate().expect_err("invalid");
+
+        assert!(err.to_string().contains("selling_date_term"));
+    }
+
+    #[test]
+    fn unknown_profile_setting_is_rejected() {
+        let toml = r#"
+profile_version = 1
+profile_name = "bad"
+unexpected = true
+
+[safety]
+fill_empty_only = true
+preserve_nonempty_values = true
+reject_invalid_results = true
+"#;
+        assert!(toml::from_str::<SanitizationProfile>(toml).is_err());
     }
 
     #[test]

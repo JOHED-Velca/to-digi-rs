@@ -12,6 +12,7 @@ const MAX_SHORT_DESCRIPTION_LEN: usize = 255;
 const MAX_KEY_LABEL_LEN: usize = 24;
 const MAX_INGREDIENTS_LEN: usize = 5000;
 const MAX_EXPIRATION_DAYS: u32 = 999;
+const MAX_SELLING_DATE_TERM: u32 = 999;
 
 #[derive(Debug, Clone, Default)]
 pub struct ValidationReport {
@@ -163,6 +164,15 @@ pub fn validate_plus(plus: &[Plu]) -> ValidationReport {
                     Some(plu.plu_number),
                     "expiration_days",
                     format!("expiration days exceeds {MAX_EXPIRATION_DAYS}"),
+                ));
+            }
+        }
+        if let Some(term) = plu.selling_date_term {
+            if term > MAX_SELLING_DATE_TERM {
+                issues.push(ValidationIssue::error(
+                    Some(plu.plu_number),
+                    "selling_date_term",
+                    format!("DIGIweb plusellingdateterm must be 0 or in range 1..{MAX_SELLING_DATE_TERM}"),
                 ));
             }
         }
@@ -333,6 +343,32 @@ mod tests {
                 .iter()
                 .any(|issue| issue.field == "price" && issue.severity == Severity::Error)
         );
+    }
+
+    #[test]
+    fn selling_date_term_allows_zero_and_range_but_rejects_overflow() {
+        for value in [0, 1, 365, 999] {
+            let mut plu = valid_plu(u64::from(value) + 1);
+            plu.selling_date_term = Some(value);
+
+            assert!(
+                !validate_plus(&[plu])
+                    .issues
+                    .iter()
+                    .any(|issue| issue.field == "selling_date_term"),
+                "value {value}"
+            );
+        }
+
+        let mut plu = valid_plu(6252);
+        plu.selling_date_term = Some(6851);
+        let report = validate_plus(&[plu]);
+
+        assert!(report.issues.iter().any(|issue| {
+            issue.plu_number == Some(6252)
+                && issue.field == "selling_date_term"
+                && issue.severity == Severity::Error
+        }));
     }
 
     #[test]

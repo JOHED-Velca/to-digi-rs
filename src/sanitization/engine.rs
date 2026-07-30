@@ -4,9 +4,12 @@ use serde::Serialize;
 
 use crate::error::AppError;
 use crate::sanitization::profile::{
-    CopyNormalization, RuleAction, SanitizationProfile, SourceField, TargetField,
+    CopyNormalization, RuleAction, SanitizationProfile, SellingDateTermRule, SourceField,
+    TargetField,
 };
 use crate::source::{SourceDataset, SourceRow};
+
+const BEST_BEFORE_COLUMNS: &[&str] = &["BEST BEFORE", "BEST_BEFORE", "Best Before"];
 
 #[derive(Debug, Clone)]
 pub struct SanitizedDataset {
@@ -24,7 +27,16 @@ pub struct SanitizationEngineReport {
     pub placeholder_plus: usize,
     pub nonempty_values_changed: usize,
     pub field_changes: BTreeMap<String, usize>,
+    pub field_summaries: BTreeMap<String, SanitizedFieldSummary>,
     pub records: Vec<SanitizedRecordChange>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SanitizedFieldSummary {
+    pub changed: usize,
+    pub empty_defaulted: usize,
+    pub invalid_nonempty_corrected: usize,
+    pub valid_preserved: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -36,9 +48,11 @@ pub struct SanitizedRecordChange {
 #[derive(Debug, Clone, Serialize)]
 pub struct SanitizedFieldChange {
     pub field: String,
+    pub original_value: String,
     pub original_empty_category: EmptyCategory,
     pub applied_rule: String,
     pub sanitized_value: String,
+    pub reason: SanitizedChangeReason,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -47,6 +61,25 @@ pub enum EmptyCategory {
     EmptyString,
     WhitespaceOnly,
     PaddingOnly,
+    NonEmpty,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SanitizedChangeReason {
+    EmptyDefaulted,
+    OutsideAllowedRange,
+    MalformedValue,
+}
+
+impl SanitizedChangeReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptyDefaulted => "empty_defaulted",
+            Self::OutsideAllowedRange => "outside_allowed_range",
+            Self::MalformedValue => "malformed_value",
+        }
+    }
 }
 
 pub fn apply_profile(
@@ -107,12 +140,29 @@ pub fn apply_profile(
                 .field_changes
                 .entry(rule.field.as_str().to_string())
                 .or_default() += 1;
+            let summary = report
+                .field_summaries
+                .entry(rule.field.as_str().to_string())
+                .or_default();
+            summary.changed += 1;
+            summary.empty_defaulted += 1;
             changes.push(SanitizedFieldChange {
                 field: rule.field.as_str().to_string(),
+                original_value: original,
                 original_empty_category: empty_category,
                 applied_rule: applied_rule_text(rule.action, rule.source_field),
                 sanitized_value,
+                reason: SanitizedChangeReason::EmptyDefaulted,
             });
+        }
+        if let Some(rule) = profile
+            .selling_date_term
+            .as_ref()
+            .filter(|rule| rule.enabled)
+        {
+            if let Some(change) = apply_selling_date_term_rule(row, rule, &mut report)? {
+                changes.push(change);
+            }
         }
         if !changes.is_empty() {
             changed_numbers.insert(plu_number);
@@ -130,6 +180,94 @@ pub fn apply_profile(
         dataset: sanitized,
         report,
     })
+}
+
+fn apply_selling_date_term_rule(
+    row: &mut SourceRow,
+    rule: &SellingDateTermRule,
+    report: &mut SanitizationEngineReport,
+) -> Result<Option<SanitizedFieldChange>, AppError> {
+    let Some(column) = existing_column(row, BEST_BEFORE_COLUMNS) else {
+        return Err(AppError::Config(
+            "selling_date_term profile rule is enabled but no Best Before source column exists"
+                .to_string(),
+        ));
+    };
+    let original = row.values.get(column).cloned().unwrap_or_default();
+    let cleaned = clean_mdb_value(&original);
+    let summary = report
+        .field_summaries
+        .entry("selling_date_term".to_string())
+        .or_default();
+    let outcome = selling_date_term_outcome(&cleaned, rule);
+    match outcome {
+        SellingDateTermOutcome::Preserve => {
+            summary.valid_preserved += 1;
+            if cleaned != original {
+                row.values.insert(column.to_string(), cleaned);
+            }
+            Ok(None)
+        }
+        SellingDateTermOutcome::Sanitize { value, reason } => {
+            let original_empty_category =
+                empty_category(&original).unwrap_or(EmptyCategory::NonEmpty);
+            if original_empty_category == EmptyCategory::NonEmpty {
+                report.nonempty_values_changed += 1;
+                summary.invalid_nonempty_corrected += 1;
+            } else {
+                summary.empty_defaulted += 1;
+            }
+            summary.changed += 1;
+            *report
+                .field_changes
+                .entry("selling_date_term".to_string())
+                .or_default() += 1;
+            let sanitized_value = value.to_string();
+            row.values
+                .insert(column.to_string(), sanitized_value.clone());
+            Ok(Some(SanitizedFieldChange {
+                field: "selling_date_term".to_string(),
+                original_value: original,
+                original_empty_category,
+                applied_rule: "normalize_range".to_string(),
+                sanitized_value,
+                reason,
+            }))
+        }
+    }
+}
+
+enum SellingDateTermOutcome {
+    Preserve,
+    Sanitize {
+        value: u32,
+        reason: SanitizedChangeReason,
+    },
+}
+
+fn selling_date_term_outcome(value: &str, rule: &SellingDateTermRule) -> SellingDateTermOutcome {
+    if value.is_empty() {
+        return SellingDateTermOutcome::Sanitize {
+            value: rule.empty_value,
+            reason: SanitizedChangeReason::EmptyDefaulted,
+        };
+    }
+    let Ok(parsed) = value.parse::<i64>() else {
+        return SellingDateTermOutcome::Sanitize {
+            value: rule.invalid_value,
+            reason: SanitizedChangeReason::MalformedValue,
+        };
+    };
+    if parsed == 0 && rule.allow_zero {
+        return SellingDateTermOutcome::Preserve;
+    }
+    if parsed >= i64::from(rule.minimum) && parsed <= i64::from(rule.maximum) {
+        return SellingDateTermOutcome::Preserve;
+    }
+    SellingDateTermOutcome::Sanitize {
+        value: rule.invalid_value,
+        reason: SanitizedChangeReason::OutsideAllowedRange,
+    }
 }
 
 pub fn is_empty_source_value(value: &str) -> bool {
@@ -151,6 +289,12 @@ fn empty_category(value: &str) -> Option<EmptyCategory> {
         return Some(EmptyCategory::PaddingOnly);
     }
     None
+}
+
+fn clean_mdb_value(value: &str) -> String {
+    value
+        .trim_matches(|ch| ch == '\0' || char::is_whitespace(ch))
+        .to_string()
 }
 
 fn is_candidate_product(row: &SourceRow) -> bool {
@@ -237,7 +381,10 @@ fn find_value<'a>(row: &'a SourceRow, columns: &[&str]) -> Option<&'a str> {
 mod tests {
     use super::*;
     use crate::config::MappingConfig;
-    use crate::sanitization::profile::{RuleCondition, SanitizationRule, SanitizationSafety};
+    use crate::digiweb::payload::DigiwebPluPayload;
+    use crate::sanitization::profile::{
+        RuleCondition, SanitizationRule, SanitizationSafety, SellingDateTermRule,
+    };
     use crate::source::mapping::normalize_dataset;
     use crate::validation::validator::{valid_plu_candidates, validate_plus};
 
@@ -285,7 +432,21 @@ mod tests {
                     normalization: None,
                 },
             ],
+            selling_date_term: Some(SellingDateTermRule {
+                enabled: true,
+                allow_zero: true,
+                minimum: 1,
+                maximum: 999,
+                invalid_value: 0,
+                empty_value: 0,
+            }),
         }
+    }
+
+    fn profile_without_selling_date_rule() -> SanitizationProfile {
+        let mut profile = starsky_profile();
+        profile.selling_date_term = None;
+        profile
     }
 
     fn row(
@@ -309,8 +470,16 @@ mod tests {
                 ("Category".to_string(), "0".to_string()),
                 ("Flag Data".to_string(), "02".to_string()),
                 ("Main Group Code".to_string(), "997".to_string()),
+                ("Best Before".to_string(), "0".to_string()),
             ]),
         }
+    }
+
+    fn row_with_best_before(plu: &str, best_before: &str) -> SourceRow {
+        let mut row = row(plu, "1", plu, "05", "00", "Apples");
+        row.values
+            .insert("Best Before".to_string(), best_before.to_string());
+        row
     }
 
     #[test]
@@ -367,6 +536,254 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn selling_date_term_rule_normalizes_configured_values() {
+        for (raw, expected, changed, reason) in [
+            ("", "0", true, Some(SanitizedChangeReason::EmptyDefaulted)),
+            (
+                "   ",
+                "0",
+                true,
+                Some(SanitizedChangeReason::EmptyDefaulted),
+            ),
+            (
+                "\0\0",
+                "0",
+                true,
+                Some(SanitizedChangeReason::EmptyDefaulted),
+            ),
+            ("0", "0", false, None),
+            ("1", "1", false, None),
+            ("365", "365", false, None),
+            ("999", "999", false, None),
+            (
+                "1000",
+                "0",
+                true,
+                Some(SanitizedChangeReason::OutsideAllowedRange),
+            ),
+            (
+                "6851",
+                "0",
+                true,
+                Some(SanitizedChangeReason::OutsideAllowedRange),
+            ),
+            (
+                "-1",
+                "0",
+                true,
+                Some(SanitizedChangeReason::OutsideAllowedRange),
+            ),
+            (
+                "abc",
+                "0",
+                true,
+                Some(SanitizedChangeReason::MalformedValue),
+            ),
+            (
+                " 6851 ",
+                "0",
+                true,
+                Some(SanitizedChangeReason::OutsideAllowedRange),
+            ),
+        ] {
+            let dataset = SourceDataset {
+                plu_rows: vec![row_with_best_before("6252", raw)],
+                ingredient_rows: Vec::new(),
+                nutrition_rows: Vec::new(),
+            };
+
+            let sanitized = apply_profile(&dataset, &starsky_profile()).expect("sanitize");
+
+            assert_eq!(
+                sanitized.dataset.plu_rows[0]
+                    .values
+                    .get("Best Before")
+                    .map(String::as_str),
+                Some(expected),
+                "raw={raw:?}"
+            );
+            assert_eq!(
+                sanitized.report.changed_plus,
+                usize::from(changed),
+                "raw={raw:?}"
+            );
+            if let Some(reason) = reason {
+                let change = &sanitized.report.records[0].fields[0];
+                assert_eq!(change.field, "selling_date_term");
+                assert_eq!(change.original_value, raw);
+                assert_eq!(change.sanitized_value, expected);
+                assert_eq!(change.reason, reason);
+            }
+        }
+    }
+
+    #[test]
+    fn selling_date_term_rule_disabled_leaves_values_untouched() {
+        let dataset = SourceDataset {
+            plu_rows: vec![row_with_best_before("6252", "6851")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let sanitized =
+            apply_profile(&dataset, &profile_without_selling_date_rule()).expect("sanitize");
+
+        assert_eq!(
+            sanitized.dataset.plu_rows[0]
+                .values
+                .get("Best Before")
+                .map(String::as_str),
+            Some("6851")
+        );
+        assert_eq!(sanitized.report.changed_plus, 0);
+        assert!(sanitized.report.field_summaries.is_empty());
+    }
+
+    #[test]
+    fn selling_date_term_report_counts_invalid_nonempty_correction() {
+        let dataset = SourceDataset {
+            plu_rows: vec![
+                row_with_best_before("6251", "0"),
+                row_with_best_before("6252", "6851"),
+                row_with_best_before("6254", "30"),
+            ],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let sanitized = apply_profile(&dataset, &starsky_profile()).expect("sanitize");
+        let summary = sanitized
+            .report
+            .field_summaries
+            .get("selling_date_term")
+            .expect("summary");
+
+        assert_eq!(sanitized.report.changed_plus, 1);
+        assert_eq!(sanitized.report.nonempty_values_changed, 1);
+        assert_eq!(
+            sanitized.report.field_changes.get("selling_date_term"),
+            Some(&1)
+        );
+        assert_eq!(summary.changed, 1);
+        assert_eq!(summary.empty_defaulted, 0);
+        assert_eq!(summary.invalid_nonempty_corrected, 1);
+        assert_eq!(summary.valid_preserved, 2);
+        assert_eq!(
+            sanitized.report.records[0].fields[0].reason,
+            SanitizedChangeReason::OutsideAllowedRange
+        );
+    }
+
+    #[test]
+    fn selling_date_term_sanitization_keeps_original_dataset_unchanged() {
+        let dataset = SourceDataset {
+            plu_rows: vec![row_with_best_before("6252", "6851")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let sanitized = apply_profile(&dataset, &starsky_profile()).expect("sanitize");
+
+        assert_eq!(
+            dataset.plu_rows[0]
+                .values
+                .get("Best Before")
+                .map(String::as_str),
+            Some("6851")
+        );
+        assert_eq!(
+            sanitized.dataset.plu_rows[0]
+                .values
+                .get("Best Before")
+                .map(String::as_str),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn strict_validation_detects_invalid_selling_date_term_before_submission() {
+        let dataset = SourceDataset {
+            plu_rows: vec![row_with_best_before("6252", "6851")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let normalized =
+            normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let validation = validate_plus(&normalized.plus);
+        let valid = valid_plu_candidates(&normalized.plus, &validation);
+
+        assert!(valid.is_empty());
+        assert!(
+            validation.issues.iter().any(|issue| {
+                issue.plu_number == Some(6252) && issue.field == "selling_date_term"
+            })
+        );
+    }
+
+    #[test]
+    fn sanitized_validation_accepts_plu_6252_and_payload_uses_zero_selling_term() {
+        let dataset = SourceDataset {
+            plu_rows: vec![row_with_best_before("6252", "6851")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let sanitized = apply_profile(&dataset, &starsky_profile()).expect("sanitize");
+        let normalized =
+            normalize_dataset(&sanitized.dataset, &MappingConfig::default(), 1).expect("normalize");
+        let validation = validate_plus(&normalized.plus);
+        let valid = valid_plu_candidates(&normalized.plus, &validation);
+        let payload =
+            DigiwebPluPayload::from_plu(&valid[0], &crate::config::DigiwebConfig::default())
+                .expect("payload");
+        let json = serde_json::to_value(&payload).expect("json");
+
+        assert_eq!(valid.len(), 1);
+        assert_eq!(valid[0].plu_number, 6252);
+        assert_eq!(valid[0].selling_date_term, Some(0));
+        assert_eq!(
+            json.get("plusellingdateterm").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert_eq!(valid[0].selling_date_print, Some(0));
+        assert_eq!(valid[0].expiration_days, None);
+        assert_eq!(
+            json.get("plusellingdateprint").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert!(json.get("pluusingdateterm").is_none());
+    }
+
+    #[test]
+    fn existing_empty_group_department_barcode_and_print_rules_still_work() {
+        let mut source_row = row("6020", "", "", "", "", "Apples");
+        source_row
+            .values
+            .insert("Main Group Code".to_string(), String::new());
+        let dataset = SourceDataset {
+            plu_rows: vec![source_row],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let sanitized = apply_profile(&dataset, &starsky_profile()).expect("sanitize");
+        let values = &sanitized.dataset.plu_rows[0].values;
+        let normalized =
+            normalize_dataset(&sanitized.dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(values.get("Department").map(String::as_str), Some("1"));
+        assert_eq!(values.get("Barcode").map(String::as_str), Some("6020"));
+        assert_eq!(values.get("Barcode Format").map(String::as_str), Some("05"));
+        assert_eq!(
+            values.get("Print Format Code").map(String::as_str),
+            Some("00")
+        );
+        assert_eq!(normalized.plus[0].group_number, Some(997));
+        assert!(normalized.plus[0].group_default_applied);
     }
 
     #[test]

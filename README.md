@@ -48,9 +48,9 @@ to-digi-rs verify --sanitize-profile profiles/starsky.toml
 
 `verify` reads and validates the source, then authenticates to DIGIweb. It does not write PLUs and reports import readiness.
 
-`sanitize --profile PROFILE` is always offline. It previews configured fill-only changes, writes `sanitization-report.txt`, `sanitization-report.json`, and `sanitization-profile.snapshot.toml`, never authenticates, never contacts DIGIweb, and never modifies `plu.mdb`.
+`sanitize --profile PROFILE` is always offline. It previews configured in-memory profile changes, writes `sanitization-report.txt`, `sanitization-report.json`, and `sanitization-profile.snapshot.toml`, never authenticates, never contacts DIGIweb, and never modifies `plu.mdb`.
 
-`--sanitize-profile PROFILE` is explicit and optional for `analyze`, `verify`, and `import`. No profile means the existing strict behavior. Profiles can fill only configured empty fields in memory; they never replace nonempty source values and never delete PLUs. `import --resume` cannot be combined with `--sanitize-profile` because the recovery manifest uses the original profile snapshot.
+`--sanitize-profile PROFILE` is explicit and optional for `analyze`, `verify`, and `import`. No profile means the existing strict behavior. Profiles fill configured empty fields in memory and may include explicitly configured validation-range corrections such as Starsky Best Before normalization. They never delete PLUs. `import --resume` cannot be combined with `--sanitize-profile` because the recovery manifest uses the original profile snapshot.
 
 For one release, running with no command still honors the old `[import]` config booleans and logs a deprecation warning. New automation should use explicit commands.
 
@@ -108,7 +108,7 @@ The template lives in [deploy](deploy). It does not include a real `config.toml`
 
 ## Sanitization Profiles
 
-Profiles are TOML files under `profiles/`. Schema version 1 supports only fill-empty rules for `department`, `barcode`, `barcode_format`, and `print_format_code`. Actions are limited to `set_constant` and `copy_field` from approved source `plu_code` with `numeric_no_padding` normalization.
+Profiles are TOML files under `profiles/`. Schema version 1 supports fill-empty rules for `department`, `barcode`, `barcode_format`, and `print_format_code`. Actions are limited to `set_constant` and `copy_field` from approved source `plu_code` with `numeric_no_padding` normalization. Profiles may also explicitly enable a `selling_date_term` rule for source `Pludata."Best Before"` to normalize DIGIweb `plusellingdateterm`; this rule is disabled unless configured.
 
 Generic workflow:
 
@@ -129,7 +129,7 @@ Starsky workflow:
 ./import.sh import --sanitize-profile profiles/starsky.toml --limit 1
 ```
 
-Starsky rules fill empty Department with `1`, empty Barcode with the normalized PLU code, empty Barcode Format with `05`, and empty Print Format Code with `00`. These rules must not be reused for another customer unless their source-data rules have been confirmed. To create a new customer profile, copy `profiles/example.toml`, change `profile_name`, description, and constants, then run `sanitize` before any `verify` or `import`.
+Starsky rules fill empty Department with `1`, empty Barcode with the normalized PLU code, empty Barcode Format with `05`, and empty Print Format Code with `00`. The Starsky profile also explicitly treats Best Before `0` as disabled/default, preserves `1..999`, and replaces empty, malformed, negative, or greater-than-999 Best Before values with `0` before payload generation. This affects `plusellingdateterm`; `plusellingdateprint` and use-by fields keep their separate source mappings. These rules must not be reused for another customer unless their source-data rules have been confirmed. To create a new customer profile, copy `profiles/example.toml`, change `profile_name`, description, and constants, then run `sanitize` before any `verify` or `import`.
 
 ## Runner Rename
 

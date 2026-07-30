@@ -291,6 +291,19 @@ fn read_source_context(
             logger.line("Profile-provided values will be applied in memory.")?;
             logger.line("Source MDB will not be modified.")?;
             let sanitized = apply_profile(&dataset, &profile)?;
+            for record in &sanitized.report.records {
+                for field in &record.fields {
+                    if field.field == "selling_date_term" {
+                        logger.line(format!(
+                            "PLU {} selling-date term corrected by profile.",
+                            record.plu_number
+                        ))?;
+                        logger.kv("Original value", &field.original_value)?;
+                        logger.kv("Sanitized value", &field.sanitized_value)?;
+                        logger.kv("Reason", selling_date_reason_for_log(field.reason))?;
+                    }
+                }
+            }
             let normalization_report = normalize_dataset(
                 &sanitized.dataset,
                 &config.mapping,
@@ -714,8 +727,20 @@ fn print_sanitization_summary(report: &sanitization::SanitizationReport) {
     println!("Placeholder PLUs: {}", report.summary.placeholder_plus);
     println!();
     println!("Proposed changes:");
+    for (field, summary) in &report.field_summaries {
+        println!(
+            "- {}: {} changed, {} empty defaults, {} invalid nonempty corrected, {} valid preserved",
+            field,
+            summary.changed,
+            summary.empty_defaulted,
+            summary.invalid_nonempty_corrected,
+            summary.valid_preserved
+        );
+    }
     for (field, count) in &report.field_changes {
-        println!("- {}: {} PLUs", field, count);
+        if !report.field_summaries.contains_key(field) {
+            println!("- {}: {} PLUs", field, count);
+        }
     }
     println!();
     println!("Before sanitization:");
@@ -1125,4 +1150,16 @@ fn read_reference_tables(
 
 fn is_empty_placeholder_issue(issue: &validation::issue::ValidationIssue) -> bool {
     issue.plu_number == Some(0) && issue.message.contains("missing product name")
+}
+
+fn selling_date_reason_for_log(
+    reason: sanitization::engine::SanitizedChangeReason,
+) -> &'static str {
+    match reason {
+        sanitization::engine::SanitizedChangeReason::OutsideAllowedRange => {
+            "outside supported range 1..999"
+        }
+        sanitization::engine::SanitizedChangeReason::MalformedValue => "malformed numeric value",
+        sanitization::engine::SanitizedChangeReason::EmptyDefaulted => "empty or unspecified value",
+    }
 }

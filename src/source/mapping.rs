@@ -68,7 +68,8 @@ const SHORT_DESCRIPTION_COLUMNS: &[&str] = &[
 const KEY_LABEL_COLUMNS: &[&str] = &["KeyLabel", "ButtonLabel", "KeyName", "key_label"];
 const EXPIRATION_COLUMNS: &[&str] = &[
     "Use By Date",
-    "Best Before",
+    "USE BY DATE",
+    "USE_BY_DATE",
     "ExpirationDays",
     "UseByDays",
     "ShelfLife",
@@ -882,6 +883,13 @@ mod tests {
         }
     }
 
+    fn pludata_row_with_best_before(plucode: &str, best_before: &str) -> SourceRow {
+        let mut row = pludata_row(plucode, "0001", "Apples");
+        row.values
+            .insert("Best Before".to_string(), best_before.to_string());
+        row
+    }
+
     fn dca_pludata_row(
         plucode: &str,
         category: &str,
@@ -917,6 +925,37 @@ mod tests {
                 ("Calories".to_string(), "008".to_string()),
             ]),
         }
+    }
+
+    #[test]
+    fn best_before_maps_to_selling_date_term_only() {
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row_with_best_before("6252", "6851")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(report.plus[0].selling_date_term, Some(6851));
+        assert_eq!(report.plus[0].expiration_days, None);
+    }
+
+    #[test]
+    fn use_by_date_maps_to_using_date_term() {
+        let mut row = pludata_row("6254", "0001", "Apples");
+        row.values
+            .insert("USE BY DATE".to_string(), "30".to_string());
+        let dataset = SourceDataset {
+            plu_rows: vec![row],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(report.plus[0].selling_date_term, Some(0));
+        assert_eq!(report.plus[0].expiration_days, Some(30));
     }
 
     #[test]

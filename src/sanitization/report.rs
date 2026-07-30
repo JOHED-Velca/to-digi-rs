@@ -8,7 +8,9 @@ use sha2::{Digest, Sha256};
 
 use crate::error::AppError;
 use crate::recovery::SourceIdentity;
-use crate::sanitization::engine::{SanitizationEngineReport, SanitizedRecordChange};
+use crate::sanitization::engine::{
+    SanitizationEngineReport, SanitizedFieldSummary, SanitizedRecordChange,
+};
 use crate::sanitization::profile::SanitizationProfile;
 
 #[derive(Debug, Clone)]
@@ -82,6 +84,7 @@ pub struct SanitizationReport {
     pub profile: SanitizationProfileSummary,
     pub summary: SanitizationSummary,
     pub field_changes: BTreeMap<String, usize>,
+    pub field_summaries: BTreeMap<String, SanitizedFieldSummary>,
     pub records: Vec<SanitizedReportRecord>,
     pub safety: SanitizationSafetyReport,
 }
@@ -185,6 +188,7 @@ pub fn build_report(input: SanitizationReportInput<'_>) -> SanitizationReport {
             nonempty_values_changed: input.engine_report.nonempty_values_changed,
         },
         field_changes: input.engine_report.field_changes.clone(),
+        field_summaries: input.engine_report.field_summaries.clone(),
         records: input
             .engine_report
             .records
@@ -240,9 +244,20 @@ pub fn render_text_report(report: &SanitizationReport) -> String {
         report.summary.placeholder_plus
     ));
     lines.push(String::new());
-    lines.push("4. Missing-field summary".to_string());
+    lines.push("4. Sanitization field summary".to_string());
+    for (field, summary) in &report.field_summaries {
+        lines.push(format!(
+            "{field}: changed={}, empty defaults applied={}, invalid nonempty values corrected={}, valid preserved={}",
+            summary.changed,
+            summary.empty_defaulted,
+            summary.invalid_nonempty_corrected,
+            summary.valid_preserved
+        ));
+    }
     for (field, count) in &report.field_changes {
-        lines.push(format!("{field}: {count} empty value(s) would be filled"));
+        if !report.field_summaries.contains_key(field) {
+            lines.push(format!("{field}: {count} empty value(s) would be filled"));
+        }
     }
     lines.push(String::new());
     lines.push("5. Proposed changes".to_string());
@@ -250,7 +265,15 @@ pub fn render_text_report(report: &SanitizationReport) -> String {
         let fields = record
             .fields_changed
             .iter()
-            .map(|field| format!("{}={}", field.field, field.sanitized_value))
+            .map(|field| {
+                format!(
+                    "{}: {:?} -> {} ({})",
+                    field.field,
+                    field.original_value,
+                    field.sanitized_value,
+                    field.reason.as_str()
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
         lines.push(format!("PLU {}: {}", record.plu_number, fields));
@@ -353,7 +376,8 @@ pub fn snapshot_path_in_manifest_dir(manifest_path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::sanitization::engine::{
-        EmptyCategory, SanitizationEngineReport, SanitizedFieldChange, SanitizedRecordChange,
+        EmptyCategory, SanitizationEngineReport, SanitizedChangeReason, SanitizedFieldChange,
+        SanitizedFieldSummary, SanitizedRecordChange,
     };
     use crate::sanitization::profile::{
         RuleAction, RuleCondition, SanitizationRule, SanitizationSafety, TargetField,
@@ -377,6 +401,7 @@ mod tests {
                 source_field: None,
                 normalization: None,
             }],
+            selling_date_term: None,
         }
     }
 
@@ -406,13 +431,24 @@ mod tests {
                 placeholder_plus: 0,
                 nonempty_values_changed: 0,
                 field_changes: BTreeMap::from([("department".to_string(), 1)]),
+                field_summaries: BTreeMap::from([(
+                    "department".to_string(),
+                    SanitizedFieldSummary {
+                        changed: 1,
+                        empty_defaulted: 1,
+                        invalid_nonempty_corrected: 0,
+                        valid_preserved: 0,
+                    },
+                )]),
                 records: vec![SanitizedRecordChange {
                     plu_number: 1,
                     fields: vec![SanitizedFieldChange {
                         field: "department".to_string(),
+                        original_value: String::new(),
                         original_empty_category: EmptyCategory::EmptyString,
                         applied_rule: "set_constant".to_string(),
                         sanitized_value: "1".to_string(),
+                        reason: SanitizedChangeReason::EmptyDefaulted,
                     }],
                 }],
             },
