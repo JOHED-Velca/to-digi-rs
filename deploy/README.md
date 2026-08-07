@@ -27,6 +27,9 @@ Then edit `config.toml`, place `plu.mdb` beside `to-digi`, and run:
 ./to-digi doctor
 ./to-digi test-connection
 ./to-digi analyze
+./to-digi discover
+./to-digi map-audit
+./to-digi profile suggest --name bigway
 ./to-digi sanitize
 ./to-digi verify
 ./to-digi import
@@ -59,6 +62,9 @@ The bundle never includes a real `plu.mdb`, customer credentials, logs, manifest
 ./to-digi doctor [--pull]
 ./to-digi test-connection
 ./to-digi analyze [--raw]
+./to-digi discover [--timings]
+./to-digi map-audit [--sample N] [--plu PLU_NUMBER] [--timings]
+./to-digi profile suggest --name bigway
 ./to-digi sanitize
 ./to-digi verify
 ./to-digi import
@@ -94,6 +100,8 @@ Pull only the selected image:
 ```
 
 The launcher does not prune, stop, remove, or modify unrelated Docker resources.
+
+`discover`, `map-audit`, and `profile suggest` are offline-only diagnostics. They require `plu.mdb`, but not `config.toml` or credentials, and they do not authenticate, contact DIGIweb, submit PLUs, or modify the source MDB.
 
 ## Configuration
 
@@ -158,6 +166,9 @@ Each command gets a separate output directory:
 
 ```text
 output/run-20260722-143000-analyze/
+output/run-20260722-143500-discover/
+output/run-20260722-144000-map-audit/
+output/run-20260722-144200-profile/
 output/run-20260722-144500-sanitize/
 output/run-20260722-150500-import/
 output/run-20260722-151500-resume/

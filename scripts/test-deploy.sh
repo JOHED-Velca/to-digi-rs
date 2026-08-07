@@ -69,6 +69,19 @@ if [ "$#" -ge 1 ] && [ "$1" = "run" ]; then
             printf 'analysis-ok\n' >analysis-report.txt
             printf '{"schema_version":1}\n' >analysis-report.json
             ;;
+        *" discover "*)
+            printf 'discovery-ok\n' >discovery-report.txt
+            printf '{"schema_version":1}\n' >discovery-report.json
+            ;;
+        *" map-audit "*)
+            printf 'mapping-ok\n' >mapping-report.txt
+            printf '{"schema_version":1}\n' >mapping-report.json
+            ;;
+        *" profile suggest "*)
+            mkdir -p profiles
+            printf 'profile_version = 1\nprofile_name = "bigway"\n' >profiles/bigway.draft.toml
+            printf 'recommendations-ok\n' >profile-recommendations.txt
+            ;;
         *" sanitize "*)
             printf 'sanitize-ok\n' >sanitization-report.txt
             printf '{"schema_version":1}\n' >sanitization-report.json
@@ -204,6 +217,28 @@ test_profile_and_resume_paths_are_translated() {
     [ -f "$deploy_dir"/output/run-*-resume/import-results.snapshot.json ] || fail "resume snapshot was not archived"
 }
 
+test_offline_diagnostics_archive_reports_without_config() {
+    local deploy_dir="$TEST_ROOT/deploy-diagnostics"
+    local output="$TEST_ROOT/output-diagnostics.txt"
+    copy_deploy "$deploy_dir"
+    rm "$deploy_dir/config.toml"
+
+    run_with_fake_docker "$deploy_dir" "$output" discover
+    assert_contains "$TEST_ROOT/fake-docker.log" "discover"
+    [ -f "$deploy_dir"/output/run-*-discover/discovery-report.txt ] || fail "discovery report was not archived"
+    [ -f "$deploy_dir"/output/run-*-discover/discovery-report.json ] || fail "discovery JSON was not archived"
+
+    run_with_fake_docker "$deploy_dir" "$output" map-audit --sample 2 --plu 1
+    assert_contains "$TEST_ROOT/fake-docker.log" "map-audit --sample 2 --plu 1"
+    [ -f "$deploy_dir"/output/run-*-map-audit/mapping-report.txt ] || fail "mapping report was not archived"
+    [ -f "$deploy_dir"/output/run-*-map-audit/mapping-report.json ] || fail "mapping JSON was not archived"
+
+    run_with_fake_docker "$deploy_dir" "$output" profile suggest --name bigway
+    assert_contains "$TEST_ROOT/fake-docker.log" "profile suggest --name bigway"
+    [ -f "$deploy_dir"/profiles/bigway.draft.toml ] || fail "profile draft was not left in profiles/"
+    [ -f "$deploy_dir"/output/run-*-profile/profile-recommendations.txt ] || fail "profile recommendations were not archived"
+}
+
 test_doctor_checks_image_and_never_imports_data() {
     local deploy_dir="$TEST_ROOT/deploy-doctor"
     local output="$TEST_ROOT/output-doctor.txt"
@@ -274,6 +309,7 @@ test_launcher_archives_output_and_preserves_exit_code
 test_help_version_and_pull_do_not_require_config_or_plu
 test_missing_config_and_plu_fail_clearly
 test_profile_and_resume_paths_are_translated
+test_offline_diagnostics_archive_reports_without_config
 test_doctor_checks_image_and_never_imports_data
 test_wrappers_forward_to_to_digi
 test_package_archive_contains_expected_files_only

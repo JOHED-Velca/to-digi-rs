@@ -52,7 +52,7 @@ command_label() {
             fi
             ;;
         resume) printf 'resume\n' ;;
-        analyze|sanitize|verify|test-connection|doctor|pull|init|version) printf '%s\n' "$1" ;;
+        analyze|discover|map-audit|profile|sanitize|verify|test-connection|doctor|pull|init|version) printf '%s\n' "$1" ;;
         --help|-h|--version|-V) printf 'info\n' ;;
         *) printf 'cli\n' ;;
     esac
@@ -113,7 +113,7 @@ needs_config() {
 
 needs_source_mdb() {
     case "${1:-import}" in
-        import|resume|analyze|verify|sanitize|doctor) return 0 ;;
+        import|resume|analyze|discover|map-audit|profile|verify|sanitize|doctor) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -207,6 +207,11 @@ clean_transient_outputs() {
     rm -f "$SCRIPT_DIR/logs.txt" || fail "Unable to clean transient logs.txt before execution." 2
     rm -f "$SCRIPT_DIR/analysis-report.txt" || fail "Unable to clean transient analysis-report.txt before execution." 2
     rm -f "$SCRIPT_DIR/analysis-report.json" || fail "Unable to clean transient analysis-report.json before execution." 2
+    rm -f "$SCRIPT_DIR/discovery-report.txt" || fail "Unable to clean transient discovery-report.txt before execution." 2
+    rm -f "$SCRIPT_DIR/discovery-report.json" || fail "Unable to clean transient discovery-report.json before execution." 2
+    rm -f "$SCRIPT_DIR/mapping-report.txt" || fail "Unable to clean transient mapping-report.txt before execution." 2
+    rm -f "$SCRIPT_DIR/mapping-report.json" || fail "Unable to clean transient mapping-report.json before execution." 2
+    rm -f "$SCRIPT_DIR/profile-recommendations.txt" || fail "Unable to clean transient profile-recommendations.txt before execution." 2
     rm -f "$SCRIPT_DIR/sanitization-report.txt" || fail "Unable to clean transient sanitization-report.txt before execution." 2
     rm -f "$SCRIPT_DIR/sanitization-report.json" || fail "Unable to clean transient sanitization-report.json before execution." 2
     rm -f "$SCRIPT_DIR/sanitization-profile.snapshot.toml" || fail "Unable to clean transient sanitization-profile.snapshot.toml before execution." 2
@@ -232,6 +237,31 @@ archive_outputs() {
     if [ -f "$SCRIPT_DIR/analysis-report.json" ]; then
         mv "$SCRIPT_DIR/analysis-report.json" "$RUN_DIR/analysis-report.json" || warn "Could not archive analysis-report.json to $RUN_DIR"
         analysis_json_path="$RUN_DIR/analysis-report.json"
+    fi
+    local discovery_path=""
+    if [ -f "$SCRIPT_DIR/discovery-report.txt" ]; then
+        mv "$SCRIPT_DIR/discovery-report.txt" "$RUN_DIR/discovery-report.txt" || warn "Could not archive discovery-report.txt to $RUN_DIR"
+        discovery_path="$RUN_DIR/discovery-report.txt"
+    fi
+    local discovery_json_path=""
+    if [ -f "$SCRIPT_DIR/discovery-report.json" ]; then
+        mv "$SCRIPT_DIR/discovery-report.json" "$RUN_DIR/discovery-report.json" || warn "Could not archive discovery-report.json to $RUN_DIR"
+        discovery_json_path="$RUN_DIR/discovery-report.json"
+    fi
+    local mapping_path=""
+    if [ -f "$SCRIPT_DIR/mapping-report.txt" ]; then
+        mv "$SCRIPT_DIR/mapping-report.txt" "$RUN_DIR/mapping-report.txt" || warn "Could not archive mapping-report.txt to $RUN_DIR"
+        mapping_path="$RUN_DIR/mapping-report.txt"
+    fi
+    local mapping_json_path=""
+    if [ -f "$SCRIPT_DIR/mapping-report.json" ]; then
+        mv "$SCRIPT_DIR/mapping-report.json" "$RUN_DIR/mapping-report.json" || warn "Could not archive mapping-report.json to $RUN_DIR"
+        mapping_json_path="$RUN_DIR/mapping-report.json"
+    fi
+    local recommendations_path=""
+    if [ -f "$SCRIPT_DIR/profile-recommendations.txt" ]; then
+        mv "$SCRIPT_DIR/profile-recommendations.txt" "$RUN_DIR/profile-recommendations.txt" || warn "Could not archive profile-recommendations.txt to $RUN_DIR"
+        recommendations_path="$RUN_DIR/profile-recommendations.txt"
     fi
     local sanitization_path=""
     if [ -f "$SCRIPT_DIR/sanitization-report.txt" ]; then
@@ -281,6 +311,11 @@ archive_outputs() {
     fi
     [ -z "$analysis_path" ] || printf 'Text analysis report:\n%s\n' "$analysis_path"
     [ -z "$analysis_json_path" ] || printf 'JSON analysis report:\n%s\n' "$analysis_json_path"
+    [ -z "$discovery_path" ] || printf 'Text discovery report:\n%s\n' "$discovery_path"
+    [ -z "$discovery_json_path" ] || printf 'JSON discovery report:\n%s\n' "$discovery_json_path"
+    [ -z "$mapping_path" ] || printf 'Text mapping report:\n%s\n' "$mapping_path"
+    [ -z "$mapping_json_path" ] || printf 'JSON mapping report:\n%s\n' "$mapping_json_path"
+    [ -z "$recommendations_path" ] || printf 'Profile recommendations:\n%s\n' "$recommendations_path"
     [ -z "$sanitization_path" ] || printf 'Text sanitization report:\n%s\n' "$sanitization_path"
     [ -z "$sanitization_json_path" ] || printf 'JSON sanitization report:\n%s\n' "$sanitization_json_path"
     [ -z "$sanitization_snapshot_path" ] || printf 'Sanitization profile snapshot:\n%s\n' "$sanitization_snapshot_path"

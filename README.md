@@ -57,6 +57,9 @@ Then place the customer database in the same directory using the exact filename 
 ./to-digi doctor
 ./to-digi test-connection
 ./to-digi analyze
+./to-digi discover
+./to-digi map-audit
+./to-digi profile suggest --name bigway
 ./to-digi sanitize
 ./to-digi verify
 ./to-digi import
@@ -69,6 +72,9 @@ Then place the customer database in the same directory using the exact filename 
 ./to-digi doctor [--pull]
 ./to-digi test-connection
 ./to-digi analyze [--raw] [--profile starsky] [--sanitize-profile profiles/custom.toml]
+./to-digi discover [--timings]
+./to-digi map-audit [--sample N] [--plu PLU_NUMBER] [--timings]
+./to-digi profile suggest --name bigway
 ./to-digi sanitize [--profile starsky|profiles/custom.toml]
 ./to-digi verify [--profile starsky] [--sanitize-profile profiles/custom.toml]
 ./to-digi import [--limit N] [--test] [--continue-on-error]
@@ -78,6 +84,12 @@ Then place the customer database in the same directory using the exact filename 
 ```
 
 `import.sh` and `run.sh` remain compatibility wrappers around `to-digi`.
+
+`discover`, `map-audit`, and `profile suggest` are strictly offline diagnostics. They do not require `config.toml`, do not load credentials, do not authenticate, do not contact DIGIweb, do not submit PLUs, and do not modify `plu.mdb`.
+
+- `discover` writes `discovery-report.txt/json` with raw MDB field-quality, department/group reference, setup, sanitization-candidate, and timing details.
+- `map-audit` writes `mapping-report.txt/json` showing the current source-to-payload mappings, including ingredient versus nutrition separation and bounded payload metadata samples.
+- `profile suggest --name NAME` writes `profiles/NAME.draft.toml` and `profile-recommendations.txt` without overwriting an existing draft. Only deterministic safe findings become active rules; ambiguous findings stay as comments/recommendations.
 
 ## Profiles
 
@@ -142,7 +154,7 @@ output/run-20260722-150500-import/
 output/run-20260722-151500-resume/
 ```
 
-It archives logs, analysis reports, sanitization reports, profile snapshots, payload previews, manifests, and resume snapshots when present. Existing output and manifests are preserved.
+It archives logs, analysis reports, discovery reports, mapping reports, profile recommendations, sanitization reports, profile snapshots, payload previews, manifests, and resume snapshots when present. Existing output and manifests are preserved. Draft profiles remain under `profiles/` for review.
 
 Resume with:
 
@@ -170,6 +182,9 @@ On Ubuntu without Docker:
 ```bash
 sudo apt install mdbtools
 cargo run -- analyze --raw
+cargo run -- discover
+cargo run -- map-audit --sample 5
+cargo run -- profile suggest --name bigway
 cargo run -- test-connection
 ```
 

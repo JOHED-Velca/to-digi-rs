@@ -11,62 +11,66 @@ use crate::source::schema::MdbSchema;
 use crate::source::{SourceDataset, SourceRow};
 use crate::validation::issue::ValidationIssue;
 
-const PLU_NUMBER_COLUMNS: &[&str] = &["Plucode", "PLUNo", "PluNo", "PLU", "PLU_NO", "plu_number"];
-const DEPARTMENT_COLUMNS: &[&str] = &[
+pub(crate) const PLU_NUMBER_COLUMNS: &[&str] =
+    &["Plucode", "PLUNo", "PluNo", "PLU", "PLU_NO", "plu_number"];
+pub(crate) const DEPARTMENT_COLUMNS: &[&str] = &[
     "Department",
     "DeptNo",
     "DepartmentNo",
     "DEPT",
     "department_number",
 ];
-const GROUP_COLUMNS: &[&str] = &[
+pub(crate) const GROUP_COLUMNS: &[&str] = &[
     "Main Group Code",
     "GroupNo",
     "GrpNo",
     "GROUP",
     "group_number",
 ];
-const BARCODE_COLUMNS: &[&str] = &["Barcode", "BarCode", "JAN", "UPC", "barcode"];
-const BARCODE_FORMAT_COLUMNS: &[&str] = &["Barcode Format", "BARCODE_FORMAT", "BarcodeFormat"];
-const FLAG_DATA_COLUMNS: &[&str] = &["Flag Data", "FLAG DATA", "FLAG_DATA", "FlagData"];
-const NAME_COLUMNS: &[&str] = &["Name", "ProductName", "CommodityName", "PLUName", "name"];
-const NAME_LINE_COLUMNS: &[&str] = &["Name 1", "Name 2", "Name 3", "Name 4"];
-const PRICE_COLUMNS: &[&str] = &["Price", "UnitPrice", "SellPrice", "price"];
-const CATEGORY_COLUMNS: &[&str] = &["Category", "CATEGORY", "category"];
-const QUANTITY_COLUMNS: &[&str] = &["Quantity", "QUANTITY", "quantity"];
-const QUANTITY_SYMBOL_COLUMNS: &[&str] = &[
+pub(crate) const BARCODE_COLUMNS: &[&str] = &["Barcode", "BarCode", "JAN", "UPC", "barcode"];
+pub(crate) const BARCODE_FORMAT_COLUMNS: &[&str] =
+    &["Barcode Format", "BARCODE_FORMAT", "BarcodeFormat"];
+pub(crate) const FLAG_DATA_COLUMNS: &[&str] = &["Flag Data", "FLAG DATA", "FLAG_DATA", "FlagData"];
+pub(crate) const NAME_COLUMNS: &[&str] =
+    &["Name", "ProductName", "CommodityName", "PLUName", "name"];
+pub(crate) const NAME_LINE_COLUMNS: &[&str] = &["Name 1", "Name 2", "Name 3", "Name 4"];
+pub(crate) const PRICE_COLUMNS: &[&str] = &["Price", "UnitPrice", "SellPrice", "price"];
+pub(crate) const CATEGORY_COLUMNS: &[&str] = &["Category", "CATEGORY", "category"];
+pub(crate) const QUANTITY_COLUMNS: &[&str] = &["Quantity", "QUANTITY", "quantity"];
+pub(crate) const QUANTITY_SYMBOL_COLUMNS: &[&str] = &[
     "Quantity Symbol",
     "QUANTITY SYMBOL",
     "QuantitySymbol",
     "QUANTITY_SYMBOL",
     "quantity_symbol",
 ];
-const TARE_COLUMNS: &[&str] = &["TARE", "Tare", "tare"];
-const DISCOUNT_COLUMNS: &[&str] = &["DISCOUNT", "Discount", "discount"];
-const PACK_DATE_FLAG_COLUMNS: &[&str] = &["PACK DATE FLAG", "PACK_DATE_FLAG", "PackDateFlag"];
-const BEST_BEFORE_COLUMNS: &[&str] = &["BEST BEFORE", "BEST_BEFORE", "Best Before"];
-const BEST_BEFORE_FLAG_COLUMNS: &[&str] =
+pub(crate) const TARE_COLUMNS: &[&str] = &["TARE", "Tare", "tare"];
+pub(crate) const DISCOUNT_COLUMNS: &[&str] = &["DISCOUNT", "Discount", "discount"];
+pub(crate) const PACK_DATE_FLAG_COLUMNS: &[&str] =
+    &["PACK DATE FLAG", "PACK_DATE_FLAG", "PackDateFlag"];
+pub(crate) const BEST_BEFORE_COLUMNS: &[&str] = &["BEST BEFORE", "BEST_BEFORE", "Best Before"];
+pub(crate) const BEST_BEFORE_FLAG_COLUMNS: &[&str] =
     &["BEST BEFORE FLAG", "BEST_BEFORE_FLAG", "Best Before Flag"];
-const PRINT_FORMAT_COLUMNS: &[&str] = &[
+pub(crate) const PRINT_FORMAT_COLUMNS: &[&str] = &[
     "PRINT FORMAT CODE",
     "PRINT_FORMAT_CODE",
     "Print Format Code",
 ];
-const PRICE_MODE_COLUMNS: &[&str] = &[
+pub(crate) const PRICE_MODE_COLUMNS: &[&str] = &[
     "PriceMode",
     "Price Mode",
     "UnitPriceFlag",
     "SalesMode",
     "price_mode",
 ];
-const SHORT_DESCRIPTION_COLUMNS: &[&str] = &[
+pub(crate) const SHORT_DESCRIPTION_COLUMNS: &[&str] = &[
     "ShortDescription",
     "ShortDesc",
     "Description",
     "short_description",
 ];
-const KEY_LABEL_COLUMNS: &[&str] = &["KeyLabel", "ButtonLabel", "KeyName", "key_label"];
-const EXPIRATION_COLUMNS: &[&str] = &[
+pub(crate) const KEY_LABEL_COLUMNS: &[&str] = &["KeyLabel", "ButtonLabel", "KeyName", "key_label"];
+pub(crate) const EXPIRATION_COLUMNS: &[&str] = &[
     "Use By Date",
     "USE BY DATE",
     "USE_BY_DATE",
@@ -75,17 +79,17 @@ const EXPIRATION_COLUMNS: &[&str] = &[
     "ShelfLife",
     "expiration_days",
 ];
-const INGREDIENT_TEXT_COLUMNS: &[&str] = &[
+pub(crate) const INGREDIENT_TEXT_COLUMNS: &[&str] = &[
     "Ingredients",
     "Ingredient",
     "Text",
     "IngText",
     "ingredients",
 ];
-const NUTRITION_NAME_COLUMNS: &[&str] = &["Name", "Nutrient", "NutritionName", "name"];
-const NUTRITION_AMOUNT_COLUMNS: &[&str] = &["Amount", "Value", "Qty", "amount"];
-const NUTRITION_UNIT_COLUMNS: &[&str] = &["Unit", "Uom", "unit"];
-const PLUING_NUTRITION_COLUMNS: &[(&str, &str, Option<&str>)] = &[
+pub(crate) const NUTRITION_NAME_COLUMNS: &[&str] = &["Name", "Nutrient", "NutritionName", "name"];
+pub(crate) const NUTRITION_AMOUNT_COLUMNS: &[&str] = &["Amount", "Value", "Qty", "amount"];
+pub(crate) const NUTRITION_UNIT_COLUMNS: &[&str] = &["Unit", "Uom", "unit"];
+pub(crate) const PLUING_NUTRITION_COLUMNS: &[(&str, &str, Option<&str>)] = &[
     ("calories", "Calories", None),
     ("calories fat", "Calories From Fat", None),
     ("total fat", "Total Fat", Some("Percent Total Fat")),

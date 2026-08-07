@@ -3,10 +3,13 @@ mod cli;
 mod config;
 mod deployment;
 mod digiweb;
+mod discovery;
 mod error;
 mod import;
 mod logging;
+mod mapping_audit;
 mod models;
+mod profile_suggestion;
 mod recovery;
 mod sanitization;
 mod source;
@@ -27,10 +30,16 @@ use digiweb::auth::authenticate;
 use digiweb::client::DigiwebClient;
 use digiweb::payload::DigiwebPluPayload;
 use digiweb::preflight::collect_required_references;
+use discovery::{DiscoveryInput, PhaseTiming, render_discovery_console, write_discovery_reports};
 use error::AppError;
 use import::runner::{ImportRunOptions, run_import};
 use logging::{AuditLogger, FinalImportLog};
+use mapping_audit::{MappingAuditInput, render_mapping_console, write_mapping_reports};
 use models::plu::Plu;
+use profile_suggestion::{
+    ProfileSuggestionInput, render_profile_suggestion_console, suggest_profile,
+    write_profile_suggestion,
+};
 use recovery::validator::target_identity;
 use recovery::{DEFAULT_MANIFEST_PATH, SourceIdentity, sha256_file};
 use sanitization::{
@@ -78,7 +87,12 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
     let config_exists = config_path.exists();
     let config_not_required_for_dispatch = matches!(
         cli.command,
-        Some(CliCommand::Init(_)) | Some(CliCommand::Pull) | Some(CliCommand::Version)
+        Some(CliCommand::Discover(_))
+            | Some(CliCommand::Init(_))
+            | Some(CliCommand::MapAudit(_))
+            | Some(CliCommand::Profile(_))
+            | Some(CliCommand::Pull)
+            | Some(CliCommand::Version)
     );
     let config = if config_not_required_for_dispatch {
         AppConfig::default()
@@ -88,15 +102,22 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
     let command = effective_command(cli, &config);
     if matches!(
         command,
-        EffectiveCommand::Analyze { .. } | EffectiveCommand::Sanitize { .. }
+        EffectiveCommand::Analyze { .. }
+            | EffectiveCommand::Discover { .. }
+            | EffectiveCommand::MapAudit { .. }
+            | EffectiveCommand::ProfileSuggest { .. }
+            | EffectiveCommand::Sanitize { .. }
     ) && !config_exists
     {
-        logger.line("config.toml not found; using built-in analysis mapping defaults.")?;
+        logger.line("config.toml not found; using built-in offline mapping defaults.")?;
     }
     if !matches!(
         command,
         EffectiveCommand::Analyze { .. }
+            | EffectiveCommand::Discover { .. }
             | EffectiveCommand::Doctor { .. }
+            | EffectiveCommand::MapAudit { .. }
+            | EffectiveCommand::ProfileSuggest { .. }
             | EffectiveCommand::Sanitize { .. }
             | EffectiveCommand::Init { .. }
             | EffectiveCommand::Pull
@@ -114,6 +135,9 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
     if !matches!(
         command,
         EffectiveCommand::Analyze { .. }
+            | EffectiveCommand::Discover { .. }
+            | EffectiveCommand::MapAudit { .. }
+            | EffectiveCommand::ProfileSuggest { .. }
             | EffectiveCommand::Sanitize { .. }
             | EffectiveCommand::Init { .. }
             | EffectiveCommand::Pull
@@ -138,6 +162,7 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
         EffectiveCommand::Analyze {
             sanitize_profile, ..
         } => run_analyze(&config, logger, sanitize_profile.as_ref()),
+        EffectiveCommand::Discover { timings } => run_discover(&config, logger, timings),
         EffectiveCommand::Doctor {
             pull,
             inside_container,
@@ -182,6 +207,12 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
             logger.line("Pull command invoked inside importer; no Docker resources modified.")?;
             Ok(0)
         }
+        EffectiveCommand::ProfileSuggest { name } => run_profile_suggest(&config, logger, &name),
+        EffectiveCommand::MapAudit {
+            sample,
+            plu,
+            timings,
+        } => run_map_audit(&config, logger, sample, plu, timings),
         EffectiveCommand::Sanitize { profile, .. } => run_sanitize(&config, logger, &profile),
         EffectiveCommand::TestConnection => run_test_connection(&config, logger).await,
         EffectiveCommand::Verify { sanitize_profile } => {
@@ -213,6 +244,17 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
             if *raw {
                 logger.kv("Raw analysis requested", "yes")?;
             }
+        }
+        EffectiveCommand::Discover { timings } => {
+            logger.kv("Network access permitted", "no")?;
+            logger.kv("Authentication attempted", "NO")?;
+            logger.kv("DIGIweb API requests attempted", "NO")?;
+            logger.kv("Source database modified", "NO")?;
+            logger.kv("Profile applied", "NO")?;
+            logger.kv(
+                "Detailed timings requested",
+                if *timings { "yes" } else { "no" },
+            )?;
         }
         EffectiveCommand::Doctor {
             pull,
@@ -288,6 +330,32 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
         EffectiveCommand::Pull => {
             logger.kv("PLU write permitted", "no")?;
             logger.kv("Docker pull command", "launcher-handled")?;
+        }
+        EffectiveCommand::ProfileSuggest { name } => {
+            logger.kv("Network access permitted", "no")?;
+            logger.kv("Authentication attempted", "NO")?;
+            logger.kv("DIGIweb API requests attempted", "NO")?;
+            logger.kv("Source database modified", "NO")?;
+            logger.kv("Profile draft name", name)?;
+            logger.kv("Profile applied", "NO")?;
+        }
+        EffectiveCommand::MapAudit {
+            sample,
+            plu,
+            timings,
+        } => {
+            logger.kv("Network access permitted", "no")?;
+            logger.kv("Authentication attempted", "NO")?;
+            logger.kv("DIGIweb API requests attempted", "NO")?;
+            logger.kv("Source database modified", "NO")?;
+            logger.kv("Payload samples requested", &sample.to_string())?;
+            if let Some(plu) = plu {
+                logger.kv("PLU filter", &plu.to_string())?;
+            }
+            logger.kv(
+                "Detailed timings requested",
+                if *timings { "yes" } else { "no" },
+            )?;
         }
         EffectiveCommand::Sanitize { profile, dry_run } => {
             logger.kv("Network access permitted", "no")?;
@@ -699,6 +767,225 @@ fn run_analyze(
     );
     println!("Final status: {}", report.analysis_status.as_text());
     Ok(report.analysis_status.exit_code())
+}
+
+fn run_discover(
+    config: &AppConfig,
+    logger: &mut AuditLogger,
+    _timings_requested: bool,
+) -> Result<i32, AppError> {
+    println!("Starting customer MDB discovery...");
+    println!(
+        "Outputs will be written to discovery-report.txt, discovery-report.json, and logs.txt"
+    );
+    logger.line("CUSTOMER MDB DISCOVERY ONLY")?;
+    logger.line("Network access permitted: NO")?;
+    logger.line("Authentication attempted: NO")?;
+    logger.line("DIGIweb API requests attempted: NO")?;
+    logger.line("Source database modified: NO")?;
+    logger.line("Sanitization profile applied: NO")?;
+    let started_at = chrono::Local::now();
+    let total_started = Instant::now();
+    let source_started = Instant::now();
+    let source = read_source_context(config, logger, None)?;
+    let source_timing = PhaseTiming::from_duration("MDB source read", source_started.elapsed());
+    let report_started = Instant::now();
+    let finished_at = chrono::Local::now();
+    let mut timings = vec![source_timing];
+    timings.push(PhaseTiming::from_duration(
+        "Total before report write",
+        total_started.elapsed(),
+    ));
+    let mut report = discovery::build_discovery_report(DiscoveryInput {
+        command: "discover",
+        source_path: FIXED_SOURCE_FILE,
+        source_sha256: &source.source_identity.sha256,
+        started_at,
+        finished_at,
+        dataset: &source.dataset,
+        valid_plus: &source.valid_plus,
+        all_normalized_plus: &source.plus,
+        row_issues: &source.row_issues,
+        validation_report: &source.validation_report,
+        placeholder_ignored: source.placeholder_ignored,
+        reference_tables: &source.reference_tables,
+        timings,
+    });
+    report.timings.push(PhaseTiming::from_duration(
+        "Report generation",
+        report_started.elapsed(),
+    ));
+    write_discovery_reports(
+        Path::new("discovery-report.txt"),
+        Path::new("discovery-report.json"),
+        &report,
+    )?;
+    logger.kv("Text discovery report", "discovery-report.txt")?;
+    logger.kv("JSON discovery report", "discovery-report.json")?;
+    logger.line("Authentication attempted: NO")?;
+    logger.line("DIGIweb API requests attempted: NO")?;
+    logger.line("Source database modified: NO")?;
+    logger.line("PLUs submitted: 0")?;
+    logger.final_import_summary(FinalImportLog {
+        status: "SUCCESS",
+        source_discovered: source.dataset.plu_rows.len(),
+        placeholders_ignored: source.placeholder_ignored,
+        invalid_source_rows: source.invalid_source_rows,
+        validation_skipped: source.validation_skipped,
+        normalized: source.plus.len(),
+        valid: source.valid_plus.len(),
+        selected: 0,
+        submitted: 0,
+        succeeded: 0,
+        failed: 0,
+        unknown: 0,
+        not_attempted: 0,
+        intentionally_skipped_by_limit: 0,
+        successful_plu_numbers: &[],
+        failed_plu_numbers: &[],
+        unknown_plu_numbers: &[],
+        dry_run: true,
+    })?;
+    print!("{}", render_discovery_console(&report));
+    println!("Final status: SUCCESS");
+    Ok(0)
+}
+
+fn run_map_audit(
+    config: &AppConfig,
+    logger: &mut AuditLogger,
+    sample: usize,
+    plu: Option<u64>,
+    _timings_requested: bool,
+) -> Result<i32, AppError> {
+    println!("Starting source-to-DIGIweb mapping audit...");
+    println!("Outputs will be written to mapping-report.txt, mapping-report.json, and logs.txt");
+    logger.line("SOURCE TO DIGIWEB MAPPING AUDIT ONLY")?;
+    logger.line("Network access permitted: NO")?;
+    logger.line("Authentication attempted: NO")?;
+    logger.line("DIGIweb API requests attempted: NO")?;
+    logger.line("Source database modified: NO")?;
+    let started_at = chrono::Local::now();
+    let total_started = Instant::now();
+    let source_started = Instant::now();
+    let source = read_source_context(config, logger, None)?;
+    let finished_at = chrono::Local::now();
+    let timings = vec![
+        PhaseTiming::from_duration("MDB source read", source_started.elapsed()),
+        PhaseTiming::from_duration("Total before report write", total_started.elapsed()),
+    ];
+    let report = mapping_audit::build_mapping_audit_report(MappingAuditInput {
+        source_path: FIXED_SOURCE_FILE,
+        source_sha256: &source.source_identity.sha256,
+        started_at,
+        finished_at,
+        dataset: &source.dataset,
+        valid_plus: &source.valid_plus,
+        config: &config.digiweb,
+        sample_limit: sample,
+        target_plu: plu,
+        timings,
+    })?;
+    write_mapping_reports(
+        Path::new("mapping-report.txt"),
+        Path::new("mapping-report.json"),
+        &report,
+    )?;
+    logger.kv("Text mapping report", "mapping-report.txt")?;
+    logger.kv("JSON mapping report", "mapping-report.json")?;
+    logger.kv("Mapping audit status", report.status.as_text())?;
+    logger.line("Authentication attempted: NO")?;
+    logger.line("DIGIweb API requests attempted: NO")?;
+    logger.line("Source database modified: NO")?;
+    logger.line("PLUs submitted: 0")?;
+    logger.final_import_summary(FinalImportLog {
+        status: report.status.as_text(),
+        source_discovered: source.dataset.plu_rows.len(),
+        placeholders_ignored: source.placeholder_ignored,
+        invalid_source_rows: source.invalid_source_rows,
+        validation_skipped: source.validation_skipped,
+        normalized: source.plus.len(),
+        valid: source.valid_plus.len(),
+        selected: report.selected_plu_count,
+        submitted: 0,
+        succeeded: 0,
+        failed: 0,
+        unknown: 0,
+        not_attempted: 0,
+        intentionally_skipped_by_limit: 0,
+        successful_plu_numbers: &[],
+        failed_plu_numbers: &[],
+        unknown_plu_numbers: &[],
+        dry_run: true,
+    })?;
+    print!("{}", render_mapping_console(&report));
+    println!("Final status: {}", report.status.as_text());
+    Ok(report.status.exit_code())
+}
+
+fn run_profile_suggest(
+    config: &AppConfig,
+    logger: &mut AuditLogger,
+    name: &str,
+) -> Result<i32, AppError> {
+    println!("Starting profile suggestion...");
+    println!(
+        "Outputs will be written to profiles/<name>.draft.toml, profile-recommendations.txt, and logs.txt"
+    );
+    logger.line("PROFILE SUGGESTION ONLY")?;
+    logger.line("Network access permitted: NO")?;
+    logger.line("Authentication attempted: NO")?;
+    logger.line("DIGIweb API requests attempted: NO")?;
+    logger.line("Source database modified: NO")?;
+    logger.line("Sanitization profile applied: NO")?;
+    let started_at = chrono::Local::now();
+    let total_started = Instant::now();
+    let source_started = Instant::now();
+    let source = read_source_context(config, logger, None)?;
+    let finished_at = chrono::Local::now();
+    let timings = vec![
+        PhaseTiming::from_duration("MDB source read", source_started.elapsed()),
+        PhaseTiming::from_duration("Total before report write", total_started.elapsed()),
+    ];
+    let report = suggest_profile(ProfileSuggestionInput {
+        profile_name: name,
+        source_path: FIXED_SOURCE_FILE,
+        source_sha256: &source.source_identity.sha256,
+        started_at,
+        finished_at,
+        dataset: &source.dataset,
+        timings,
+    })?;
+    write_profile_suggestion(&report)?;
+    logger.kv("Draft profile", &report.draft_path)?;
+    logger.kv("Profile recommendations", &report.recommendations_path)?;
+    logger.line("Authentication attempted: NO")?;
+    logger.line("DIGIweb API requests attempted: NO")?;
+    logger.line("Source database modified: NO")?;
+    logger.line("PLUs submitted: 0")?;
+    logger.final_import_summary(FinalImportLog {
+        status: "SUCCESS",
+        source_discovered: source.dataset.plu_rows.len(),
+        placeholders_ignored: source.placeholder_ignored,
+        invalid_source_rows: source.invalid_source_rows,
+        validation_skipped: source.validation_skipped,
+        normalized: source.plus.len(),
+        valid: source.valid_plus.len(),
+        selected: 0,
+        submitted: 0,
+        succeeded: 0,
+        failed: 0,
+        unknown: 0,
+        not_attempted: 0,
+        intentionally_skipped_by_limit: 0,
+        successful_plu_numbers: &[],
+        failed_plu_numbers: &[],
+        unknown_plu_numbers: &[],
+        dry_run: true,
+    })?;
+    print!("{}", render_profile_suggestion_console(&report));
+    println!("Final status: SUCCESS");
+    Ok(0)
 }
 
 fn run_sanitize(

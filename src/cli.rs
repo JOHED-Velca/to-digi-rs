@@ -15,6 +15,8 @@ pub struct Cli {
 pub enum CliCommand {
     /// Analyze plu.mdb without contacting DIGIweb
     Analyze(AnalyzeArgs),
+    /// Discover raw MDB structure and data quality without profile or network access
+    Discover(DiscoverArgs),
     /// Check deployment readiness without importing PLUs
     Doctor(DoctorArgs),
     /// Initialize a deployment directory with launchers and templates
@@ -23,8 +25,12 @@ pub enum CliCommand {
     Import(ImportArgs),
     /// Pull the configured Docker image when using generated launchers
     Pull,
+    /// Profile utility commands
+    Profile(ProfileArgs),
     /// Resume a previous import manifest
     Resume(ResumeArgs),
+    /// Audit source-to-DIGIweb field mapping without submitting PLUs
+    MapAudit(MapAuditArgs),
     /// Preview profile-driven sanitization without contacting DIGIweb
     Sanitize(SanitizeArgs),
     /// Test DIGIweb authentication and connectivity
@@ -46,6 +52,26 @@ pub struct AnalyzeArgs {
     /// Analyze the raw source without any default deployment profile
     #[arg(long, conflicts_with_all = ["sanitize_profile", "profile"])]
     pub raw: bool,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct DiscoverArgs {
+    /// Include detailed phase timing in the report
+    #[arg(long)]
+    pub timings: bool,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct MapAuditArgs {
+    /// Number of payload samples to include
+    #[arg(long, default_value_t = crate::mapping_audit::default_sample_limit())]
+    pub sample: usize,
+    /// Audit one PLU number
+    #[arg(long)]
+    pub plu: Option<u64>,
+    /// Include detailed phase timing in the report
+    #[arg(long)]
+    pub timings: bool,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
@@ -94,6 +120,25 @@ pub struct ImportArgs {
     /// Apply a built-in profile such as starsky before import
     #[arg(long, value_name = "NAME", conflicts_with_all = ["resume", "sanitize_profile"])]
     pub profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct ProfileArgs {
+    #[command(subcommand)]
+    pub command: ProfileCommand,
+}
+
+#[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
+pub enum ProfileCommand {
+    /// Suggest a draft profile from deterministic source findings
+    Suggest(ProfileSuggestArgs),
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct ProfileSuggestArgs {
+    /// Draft profile name. The file is written as profiles/<name>.draft.toml.
+    #[arg(long)]
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
@@ -172,6 +217,9 @@ pub enum EffectiveCommand {
         sanitize_profile: Option<ProfileSelection>,
         raw: bool,
     },
+    Discover {
+        timings: bool,
+    },
     Doctor {
         pull: bool,
         inside_container: bool,
@@ -191,6 +239,14 @@ pub enum EffectiveCommand {
         sanitize_profile: Option<ProfileSelection>,
     },
     Pull,
+    ProfileSuggest {
+        name: String,
+    },
+    MapAudit {
+        sample: usize,
+        plu: Option<u64>,
+        timings: bool,
+    },
     Sanitize {
         profile: ProfileSelection,
         dry_run: bool,
@@ -206,10 +262,13 @@ impl EffectiveCommand {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Analyze { .. } => "analyze",
+            Self::Discover { .. } => "discover",
             Self::Doctor { .. } => "doctor",
             Self::Init { .. } => "init",
             Self::Import { .. } => "import",
             Self::Pull => "pull",
+            Self::ProfileSuggest { .. } => "profile suggest",
+            Self::MapAudit { .. } => "map-audit",
             Self::Sanitize { .. } => "sanitize",
             Self::TestConnection => "test-connection",
             Self::Verify { .. } => "verify",
@@ -221,8 +280,11 @@ impl EffectiveCommand {
         match self {
             Self::Analyze { legacy_used, .. } => *legacy_used,
             Self::Import { legacy_used, .. } => *legacy_used,
-            Self::Doctor { .. }
+            Self::Discover { .. }
+            | Self::Doctor { .. }
             | Self::Init { .. }
+            | Self::MapAudit { .. }
+            | Self::ProfileSuggest { .. }
             | Self::Pull
             | Self::Sanitize { .. }
             | Self::TestConnection
@@ -243,6 +305,9 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
                 config,
             ),
             raw: args.raw,
+        },
+        Some(CliCommand::Discover(args)) => EffectiveCommand::Discover {
+            timings: args.timings,
         },
         Some(CliCommand::Doctor(args)) => EffectiveCommand::Doctor {
             pull: args.pull,
@@ -273,6 +338,16 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
             ),
         },
         Some(CliCommand::Pull) => EffectiveCommand::Pull,
+        Some(CliCommand::Profile(args)) => match &args.command {
+            ProfileCommand::Suggest(suggest) => EffectiveCommand::ProfileSuggest {
+                name: suggest.name.clone(),
+            },
+        },
+        Some(CliCommand::MapAudit(args)) => EffectiveCommand::MapAudit {
+            sample: args.sample,
+            plu: args.plu,
+            timings: args.timings,
+        },
         Some(CliCommand::Resume(args)) => EffectiveCommand::Import {
             limit: None,
             continue_on_error: args.continue_on_error,
@@ -407,6 +482,10 @@ mod tests {
             Some(CliCommand::Analyze(_))
         ));
         assert!(matches!(
+            parse(&["to-digi-rs", "discover"]).command,
+            Some(CliCommand::Discover(_))
+        ));
+        assert!(matches!(
             parse(&["to-digi-rs", "doctor"]).command,
             Some(CliCommand::Doctor(_))
         ));
@@ -421,6 +500,14 @@ mod tests {
         assert!(matches!(
             parse(&["to-digi-rs", "pull"]).command,
             Some(CliCommand::Pull)
+        ));
+        assert!(matches!(
+            parse(&["to-digi-rs", "map-audit"]).command,
+            Some(CliCommand::MapAudit(_))
+        ));
+        assert!(matches!(
+            parse(&["to-digi-rs", "profile", "suggest", "--name", "bigway"]).command,
+            Some(CliCommand::Profile(_))
         ));
         assert!(matches!(
             parse(&["to-digi-rs", "resume", "output/run/import-results.json"]).command,
@@ -575,10 +662,13 @@ mod tests {
     fn help_includes_all_commands_and_version_is_current() {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("analyze"));
+        assert!(help.contains("discover"));
         assert!(help.contains("doctor"));
         assert!(help.contains("init"));
         assert!(help.contains("import"));
         assert!(help.contains("pull"));
+        assert!(help.contains("map-audit"));
+        assert!(help.contains("profile"));
         assert!(help.contains("resume"));
         assert!(help.contains("sanitize"));
         assert!(help.contains("test-connection"));
@@ -735,6 +825,37 @@ mod tests {
                 legacy_used: false,
                 sanitize_profile: None,
                 raw: true,
+            }
+        );
+    }
+
+    #[test]
+    fn offline_diagnostics_parse_effectively_without_profiles() {
+        assert_eq!(
+            effective_command(
+                &parse(&["to-digi-rs", "discover", "--timings"]),
+                &AppConfig::default()
+            ),
+            EffectiveCommand::Discover { timings: true }
+        );
+        assert_eq!(
+            effective_command(
+                &parse(&["to-digi-rs", "map-audit", "--sample", "2", "--plu", "42"]),
+                &AppConfig::default()
+            ),
+            EffectiveCommand::MapAudit {
+                sample: 2,
+                plu: Some(42),
+                timings: false,
+            }
+        );
+        assert_eq!(
+            effective_command(
+                &parse(&["to-digi-rs", "profile", "suggest", "--name", "bigway"]),
+                &AppConfig::default()
+            ),
+            EffectiveCommand::ProfileSuggest {
+                name: "bigway".to_string(),
             }
         );
     }
