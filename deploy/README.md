@@ -1,262 +1,188 @@
 # to-digi-rs Deployment Bundle
 
-This directory is the portable customer deployment template for `to-digi-rs` v0.8.0.
+This directory is the portable customer deployment template for `to-digi-rs` v0.9.0.
 
-## Quick Deployment
+## Preferred Setup
 
-1. Download and extract `to-digi-rs-deploy-v0.8.0.tar.gz`.
-2. Place the customer Access database beside `import.sh` using the exact filename `plu.mdb`.
-3. Run `./import.sh analyze` before configuring DIGIweb credentials.
-4. Copy `config.example.toml` to `config.toml`.
-5. Fill in the customer-specific DIGIweb values in `config.toml`.
-6. Log in to GHCR once if the package is private.
-7. Run `./import.sh verify`, then one of the import commands below.
-8. Read the printed output path under `output/run-...-COMMAND/`.
+New deployments no longer require cloning the repository or manually downloading scripts. Initialize an empty host directory from the Docker image:
 
 ```bash
-./import.sh analyze
-./import.sh sanitize --profile profiles/starsky.toml
-./import.sh analyze --sanitize-profile profiles/starsky.toml
-./import.sh import --test
-./import.sh import --limit 10
-./import.sh import --sanitize-profile profiles/starsky.toml --limit 1
-./import.sh import --continue-on-error
-./import.sh import --resume output/run-YYYYMMDD-HHMMSS-import/import-results.json
-./import.sh test-connection
-./import.sh verify --sanitize-profile profiles/starsky.toml
+mkdir -p ~/digi
+cd ~/digi
+
+docker login ghcr.io
+docker pull ghcr.io/johed-velca/to-digi-rs:0.9.0
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src="$PWD",dst=/work \
+  --workdir /work \
+  ghcr.io/johed-velca/to-digi-rs:0.9.0 \
+  init
 ```
 
-Prepared runtime directory:
+Then edit `config.toml`, place `plu.mdb` beside `to-digi`, and run:
+
+```bash
+./to-digi doctor
+./to-digi test-connection
+./to-digi analyze
+./to-digi sanitize
+./to-digi verify
+./to-digi import
+```
+
+## Files
 
 ```text
 to-digi-rs-deploy/
-|-- compose.yaml
+|-- to-digi
 |-- import.sh
 |-- run.sh
+|-- compose.yaml
+|-- config.example.toml
+|-- config.toml
 |-- profiles/
 |   |-- example.toml
 |   `-- starsky.toml
-|-- config.toml
-|-- plu.mdb
 `-- output/
 ```
 
-The release bundle ships `config.example.toml`, not a real `config.toml`, and it never includes a real MDB, credentials, tokens, logs, manifests, analysis reports, or payload previews.
+`to-digi` is the primary launcher. `import.sh` and `run.sh` are compatibility wrappers that forward to `to-digi`.
 
-## Runner Rename
+The bundle never includes a real `plu.mdb`, customer credentials, logs, manifests, analysis reports, sanitization reports, or payload previews.
 
-`run.sh` was renamed to `import.sh` in v0.5.1. New installations should use `import.sh`.
-
-For this patch release, `run.sh` remains as a small compatibility wrapper. It prints a deprecation notice, forwards all arguments to `import.sh`, and preserves the exit code.
-
-## First Customer-Installation Command
-
-Use analysis as the first source-prerequisite check:
+## Launcher Commands
 
 ```bash
-cp CUSTOMER_DATABASE.mdb plu.mdb
-./import.sh analyze
+./to-digi pull
+./to-digi doctor [--pull]
+./to-digi test-connection
+./to-digi analyze [--raw]
+./to-digi sanitize
+./to-digi verify
+./to-digi import
+./to-digi import --limit 1
+./to-digi import --continue-on-error
+./to-digi resume output/run-YYYYMMDD-HHMMSS-import/import-results.json
+./to-digi resume output/run-YYYYMMDD-HHMMSS-import/import-results.json --retry-failed
+./to-digi version
 ```
 
-`analyze` does not require `config.toml`, `DIGIWEB_CLIENT_SECRET`, working DIGIweb URLs, or network access. If `config.toml` is absent, the importer logs that it is using the built-in `Pludata` and `PluIng` mapping defaults.
+The launcher:
 
-The terminal summary prints the required departments and groups directly. Review both reports for audit detail and automation:
+- Resolves its own directory, including paths with spaces.
+- Bind-mounts that directory to `/work`.
+- Runs the container as the invoking UID/GID.
+- Uses host networking for local-network DIGIweb access on Linux.
+- Prints the selected image and command.
+- Preserves the importer exit code.
+- Archives outputs under `output/run-...-COMMAND/`.
+- Never prints secrets.
+
+Override the image without editing files:
+
+```bash
+TO_DIGI_RS_IMAGE=to-digi-rs:0.9.0 ./to-digi analyze
+```
+
+Pull only the selected image:
+
+```bash
+./to-digi pull
+./to-digi doctor --pull
+```
+
+The launcher does not prune, stop, remove, or modify unrelated Docker resources.
+
+## Configuration
+
+Generated `config.toml` is intentionally small:
+
+```toml
+[digiweb]
+base_url = "https://CHANGE_ME"
+client_secret = "CHANGE_ME"
+store_number = 1
+allow_invalid_certificates = true
+
+[profiles]
+default = "starsky"
+```
+
+Existing full `v0.8.0` configs continue to parse. Defaults are supplied for client id, token path, PLU write path, request-status path, timeouts, mapping table names, and payload previews. `token_url` may be omitted, absolute, or a relative path resolved against `base_url`.
+
+Configuration precedence:
+
+1. Safe explicit CLI options
+2. Environment variables
+3. `config.toml`
+4. Built-in defaults
+
+Supported environment overrides:
 
 ```text
-analysis-report.txt
-analysis-report.json
+TO_DIGI_RS_BASE_URL
+TO_DIGI_RS_CLIENT_SECRET
+TO_DIGI_RS_CLIENT_SECRET_FILE
+TO_DIGI_RS_STORE_NUMBER
+TO_DIGI_RS_ALLOW_INVALID_CERTIFICATES
+TO_DIGI_RS_DEFAULT_PROFILE
+TO_DIGI_RS_IMAGE
 ```
 
-Then continue:
+`DIGIWEB_CLIENT_SECRET` is accepted for compatibility. Command-line secrets are discouraged because they can enter shell history or process listings.
+
+## Profiles
+
+Initialized Starsky deployments use the Starsky profile automatically through `[profiles].default = "starsky"`.
+
+Profile precedence:
+
+1. `--sanitize-profile profiles/custom.toml`
+2. `--profile starsky`
+3. `[profiles].default`
+4. No profile, where supported
+
+Use raw analysis when needed:
 
 ```bash
-cp config.example.toml config.toml
-# edit config.toml and export DIGIWEB_CLIENT_SECRET when ready
-./import.sh verify
-./import.sh import --limit 1
-./import.sh import
+./to-digi analyze --raw
 ```
 
-## Commands
+The built-in Starsky profile matches `profiles/starsky.toml`. It preserves Best Before values `1..999`, leaves `0` disabled/default, and converts empty, malformed, negative, or greater-than-999 values to `0`.
 
-`analyze` reads and validates `plu.mdb`, writes `analysis-report.txt` and `analysis-report.json`, and does not authenticate or contact DIGIweb.
+## Output
 
-`import` is the only command that writes PLUs to DIGIweb. `--test` imports the first valid normalized PLU. `--limit N` imports the first `N` valid normalized PLUs. `--continue-on-error` keeps submitting later selected PLUs after a record failure or unknown status. A `401 Unauthorized` during PLU submission or request-status polling triggers bounded access-token refresh and retry. If authentication cannot be restored, the import stops regardless of `--continue-on-error`, preserves the recovery manifest, and leaves later PLUs not attempted. Every real import creates `import-results.json` before authentication or PLU submission.
-
-`import --resume MANIFEST` resumes a specific previous run. The manifest controls PLU selection, so do not combine resume with `--limit` or `--test`. `--retry-failed` is valid only with resume and retries only confirmed `FAILED` records.
-
-`test-connection` authenticates only. It does not require `plu.mdb` and does not submit PLUs.
-
-`verify` reads the source and authenticates, but does not write PLUs.
-
-`sanitize --profile PROFILE` is always a preview command. It reads the exact `plu.mdb`, applies configured profile changes in memory, writes sanitization reports, and never authenticates, contacts DIGIweb, submits PLUs, or modifies the MDB.
-
-`--sanitize-profile PROFILE` is available for `analyze`, `verify`, and `import`. No profile means the existing strict behavior. Profiles must be selected explicitly and must live inside the deployment directory. `import --resume` cannot be combined with `--sanitize-profile`; resume uses the profile snapshot recorded by the original manifest.
-
-For one release, running `./import.sh` with no command still honors the old `[import]` config booleans and logs a deprecation warning. New scripts should use explicit commands.
-
-## Sanitization Profiles
-
-Profiles are versioned TOML files. Schema version 1 supports fill-empty rules for `department`, `barcode`, `barcode_format`, and `print_format_code`. Supported actions are `set_constant` and `copy_field` from `plu_code` with `numeric_no_padding`. Profiles can also explicitly enable a `selling_date_term` rule for source `Pludata."Best Before"` to normalize DIGIweb `plusellingdateterm`; this rule is disabled unless configured. Profiles cannot delete PLUs, run scripts, interpolate environment variables, or store secrets.
-
-Generic workflow:
-
-```bash
-./import.sh sanitize --profile profiles/example.toml
-./import.sh analyze --sanitize-profile profiles/example.toml
-./import.sh verify --sanitize-profile profiles/example.toml
-./import.sh import --sanitize-profile profiles/example.toml --limit 1
-./import.sh import --sanitize-profile profiles/example.toml
-```
-
-Starsky workflow:
-
-```bash
-./import.sh sanitize --profile profiles/starsky.toml
-./import.sh analyze --sanitize-profile profiles/starsky.toml
-./import.sh verify --sanitize-profile profiles/starsky.toml
-./import.sh import --sanitize-profile profiles/starsky.toml --limit 1
-```
-
-The Starsky profile fills empty Department with `1`, empty Barcode with the normalized PLU code, empty Barcode Format with `05`, and empty Print Format Code with `00`. It also treats Best Before `0` as disabled/default, preserves `1..999`, and replaces empty, malformed, negative, or greater-than-999 Best Before values with `0` before payload generation. This affects `plusellingdateterm`; Best Before print flags and use-by fields keep their separate source mappings. Do not reuse Starsky rules for another customer unless their source-data rules have been confirmed. To create another profile, copy `profiles/example.toml`, choose a new `profile_name`, adjust constants, and run `sanitize` first.
-
-## GHCR Login
-
-If the image is private, authenticate the Ubuntu VM to GitHub Container Registry with a token that has only the access needed to pull the package, such as `read:packages`.
-
-```bash
-read -rsp "GitHub package token: " GHCR_TOKEN
-echo
-printf '%s' "$GHCR_TOKEN" |
-    docker login ghcr.io \
-        --username JOHED-Velca \
-        --password-stdin
-unset GHCR_TOKEN
-```
-
-Do not paste the token into `config.toml`, `import.sh`, shell history, or any repository file. Docker stores the login for later pulls.
-
-## Image Selection
-
-The default image is:
+Each command gets a separate output directory:
 
 ```text
-ghcr.io/johed-velca/to-digi-rs:0.8.0
+output/run-20260722-143000-analyze/
+output/run-20260722-144500-sanitize/
+output/run-20260722-150500-import/
+output/run-20260722-151500-resume/
 ```
 
-For local testing or an offline customer VM, load or build a local image and override the image name without editing `compose.yaml`:
-
-```bash
-TO_DIGI_RS_IMAGE=to-digi-rs:0.8.0 ./import.sh analyze
-```
-
-Offline transfer example:
-
-```bash
-docker save to-digi-rs:0.8.0 -o to-digi-rs-image-0.8.0.tar
-docker load -i to-digi-rs-image-0.8.0.tar
-TO_DIGI_RS_IMAGE=to-digi-rs:0.8.0 ./import.sh import --test
-```
-
-## Output Locations
-
-Each run gets a new timestamped, command-suffixed directory:
-
-```text
-output/
-|-- run-20260722-143000-analyze/
-|   |-- logs.txt
-|   |-- analysis-report.txt
-|   `-- analysis-report.json
-|-- run-20260722-144500-sanitize/
-|   |-- logs.txt
-|   |-- sanitization-report.txt
-|   |-- sanitization-report.json
-|   `-- sanitization-profile.snapshot.toml
-`-- run-20260722-150500-import/
-    |-- logs.txt
-    |-- import-results.json
-    |-- sanitization-profile.snapshot.toml
-    `-- payload-previews/
-`-- run-20260722-151500-resume/
-    |-- logs.txt
-    `-- import-results.snapshot.json
-```
-
-Previous output is preserved. The script only removes transient root-level `logs.txt`, reports, profile snapshots, and `payload-previews/` before starting the next run. It does not remove previous manifests.
-
-## Analysis Statuses
-
-```text
-PASS = source analyzed successfully with no warnings
-PASS_WITH_WARNINGS = source analyzed successfully, but nonblocking issues need review
-FAIL = source, schema, extraction, or validation problems prevent safe analysis
-```
-
-Warnings exit `0`; `FAIL` exits `2`.
-
-The JSON report is intended for automation. It includes `schema_version`, `application_version`, source summary, table summaries, department requirements, group requirements, barcode-format summaries, price-category summaries, PluIng/ingredient/nutrition summaries, structured warnings, blocking errors, recommendations, and safety confirmations.
-
-`analyze` checks source prerequisites only. It does not confirm that departments or groups exist in DIGIweb. `verify` adds DIGIweb authentication/readiness checks without writing PLUs. `import` writes valid PLUs.
-
-## Recovery And Resume
-
-When an import is interrupted or incomplete, use the printed manifest path:
-
-```bash
-./import.sh import --resume output/run-20260724-143000-import/import-results.json
-```
-
-Retry confirmed failed records only:
-
-```bash
-./import.sh import --resume output/run-20260724-143000-import/import-results.json --retry-failed
-```
-
-`UNKNOWN_STATUS` and `AMBIGUOUS_SUBMISSION` records are never automatically resent. Known request ids are polled first. Only `NOT_ATTEMPTED` records are submitted during ordinary resume.
-
-Resume validates the current `plu.mdb` size and SHA-256, the DIGIweb base URL, store number, client id, selected normalized PLUs, and canonical payload hashes before authentication. If anything changed, resume is cancelled and no API request is sent.
-
-For sanitized imports, resume also validates the stored `sanitization-profile.snapshot.toml` and its SHA-256 before authentication. The original external profile path is not required.
-
-Manifest updates are atomic and protected by an exclusive file lock. A previous valid manifest is preserved as `import-results.json.bak`. A resume run writes a new `logs.txt` under `output/run-...-resume/` and copies the final manifest state to `import-results.snapshot.json`.
-
-Do not edit `import-results.json` manually. Copy it for inspection or transport, but leave the original manifest unchanged for resume.
-
-## Exit Codes
-
-`import.sh` exits with the importer/container exit code.
-
-```text
-0 = complete success
-1 = import completed but one or more submitted records failed or have unknown status
-2 = startup, configuration, source parsing, or validation failure
-3 = authentication or DIGIweb connection failure
-4 = unexpected internal failure
-```
+The launcher preserves previous output and only removes transient root-level reports before the next run.
 
 ## Troubleshooting
 
-`Docker not installed`: install Docker Engine on the Ubuntu VM.
+`import.sh not found after docker pull`: run the image `init` command. Pulling an image does not create host files.
 
-`Docker daemon is not reachable`: start Docker or add the invoking user to the Docker group, then open a new shell.
+`Docker not installed`: install Docker Engine or use Docker Desktop with WSL 2.
 
-`Docker Compose plugin is not available`: install the modern `docker compose` plugin. The old `docker-compose` command is not used.
+`Docker daemon is not reachable`: start Docker or add the invoking user to the Docker group.
 
-`Image pull denied`: log in to GHCR with a package token that has `read:packages`, or use the offline `docker load` fallback.
+`Image pull denied`: authenticate with `docker login ghcr.io`.
 
-`Missing config.toml`: copy `config.example.toml` to `config.toml` and fill in the customer values. `analyze`, `--help`, and `--version` do not require this file.
+`Missing config.toml`: run `./to-digi init` or copy `config.example.toml` to `config.toml`.
 
-`Missing plu.mdb`: place the source database beside `import.sh` using the exact lowercase filename `plu.mdb`. `test-connection`, `--help`, and `--version` do not require the database.
+`Missing plu.mdb`: place the customer Access database beside `to-digi` using the exact lowercase filename `plu.mdb`.
 
-`Invalid sanitization profile path`: place profiles under the deployment directory, normally under `profiles/`. Symlinks, directories, traversal outside the deployment directory, and outside absolute paths are rejected.
+`Invalid profile path`: keep external profiles inside the deployment directory. Symlinks and outside paths are rejected.
 
-`plu.mdb is a symbolic link`: replace it with a regular file. The importer rejects symlinked databases.
+`Root-owned files`: run Docker init and `./to-digi` as the intended Linux user, not root.
 
-`Root-owned output`: run `./import.sh` as the intended Linux user. The script passes the invoking UID/GID into Compose so new files are not owned by root.
+`TLS failure`: verify the customer certificate or set `allow_invalid_certificates = true` only when required.
 
-`DIGIweb connection failure`: verify `base_url`, `token_url`, network access from the Ubuntu host, and certificate settings.
-
-`Self-signed certificate`: set `allow_invalid_certificates = true` only when required. The importer logs a prominent warning when certificate validation is disabled.
-
-`Nonzero importer exit code`: open the printed `logs.txt` path and inspect the final status section.
+`Silent output`: v0.9.0 commands print start lines, output locations, and final status. Inspect the archived `logs.txt` for details.

@@ -1,6 +1,7 @@
 mod analysis;
 mod cli;
 mod config;
+mod deployment;
 mod digiweb;
 mod error;
 mod import;
@@ -19,8 +20,9 @@ use analysis::{
     AnalysisInput, collect_analysis, render_console_summary, write_json_report, write_text_report,
 };
 use clap::Parser;
-use cli::{Cli, EffectiveCommand, effective_command};
+use cli::{Cli, CliCommand, EffectiveCommand, ProfileSelection, effective_command};
 use config::{AppConfig, client_secret_log_message, load_client_secret};
+use deployment::{run_doctor, run_init};
 use digiweb::auth::authenticate;
 use digiweb::client::DigiwebClient;
 use digiweb::payload::DigiwebPluPayload;
@@ -62,6 +64,10 @@ async fn run(cli: &Cli, logger: &mut AuditLogger) -> i32 {
         Err(err) => {
             let _ = logger.error(err.to_string());
             let _ = logger.final_failure(err.stage(), &err.to_string(), true);
+            eprintln!("Result: FAIL");
+            eprintln!("Stage: {}", err.stage());
+            eprintln!("Reason: {err}");
+            eprintln!("Exit code: {}", err.exit_code());
             err.exit_code()
         }
     }
@@ -70,7 +76,15 @@ async fn run(cli: &Cli, logger: &mut AuditLogger) -> i32 {
 async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError> {
     let config_path = Path::new("config.toml");
     let config_exists = config_path.exists();
-    let config = AppConfig::load(config_path)?;
+    let config_not_required_for_dispatch = matches!(
+        cli.command,
+        Some(CliCommand::Init(_)) | Some(CliCommand::Pull) | Some(CliCommand::Version)
+    );
+    let config = if config_not_required_for_dispatch {
+        AppConfig::default()
+    } else {
+        AppConfig::load(config_path)?
+    };
     let command = effective_command(cli, &config);
     if matches!(
         command,
@@ -81,7 +95,12 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
     }
     if !matches!(
         command,
-        EffectiveCommand::Analyze { .. } | EffectiveCommand::Sanitize { .. }
+        EffectiveCommand::Analyze { .. }
+            | EffectiveCommand::Doctor { .. }
+            | EffectiveCommand::Sanitize { .. }
+            | EffectiveCommand::Init { .. }
+            | EffectiveCommand::Pull
+            | EffectiveCommand::Version
     ) {
         if !config_exists {
             return Err(AppError::Config(format!(
@@ -94,7 +113,11 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
     log_command(&command, logger)?;
     if !matches!(
         command,
-        EffectiveCommand::Analyze { .. } | EffectiveCommand::Sanitize { .. }
+        EffectiveCommand::Analyze { .. }
+            | EffectiveCommand::Sanitize { .. }
+            | EffectiveCommand::Init { .. }
+            | EffectiveCommand::Pull
+            | EffectiveCommand::Version
     ) {
         logger.kv("DIGIweb target URL", &config.digiweb.base_url)?;
         if config.digiweb.allow_invalid_certificates {
@@ -107,14 +130,28 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
         }
     }
 
-    if command.uses_legacy_config() {
-        logger.warning("Legacy [import] behavior flags are deprecated and will be removed in a future release. Use CLI commands and flags instead.")?;
+    if command.uses_legacy_config() || config.deprecated_command_selector_flags_present() {
+        logger.warning("Legacy [import] command-selector flags are deprecated and will be removed in a future release. Use CLI commands and flags instead.")?;
     }
 
     match command {
         EffectiveCommand::Analyze {
             sanitize_profile, ..
-        } => run_analyze(&config, logger, sanitize_profile.as_deref()),
+        } => run_analyze(&config, logger, sanitize_profile.as_ref()),
+        EffectiveCommand::Doctor {
+            pull,
+            inside_container,
+            sanitize_profile,
+        } => run_doctor(
+            &config,
+            pull,
+            inside_container,
+            sanitize_profile.as_ref(),
+            logger,
+        ),
+        EffectiveCommand::Init {
+            refresh_generated_files,
+        } => run_init(refresh_generated_files, logger),
         EffectiveCommand::Import {
             limit,
             continue_on_error,
@@ -131,15 +168,29 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
                 test_mode,
                 resume.as_deref(),
                 retry_failed,
-                sanitize_profile.as_deref(),
+                sanitize_profile.as_ref(),
                 logger,
             )
             .await
         }
+        EffectiveCommand::Pull => {
+            println!("Pull is handled by the generated ./to-digi launcher.");
+            println!(
+                "For direct Docker use, run: docker pull {}",
+                deployment::default_image_reference()
+            );
+            logger.line("Pull command invoked inside importer; no Docker resources modified.")?;
+            Ok(0)
+        }
         EffectiveCommand::Sanitize { profile, .. } => run_sanitize(&config, logger, &profile),
         EffectiveCommand::TestConnection => run_test_connection(&config, logger).await,
         EffectiveCommand::Verify { sanitize_profile } => {
-            run_verify(&config, logger, sanitize_profile.as_deref()).await
+            run_verify(&config, logger, sanitize_profile.as_ref()).await
+        }
+        EffectiveCommand::Version => {
+            println!("to-digi-rs {}", env!("CARGO_PKG_VERSION"));
+            logger.kv("Application version", env!("CARGO_PKG_VERSION"))?;
+            Ok(0)
         }
     }
 }
@@ -148,15 +199,48 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
     logger.kv("Command", command.name())?;
     match command {
         EffectiveCommand::Analyze {
-            sanitize_profile, ..
+            sanitize_profile,
+            raw,
+            ..
         } => {
             logger.kv("Network access permitted", "no")?;
             logger.kv("Authentication attempted", "NO")?;
             logger.kv("DIGIweb API requests attempted", "NO")?;
             logger.kv("Source database modified", "NO")?;
             if let Some(path) = sanitize_profile {
-                logger.kv("Sanitization profile", &path.display().to_string())?;
+                logger.kv("Sanitization profile", &path.display())?;
             }
+            if *raw {
+                logger.kv("Raw analysis requested", "yes")?;
+            }
+        }
+        EffectiveCommand::Doctor {
+            pull,
+            inside_container,
+            sanitize_profile,
+        } => {
+            logger.kv("PLU write permitted", "no")?;
+            logger.kv("Docker pull requested", if *pull { "yes" } else { "no" })?;
+            logger.kv(
+                "Inside container",
+                if *inside_container { "yes" } else { "no" },
+            )?;
+            if let Some(profile) = sanitize_profile {
+                logger.kv("Sanitization profile", &profile.display())?;
+            }
+        }
+        EffectiveCommand::Init {
+            refresh_generated_files,
+        } => {
+            logger.kv("PLU write permitted", "no")?;
+            logger.kv(
+                "Refresh generated files",
+                if *refresh_generated_files {
+                    "yes"
+                } else {
+                    "no"
+                },
+            )?;
         }
         EffectiveCommand::Import {
             limit,
@@ -190,7 +274,7 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
                 )?;
             }
             if let Some(path) = sanitize_profile {
-                logger.kv("Sanitization profile", &path.display().to_string())?;
+                logger.kv("Sanitization profile", &path.display())?;
             }
             logger.kv(
                 "Continue on error",
@@ -201,12 +285,16 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
                 if *legacy_used { "yes" } else { "no" },
             )?;
         }
+        EffectiveCommand::Pull => {
+            logger.kv("PLU write permitted", "no")?;
+            logger.kv("Docker pull command", "launcher-handled")?;
+        }
         EffectiveCommand::Sanitize { profile, dry_run } => {
             logger.kv("Network access permitted", "no")?;
             logger.kv("Authentication attempted", "NO")?;
             logger.kv("DIGIweb API requests attempted", "NO")?;
             logger.kv("Source database modified", "NO")?;
-            logger.kv("Sanitization profile", &profile.display().to_string())?;
+            logger.kv("Sanitization profile", &profile.display())?;
             logger.kv("Dry run", if *dry_run { "true" } else { "implicit" })?;
         }
         EffectiveCommand::TestConnection => {
@@ -215,8 +303,11 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
         EffectiveCommand::Verify { sanitize_profile } => {
             logger.kv("PLU write permitted", "no")?;
             if let Some(path) = sanitize_profile {
-                logger.kv("Sanitization profile", &path.display().to_string())?;
+                logger.kv("Sanitization profile", &path.display())?;
             }
+        }
+        EffectiveCommand::Version => {
+            logger.kv("PLU write permitted", "no")?;
         }
     }
     Ok(())
@@ -560,8 +651,10 @@ fn read_source_context(
 fn run_analyze(
     config: &AppConfig,
     logger: &mut AuditLogger,
-    sanitize_profile_path: Option<&Path>,
+    sanitize_profile_path: Option<&ProfileSelection>,
 ) -> Result<i32, AppError> {
+    println!("Starting analysis...");
+    println!("Outputs will be written to analysis-report.txt, analysis-report.json, and logs.txt");
     logger.line("ANALYSIS ONLY")?;
     logger.line("Network access permitted: NO")?;
     logger.line("Authentication attempted: NO")?;
@@ -604,20 +697,25 @@ fn run_analyze(
         "{}",
         render_console_summary(&report, "./analysis-report.txt", "./analysis-report.json")
     );
+    println!("Final status: {}", report.analysis_status.as_text());
     Ok(report.analysis_status.exit_code())
 }
 
 fn run_sanitize(
     config: &AppConfig,
     logger: &mut AuditLogger,
-    profile_path: &Path,
+    profile_selection: &ProfileSelection,
 ) -> Result<i32, AppError> {
+    println!("Starting sanitization preview...");
+    println!(
+        "Outputs will be written to sanitization-report.txt, sanitization-report.json, and logs.txt"
+    );
     logger.line("SANITIZATION PREVIEW")?;
     logger.line("Network access permitted: NO")?;
     logger.line("Authentication attempted: NO")?;
     logger.line("DIGIweb API requests attempted: NO")?;
     logger.line("Source database modified: NO")?;
-    let profile = load_profile_from_safe_path(profile_path)?;
+    let profile = load_sanitization_profile(profile_selection)?;
     let source = read_source_context(config, logger, Some(profile))?;
     let sanitization = source.sanitization.as_ref().ok_or_else(|| {
         AppError::Internal("sanitize command did not produce a sanitization report".to_string())
@@ -648,22 +746,31 @@ fn run_sanitize(
         "sanitization-profile.snapshot.toml",
     )?;
     print_sanitization_summary(&report);
-    Ok(if report.summary.still_invalid_plus == 0 {
+    let exit_code = if report.summary.still_invalid_plus == 0 {
         0
     } else {
         1
-    })
+    };
+    println!(
+        "Final status: {}",
+        if exit_code == 0 {
+            "PASS"
+        } else {
+            "PASS_WITH_WARNINGS"
+        }
+    );
+    Ok(exit_code)
 }
 
 fn load_optional_sanitization_profile(
-    path: Option<&Path>,
+    path: Option<&ProfileSelection>,
 ) -> Result<Option<SanitizationProfile>, AppError> {
-    path.map(load_profile_from_safe_path).transpose()
+    path.map(load_sanitization_profile).transpose()
 }
 
 fn profile_for_import_or_resume(
     resume_manifest: Option<&Path>,
-    sanitize_profile_path: Option<&Path>,
+    sanitize_profile_path: Option<&ProfileSelection>,
 ) -> Result<Option<SanitizationProfile>, AppError> {
     if let Some(path) = resume_manifest {
         if sanitize_profile_path.is_some() {
@@ -714,6 +821,30 @@ fn profile_for_import_or_resume(
     } else {
         load_optional_sanitization_profile(sanitize_profile_path)
     }
+}
+
+fn load_sanitization_profile(
+    selection: &ProfileSelection,
+) -> Result<SanitizationProfile, AppError> {
+    match selection {
+        ProfileSelection::External(path) => load_profile_from_safe_path(path),
+        ProfileSelection::BuiltIn(name) => load_builtin_profile(name),
+    }
+}
+
+fn load_builtin_profile(name: &str) -> Result<SanitizationProfile, AppError> {
+    let contents = match name {
+        "starsky" => include_str!("../profiles/starsky.toml"),
+        other => {
+            return Err(AppError::Config(format!(
+                "unknown built-in sanitization profile '{other}'"
+            )));
+        }
+    };
+    let profile: SanitizationProfile = toml::from_str(contents)
+        .map_err(|err| AppError::Config(format!("invalid built-in profile '{name}': {err}")))?;
+    profile.validate()?;
+    Ok(profile)
 }
 
 fn print_sanitization_summary(report: &sanitization::SanitizationReport) {
@@ -844,9 +975,11 @@ async fn run_import_command(
     test_mode: bool,
     resume_manifest: Option<&Path>,
     retry_failed: bool,
-    sanitize_profile_path: Option<&Path>,
+    sanitize_profile_path: Option<&ProfileSelection>,
     logger: &mut AuditLogger,
 ) -> Result<i32, AppError> {
+    println!("Starting import...");
+    println!("Outputs will be written under output/ when launched with ./to-digi.");
     let profile = profile_for_import_or_resume(resume_manifest, sanitize_profile_path)?;
     let source = read_source_context(config, logger, profile)?;
     if source.valid_plus.is_empty() {
@@ -959,6 +1092,7 @@ async fn run_import_command(
         unknown_plu_numbers: &unknown_plu_numbers,
         dry_run: false,
     })?;
+    println!("Final status: {}", final_status.as_str());
     Ok(final_status.exit_code())
 }
 
@@ -966,29 +1100,47 @@ async fn run_test_connection(
     config: &AppConfig,
     logger: &mut AuditLogger,
 ) -> Result<i32, AppError> {
+    println!("Testing DIGIweb connection...");
+    println!("Target: {}", config.digiweb.base_url);
+    println!("Authentication attempt started");
+    println!("Outputs will be written to logs.txt");
     validate_connection_urls(config)?;
     let client_secret = load_client_secret(config)?;
     logger.kv(
         "Client secret",
-        client_secret_log_message(config, std::env::var("DIGIWEB_CLIENT_SECRET").is_ok()),
+        client_secret_log_message(config, environment_secret_present()),
     )?;
     let started = Instant::now();
     let client = DigiwebClient::new(config.clone())?;
-    authenticate(client.http(), config, &client_secret).await?;
+    match authenticate(client.http(), config, &client_secret).await {
+        Ok(_) => {
+            println!("Authentication: SUCCESS");
+        }
+        Err(err) => {
+            println!("Authentication: FAILED");
+            println!("Reason: {}", err);
+            println!("Result: FAIL");
+            return Err(err);
+        }
+    }
     logger.line("DIGIweb connection test: SUCCESS")?;
     logger.kv("Base URL reachable", "yes")?;
     logger.kv("Authentication successful", "yes")?;
     logger.line("No PLU data was submitted.")?;
     logger.kv("Elapsed ms", &started.elapsed().as_millis().to_string())?;
     logger.flush()?;
+    println!("DIGIweb connectivity: SUCCESS");
+    println!("Result: PASS");
     Ok(0)
 }
 
 async fn run_verify(
     config: &AppConfig,
     logger: &mut AuditLogger,
-    sanitize_profile_path: Option<&Path>,
+    sanitize_profile_path: Option<&ProfileSelection>,
 ) -> Result<i32, AppError> {
+    println!("Starting import readiness verification...");
+    println!("Outputs will be written to logs.txt");
     logger.line("Verify scope: import-readiness verification only; no source-versus-DIGIweb post-import comparison is attempted.")?;
     let profile = load_optional_sanitization_profile(sanitize_profile_path)?;
     let source = read_source_context(config, logger, profile)?;
@@ -1001,7 +1153,7 @@ async fn run_verify(
     let client_secret = load_client_secret(config)?;
     logger.kv(
         "Client secret",
-        client_secret_log_message(config, std::env::var("DIGIWEB_CLIENT_SECRET").is_ok()),
+        client_secret_log_message(config, environment_secret_present()),
     )?;
     let client = DigiwebClient::new(config.clone())?;
     authenticate(client.http(), config, &client_secret).await?;
@@ -1041,15 +1193,36 @@ async fn run_verify(
         },
     )?;
     logger.flush()?;
-    Ok(if source.valid_plus.is_empty() { 2 } else { 0 })
+    let exit_code = if source.valid_plus.is_empty() { 2 } else { 0 };
+    println!(
+        "Final status: {}",
+        if exit_code == 0 { "READY" } else { "NOT_READY" }
+    );
+    Ok(exit_code)
 }
 
 fn validate_connection_urls(config: &AppConfig) -> Result<(), AppError> {
     reqwest::Url::parse(&config.digiweb.base_url)
         .map_err(|err| AppError::Config(format!("invalid digiweb.base_url: {err}")))?;
-    reqwest::Url::parse(config.token_url()?)
+    let token_url = config.token_url()?;
+    reqwest::Url::parse(&token_url)
         .map_err(|err| AppError::Config(format!("invalid digiweb.token_url: {err}")))?;
     Ok(())
+}
+
+fn environment_secret_present() -> bool {
+    std::env::var("TO_DIGI_RS_CLIENT_SECRET")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .is_some()
+        || std::env::var("DIGIWEB_CLIENT_SECRET")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .is_some()
+        || std::env::var("TO_DIGI_RS_CLIENT_SECRET_FILE")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .is_some()
 }
 
 fn manifest_path_from_environment(resume_manifest: Option<&Path>) -> Result<PathBuf, AppError> {

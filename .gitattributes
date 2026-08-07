@@ -1,0 +1,4 @@
+*.sh text eol=lf
+deploy/to-digi text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf

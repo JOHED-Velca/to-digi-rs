@@ -209,7 +209,7 @@ pub async fn run_import(
     let client_secret = load_client_secret(&config)?;
     logger.kv(
         "Client secret",
-        client_secret_log_message(&config, std::env::var("DIGIWEB_CLIENT_SECRET").is_ok()),
+        client_secret_log_message(&config, environment_secret_present()),
     )?;
     let mut auth_session = AuthSession::start(client.http(), &config, client_secret).await?;
     logger.kv("Authentication result", "SUCCESS")?;
@@ -354,6 +354,21 @@ pub async fn run_import(
         manifest.summary.not_attempted
     );
     Ok(summary_from_manifest(&manifest, plus.len()))
+}
+
+fn environment_secret_present() -> bool {
+    std::env::var("TO_DIGI_RS_CLIENT_SECRET")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .is_some()
+        || std::env::var("DIGIWEB_CLIENT_SECRET")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .is_some()
+        || std::env::var("TO_DIGI_RS_CLIENT_SECRET_FILE")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .is_some()
 }
 
 fn persist_interrupted_manifest(
@@ -1081,6 +1096,7 @@ mod tests {
             },
             import: crate::config::ImportConfig::default(),
             mapping: crate::config::MappingConfig::default(),
+            profiles: crate::config::ProfileConfig::default(),
         }
     }
 

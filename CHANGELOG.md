@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.9.0
+
+- Added `to-digi-rs init` to generate a complete deployment directory from the Docker image
+- Added the primary `./to-digi` launcher with direct `docker run` execution
+- Kept `import.sh` and `run.sh` as compatibility wrappers
+- Added `doctor`, `pull`, `resume`, and `version` command paths for deployment use
+- Added built-in Starsky profile selection and deployment default profile support
+- Added `analyze --raw` for explicit unsanitized analysis
+- Added minimal generated configuration with documented defaults
+- Added relative token URL resolution against `base_url`
+- Added `TO_DIGI_RS_*` environment overrides and client-secret file support
+- Improved visible console output for connection checks and command results
+- Embedded deployment assets in the binary so init does not require a cloned repository
+- Updated deployment packaging and LF shell-script normalization
+
 ## v0.8.0
 
 - Added profile-driven PLU sanitization

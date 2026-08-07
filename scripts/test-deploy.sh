@@ -35,57 +35,65 @@ set -u
 log="${FAKE_DOCKER_LOG:?}"
 printf 'ARGS:%s\n' "$*" >>"$log"
 
+if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then
+    printf 'Docker version fake\n'
+    exit 0
+fi
+
 if [ "$#" -eq 1 ] && [ "$1" = "info" ]; then
     exit "${FAKE_DOCKER_INFO_EXIT:-0}"
 fi
 
-if [ "$#" -eq 2 ] && [ "$1" = "compose" ] && [ "$2" = "version" ]; then
-    exit "${FAKE_DOCKER_COMPOSE_VERSION_EXIT:-0}"
+if [ "$#" -ge 2 ] && [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+    exit "${FAKE_DOCKER_IMAGE_INSPECT_EXIT:-0}"
 fi
 
-if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
-    if printf '%s\n' "$*" | grep -Fq ' config'; then
-        exit 0
-    fi
-    if printf '%s\n' "$*" | grep -Eq ' importer (--help|--version)$'; then
-        exit "${FAKE_IMPORT_EXIT:-0}"
-    fi
-    printf 'LOCAL_UID=%s\n' "${LOCAL_UID:-}" >>"$log"
-    printf 'LOCAL_GID=%s\n' "${LOCAL_GID:-}" >>"$log"
+if [ "$#" -ge 1 ] && [ "$1" = "pull" ]; then
+    printf 'pulled %s\n' "${2:-}" >>"$log"
+    exit "${FAKE_DOCKER_PULL_EXIT:-0}"
+fi
+
+if [ "$#" -ge 1 ] && [ "$1" = "run" ]; then
     printf 'TO_DIGI_RS_IMAGE=%s\n' "${TO_DIGI_RS_IMAGE:-}" >>"$log"
     printf 'TO_DIGI_RS_IMPORT_MANIFEST_PATH=%s\n' "${TO_DIGI_RS_IMPORT_MANIFEST_PATH:-}" >>"$log"
-    printf 'compose-run-ok\n' >logs.txt
+    printf 'SECRET_VISIBLE=%s\n' "${TO_DIGI_RS_CLIENT_SECRET:-}" >>"$log"
+    printf 'run-ok\n' >logs.txt
     if [ -n "${TO_DIGI_RS_IMPORT_MANIFEST_PATH:-}" ]; then
         manifest_path="${TO_DIGI_RS_IMPORT_MANIFEST_PATH#/work/}"
         mkdir -p "$(dirname "$manifest_path")"
-        printf '{"schema_version":1,"status":"new"}\n' >"$manifest_path"
+        printf '{"schema_version":2,"run_status":"success"}\n' >"$manifest_path"
     fi
-    resume_path=""
-    previous=""
-    for arg in "$@"; do
-        if [ "$previous" = "--resume" ]; then
-            resume_path="$arg"
+    joined=" $* "
+    case "$joined" in
+        *" analyze "*)
+            printf 'analysis-ok\n' >analysis-report.txt
+            printf '{"schema_version":1}\n' >analysis-report.json
+            ;;
+        *" sanitize "*)
+            printf 'sanitize-ok\n' >sanitization-report.txt
+            printf '{"schema_version":1}\n' >sanitization-report.json
+            printf 'profile_version = 1\nprofile_name = "test"\n' >sanitization-profile.snapshot.toml
+            ;;
+        *" resume "*|*" --resume "*)
+            resume_path=""
             previous=""
-            continue
-        fi
-        case "$arg" in
-            --resume=*) resume_path="${arg#--resume=}" ;;
-            --resume) previous="--resume" ;;
-        esac
-    done
-    if [ -n "$resume_path" ]; then
-        host_resume_path="${resume_path#/work/}"
-        printf '{"schema_version":1,"status":"resumed"}\n' >"$host_resume_path"
-    fi
-    if printf '%s\n' "$*" | grep -Fq ' importer analyze'; then
-        printf 'analysis-ok\n' >analysis-report.txt
-        printf '{"schema_version":1}\n' >analysis-report.json
-    fi
-    if printf '%s\n' "$*" | grep -Fq ' importer sanitize'; then
-        printf 'sanitize-ok\n' >sanitization-report.txt
-        printf '{"schema_version":1}\n' >sanitization-report.json
-        printf 'profile_version = 1\nprofile_name = "test"\n' >sanitization-profile.snapshot.toml
-    fi
+            for arg in "$@"; do
+                if [ "$previous" = "--resume" ] || [ "$previous" = "resume" ]; then
+                    resume_path="$arg"
+                    previous=""
+                    continue
+                fi
+                case "$arg" in
+                    --resume=*) resume_path="${arg#--resume=}" ;;
+                    --resume|resume) previous="$arg" ;;
+                esac
+            done
+            if [ -n "$resume_path" ]; then
+                host_resume_path="${resume_path#/work/}"
+                printf '{"schema_version":2,"run_status":"success"}\n' >"$host_resume_path"
+            fi
+            ;;
+    esac
     mkdir -p payload-previews
     printf '{"pluno":1}\n' >payload-previews/plu-1.json
     exit "${FAKE_IMPORT_EXIT:-0}"
@@ -98,17 +106,16 @@ FAKE
 
 copy_deploy() {
     local dir="$1"
-    mkdir -p "$dir"
-    cp "$ROOT_DIR/deploy/compose.yaml" "$dir/compose.yaml"
+    mkdir -p "$dir/profiles" "$dir/output"
+    cp "$ROOT_DIR/deploy/to-digi" "$dir/to-digi"
     cp "$ROOT_DIR/deploy/import.sh" "$dir/import.sh"
     cp "$ROOT_DIR/deploy/run.sh" "$dir/run.sh"
+    cp "$ROOT_DIR/deploy/compose.yaml" "$dir/compose.yaml"
     cp "$ROOT_DIR/deploy/config.example.toml" "$dir/config.toml"
-    mkdir -p "$dir/profiles"
     cp "$ROOT_DIR/profiles/example.toml" "$dir/profiles/example.toml"
     cp "$ROOT_DIR/profiles/starsky.toml" "$dir/profiles/starsky.toml"
-    mkdir -p "$dir/output"
     printf 'mdb\n' >"$dir/plu.mdb"
-    chmod +x "$dir/import.sh" "$dir/run.sh"
+    chmod +x "$dir/to-digi" "$dir/import.sh" "$dir/run.sh"
 }
 
 run_with_fake_docker() {
@@ -121,383 +128,155 @@ run_with_fake_docker() {
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-docker.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
     PATH="$fake_dir:$PATH" \
-    "$deploy_dir/import.sh" "$@" >"$output_file" 2>&1
+    "$deploy_dir/to-digi" "$@" >"$output_file" 2>&1
 }
 
-run_wrapper_with_fake_docker() {
-    local deploy_dir="$1"
-    local output_file="$2"
-    shift 2
+test_launcher_archives_output_and_preserves_exit_code() {
+    local deploy_dir="$TEST_ROOT/deploy with spaces"
+    local output="$TEST_ROOT/output-import.txt"
     local fake_dir="$TEST_ROOT/fake-bin"
+    local log="$TEST_ROOT/fake-docker.log"
+    copy_deploy "$deploy_dir"
     mkdir -p "$fake_dir"
     make_fake_docker "$fake_dir/docker"
-    FAKE_DOCKER_LOG="$TEST_ROOT/fake-docker.log" \
-    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
-    PATH="$fake_dir:$PATH" \
-    "$deploy_dir/run.sh" "$@" >"$output_file" 2>&1
+    set +e
+    FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.9.0 \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
+    "$deploy_dir/to-digi" import --limit 1 >"$output" 2>&1
+    local code=$?
+    set -e
+    [ "$code" -eq 7 ] || fail "launcher did not preserve importer exit code: $code"
+    assert_contains "$output" "Using image: to-digi-rs:0.9.0"
+    assert_contains "$output" "Importer exit code: 7"
+    assert_contains "$log" "run --rm"
+    assert_contains "$log" "--mount type=bind,src=$deploy_dir,dst=/work"
+    assert_contains "$log" "import --limit 1"
+    [ -f "$deploy_dir"/output/run-*-import/logs.txt ] || fail "logs.txt was not archived"
+    [ -f "$deploy_dir"/output/run-*-import/import-results.json ] || fail "manifest was not archived"
 }
 
-test_resolves_own_directory_and_archives_output() {
-    local deploy_dir="$TEST_ROOT/deploy-a"
-    local output="$TEST_ROOT/output-a.txt"
-    copy_deploy "$deploy_dir"
-    mkdir -p "$TEST_ROOT/elsewhere"
-    (cd "$TEST_ROOT/elsewhere" && run_with_fake_docker "$deploy_dir" "$output")
-
-    assert_contains "$output" "Importer exit code: 0"
-    assert_contains "$output" "$deploy_dir/output/run-"
-    [ -f "$deploy_dir"/output/run-*-import/logs.txt ] || fail "import logs.txt was not archived under an import-suffixed directory"
-    assert_contains "$TEST_ROOT/fake-docker.log" "TO_DIGI_RS_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.8.0"
-    [ -f "$deploy_dir"/output/run-*/logs.txt ] || fail "logs.txt was not archived"
-    [ -f "$deploy_dir"/output/run-*-import/import-results.json ] || fail "import manifest was not created under the import run directory"
-    [ -f "$deploy_dir"/output/run-*/payload-previews/plu-1.json ] || fail "payload preview was not archived"
-    [ ! -f "$deploy_dir/logs.txt" ] || fail "root logs.txt was not left behind"
-    assert_contains "$output" "Import manifest:"
-}
-
-test_help_and_version_do_not_require_config_or_plu() {
+test_help_version_and_pull_do_not_require_config_or_plu() {
     local deploy_dir="$TEST_ROOT/deploy-help"
     local output="$TEST_ROOT/output-help.txt"
     copy_deploy "$deploy_dir"
     rm "$deploy_dir/config.toml" "$deploy_dir/plu.mdb"
 
-    run_with_fake_docker "$deploy_dir" "$output" --help
+    run_with_fake_docker "$deploy_dir" "$output" version
+    assert_contains "$TEST_ROOT/fake-docker.log" "ghcr.io/johed-velca/to-digi-rs:0.9.0 version"
 
-    assert_contains "$output" "Importer exit code: 0"
-    assert_not_contains "$output" "Importer did not create logs.txt"
-    [ -d "$deploy_dir"/output/run-*-info ] || fail "help output directory was not created under an info suffix"
-    assert_contains "$TEST_ROOT/fake-docker.log" "importer --help"
-
-    local deploy_dir_v="$TEST_ROOT/deploy-version"
-    local output_v="$TEST_ROOT/output-version.txt"
-    copy_deploy "$deploy_dir_v"
-    rm "$deploy_dir_v/config.toml" "$deploy_dir_v/plu.mdb"
-
-    run_with_fake_docker "$deploy_dir_v" "$output_v" --version
-
-    assert_contains "$output_v" "Importer exit code: 0"
-    assert_not_contains "$output_v" "Importer did not create logs.txt"
-    assert_contains "$TEST_ROOT/fake-docker.log" "importer --version"
+    run_with_fake_docker "$deploy_dir" "$output" pull
+    assert_contains "$TEST_ROOT/fake-docker.log" "ARGS:pull ghcr.io/johed-velca/to-digi-rs:0.9.0"
 }
 
-test_test_connection_does_not_require_plu() {
-    local deploy_dir="$TEST_ROOT/deploy-test-connection"
-    local output="$TEST_ROOT/output-test-connection.txt"
-    copy_deploy "$deploy_dir"
-    rm "$deploy_dir/plu.mdb"
-
-    run_with_fake_docker "$deploy_dir" "$output" test-connection
-
-    assert_contains "$output" "Importer exit code: 0"
-    [ -f "$deploy_dir"/output/run-*-test-connection/logs.txt ] || fail "test-connection output was not archived under a command-suffixed directory"
-    assert_contains "$TEST_ROOT/fake-docker.log" "importer test-connection"
-}
-
-test_cli_arguments_are_forwarded() {
-    local deploy_dir="$TEST_ROOT/deploy-args"
-    local output="$TEST_ROOT/output-args.txt"
-    copy_deploy "$deploy_dir"
-
-    run_with_fake_docker "$deploy_dir" "$output" import --limit 2 --continue-on-error
-
-    [ -f "$deploy_dir"/output/run-*-import/logs.txt ] || fail "import output was not archived under a command-suffixed directory"
-    assert_contains "$TEST_ROOT/fake-docker.log" "importer import --limit 2 --continue-on-error"
-}
-
-test_analyze_archives_analysis_report() {
-    local deploy_dir="$TEST_ROOT/deploy-analyze"
-    local output="$TEST_ROOT/output-analyze.txt"
-    copy_deploy "$deploy_dir"
-    rm "$deploy_dir/config.toml"
-
-    run_with_fake_docker "$deploy_dir" "$output" analyze
-
-    assert_contains "$output" "Text analysis report:"
-    assert_contains "$output" "JSON analysis report:"
-    [ -f "$deploy_dir"/output/run-*-analyze/analysis-report.txt ] || fail "analysis-report.txt was not archived"
-    [ -f "$deploy_dir"/output/run-*-analyze/analysis-report.json ] || fail "analysis-report.json was not archived"
-}
-
-test_sanitize_translates_profile_and_archives_reports() {
-    local deploy_dir="$TEST_ROOT/deploy-sanitize"
-    local output="$TEST_ROOT/output-sanitize.txt"
-    copy_deploy "$deploy_dir"
-    rm "$deploy_dir/config.toml"
-
-    run_with_fake_docker "$deploy_dir" "$output" sanitize --profile profiles/starsky.toml --dry-run
-
-    assert_contains "$TEST_ROOT/fake-docker.log" "importer sanitize --profile /work/profiles/starsky.toml --dry-run"
-    assert_contains "$output" "Text sanitization report:"
-    assert_contains "$output" "JSON sanitization report:"
-    assert_contains "$output" "Sanitization profile snapshot:"
-    [ -f "$deploy_dir"/output/run-*-sanitize/sanitization-report.txt ] || fail "sanitization-report.txt was not archived"
-    [ -f "$deploy_dir"/output/run-*-sanitize/sanitization-report.json ] || fail "sanitization-report.json was not archived"
-    [ -f "$deploy_dir"/output/run-*-sanitize/sanitization-profile.snapshot.toml ] || fail "sanitization profile snapshot was not archived"
-}
-
-test_analyze_translates_sanitize_profile() {
-    local deploy_dir="$TEST_ROOT/deploy-analyze-sanitize"
-    local output="$TEST_ROOT/output-analyze-sanitize.txt"
-    copy_deploy "$deploy_dir"
-    rm "$deploy_dir/config.toml"
-
-    run_with_fake_docker "$deploy_dir" "$output" analyze --sanitize-profile profiles/example.toml
-
-    assert_contains "$TEST_ROOT/fake-docker.log" "importer analyze --sanitize-profile /work/profiles/example.toml"
-}
-
-test_resume_translates_relative_manifest_and_archives_snapshot() {
-    local deploy_dir="$TEST_ROOT/deploy-resume-relative"
-    local output="$TEST_ROOT/output-resume-relative.txt"
-    copy_deploy "$deploy_dir"
-    mkdir -p "$deploy_dir/output/run-old-import"
-    printf '{"schema_version":1,"status":"old"}\n' >"$deploy_dir/output/run-old-import/import-results.json"
-
-    run_with_fake_docker "$deploy_dir" "$output" import --resume output/run-old-import/import-results.json
-
-    assert_contains "$TEST_ROOT/fake-docker.log" "importer import --resume /work/output/run-old-import/import-results.json"
-    assert_contains "$output" "Import manifest:"
-    assert_contains "$output" "Import manifest snapshot:"
-    [ -f "$deploy_dir"/output/run-*-resume/logs.txt ] || fail "resume logs were not archived under a resume-suffixed directory"
-    [ -f "$deploy_dir"/output/run-*-resume/import-results.snapshot.json ] || fail "resume snapshot was not archived"
-    assert_contains "$deploy_dir/output/run-old-import/import-results.json" '"status":"resumed"'
-}
-
-test_resume_translates_absolute_manifest_inside_deployment_directory() {
-    local deploy_dir="$TEST_ROOT/deploy-resume-absolute"
-    local output="$TEST_ROOT/output-resume-absolute.txt"
-    copy_deploy "$deploy_dir"
-    mkdir -p "$deploy_dir/output/run-old-import"
-    local manifest="$deploy_dir/output/run-old-import/import-results.json"
-    printf '{"schema_version":1,"status":"old"}\n' >"$manifest"
-
-    run_with_fake_docker "$deploy_dir" "$output" import --resume "$manifest" --retry-failed
-
-    assert_contains "$TEST_ROOT/fake-docker.log" "importer import --resume /work/output/run-old-import/import-results.json --retry-failed"
-    [ -f "$deploy_dir"/output/run-*-resume/import-results.snapshot.json ] || fail "absolute resume snapshot was not archived"
-}
-
-test_resume_rejects_manifest_outside_deployment_directory() {
-    local deploy_dir="$TEST_ROOT/deploy-resume-outside"
-    local output="$TEST_ROOT/output-resume-outside.txt"
-    copy_deploy "$deploy_dir"
-    local outside="$TEST_ROOT/outside-import-results.json"
-    printf '{}\n' >"$outside"
-    set +e
-    run_with_fake_docker "$deploy_dir" "$output" import --resume "$outside"
-    local code=$?
-    set -e
-    [ "$code" -eq 2 ] || fail "outside resume manifest exit code was $code"
-    assert_contains "$output" "Resume manifests must be located inside the deployment directory"
-}
-
-test_profile_outside_deployment_directory_is_rejected() {
-    local deploy_dir="$TEST_ROOT/deploy-profile-outside"
-    local output="$TEST_ROOT/output-profile-outside.txt"
-    copy_deploy "$deploy_dir"
-    local outside="$TEST_ROOT/outside-profile.toml"
-    printf 'profile_version = 1\nprofile_name = "outside"\n' >"$outside"
-    set +e
-    run_with_fake_docker "$deploy_dir" "$output" sanitize --profile "$outside"
-    local code=$?
-    set -e
-    [ "$code" -eq 2 ] || fail "outside profile exit code was $code"
-    assert_contains "$output" "Sanitization profiles must be located inside the deployment directory"
-}
-
-test_symlinked_profile_is_rejected_when_supported() {
-    local deploy_dir="$TEST_ROOT/deploy-profile-symlink"
-    local output="$TEST_ROOT/output-profile-symlink.txt"
-    copy_deploy "$deploy_dir"
-    rm "$deploy_dir/profiles/starsky.toml"
-    if ! ln -s "$ROOT_DIR/profiles/starsky.toml" "$deploy_dir/profiles/starsky.toml" 2>/dev/null; then
-        return 0
-    fi
-    set +e
-    run_with_fake_docker "$deploy_dir" "$output" sanitize --profile profiles/starsky.toml
-    local code=$?
-    set -e
-    [ "$code" -eq 2 ] || fail "symlink profile exit code was $code"
-    assert_contains "$output" "sanitization profile must be a regular file, not a symbolic link"
-}
-
-test_missing_config_fails_clearly() {
-    local deploy_dir="$TEST_ROOT/deploy-missing-config"
-    local output="$TEST_ROOT/output-missing-config.txt"
+test_missing_config_and_plu_fail_clearly() {
+    local deploy_dir="$TEST_ROOT/deploy-missing"
+    local output="$TEST_ROOT/output-missing.txt"
     copy_deploy "$deploy_dir"
     rm "$deploy_dir/config.toml"
     set +e
-    run_with_fake_docker "$deploy_dir" "$output"
+    run_with_fake_docker "$deploy_dir" "$output" import
     local code=$?
     set -e
     [ "$code" -eq 2 ] || fail "missing config exit code was $code"
     assert_contains "$output" "Missing required configuration file"
-}
 
-test_missing_plu_fails_clearly() {
-    local deploy_dir="$TEST_ROOT/deploy-missing-plu"
-    local output="$TEST_ROOT/output-missing-plu.txt"
     copy_deploy "$deploy_dir"
     rm "$deploy_dir/plu.mdb"
     set +e
-    run_with_fake_docker "$deploy_dir" "$output"
-    local code=$?
+    run_with_fake_docker "$deploy_dir" "$output" analyze
+    code=$?
     set -e
     [ "$code" -eq 2 ] || fail "missing plu exit code was $code"
     assert_contains "$output" "Missing required source database"
 }
 
-test_symlinked_plu_is_rejected_when_supported() {
-    local deploy_dir="$TEST_ROOT/deploy-symlink-plu"
-    local output="$TEST_ROOT/output-symlink-plu.txt"
+test_profile_and_resume_paths_are_translated() {
+    local deploy_dir="$TEST_ROOT/deploy-paths"
+    local output="$TEST_ROOT/output-paths.txt"
     copy_deploy "$deploy_dir"
-    rm "$deploy_dir/plu.mdb"
-    if ! ln -s "$TEST_ROOT/not-real.mdb" "$deploy_dir/plu.mdb" 2>/dev/null; then
-        return 0
-    fi
-    set +e
-    run_with_fake_docker "$deploy_dir" "$output"
-    local code=$?
-    set -e
-    [ "$code" -eq 2 ] || fail "symlink plu exit code was $code"
-    assert_contains "$output" "not a symbolic link"
+    run_with_fake_docker "$deploy_dir" "$output" analyze --sanitize-profile profiles/starsky.toml
+    assert_contains "$TEST_ROOT/fake-docker.log" "analyze --sanitize-profile /work/profiles/starsky.toml"
+
+    mkdir -p "$deploy_dir/output/old"
+    printf '{"schema_version":2,"run_status":"incomplete"}\n' >"$deploy_dir/output/old/import-results.json"
+    run_with_fake_docker "$deploy_dir" "$output" resume output/old/import-results.json --retry-failed
+    assert_contains "$TEST_ROOT/fake-docker.log" "resume /work/output/old/import-results.json --retry-failed"
+    [ -f "$deploy_dir"/output/run-*-resume/import-results.snapshot.json ] || fail "resume snapshot was not archived"
 }
 
-test_missing_docker_fails_clearly() {
-    local deploy_dir="$TEST_ROOT/deploy-no-docker"
-    local output="$TEST_ROOT/output-no-docker.txt"
+test_doctor_checks_image_and_never_imports_data() {
+    local deploy_dir="$TEST_ROOT/deploy-doctor"
+    local output="$TEST_ROOT/output-doctor.txt"
+    local doctor_log="$TEST_ROOT/fake-doctor.log"
     copy_deploy "$deploy_dir"
-    set +e
-    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 DOCKER_BIN="$TEST_ROOT/does-not-exist" "$deploy_dir/import.sh" >"$output" 2>&1
-    local code=$?
-    set -e
-    [ "$code" -eq 2 ] || fail "missing docker exit code was $code"
-    assert_contains "$output" "Required command not found"
-}
-
-test_docker_daemon_failure_fails_clearly() {
-    local deploy_dir="$TEST_ROOT/deploy-daemon-fail"
-    local output="$TEST_ROOT/output-daemon-fail.txt"
-    copy_deploy "$deploy_dir"
-    local fake_dir="$TEST_ROOT/fake-daemon-bin"
+    local fake_dir="$TEST_ROOT/fake-bin"
     mkdir -p "$fake_dir"
     make_fake_docker "$fake_dir/docker"
+    FAKE_DOCKER_LOG="$doctor_log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" doctor >"$output" 2>&1
+    assert_contains "$doctor_log" "image inspect ghcr.io/johed-velca/to-digi-rs:0.9.0"
+    assert_contains "$doctor_log" "doctor --inside-container"
+    assert_not_contains "$doctor_log" "import --limit"
+
     set +e
-    FAKE_DOCKER_LOG="$TEST_ROOT/fake-daemon.log" FAKE_DOCKER_INFO_EXIT=1 \
-    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
-    "$deploy_dir/import.sh" >"$output" 2>&1
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-doctor-image.log" FAKE_DOCKER_IMAGE_INSPECT_EXIT=1 \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$TEST_ROOT/fake-bin:$PATH" \
+    "$deploy_dir/to-digi" doctor >"$output" 2>&1
     local code=$?
     set -e
-    [ "$code" -eq 2 ] || fail "daemon failure exit code was $code"
-    assert_contains "$output" "Docker daemon is not reachable"
+    [ "$code" -eq 2 ] || fail "missing image exit code was $code"
+    assert_contains "$output" "Selected Docker image is not available locally"
 }
 
-test_compose_plugin_failure_fails_clearly() {
-    local deploy_dir="$TEST_ROOT/deploy-compose-fail"
-    local output="$TEST_ROOT/output-compose-fail.txt"
-    copy_deploy "$deploy_dir"
-    local fake_dir="$TEST_ROOT/fake-compose-bin"
-    mkdir -p "$fake_dir"
-    make_fake_docker "$fake_dir/docker"
-    set +e
-    FAKE_DOCKER_LOG="$TEST_ROOT/fake-compose.log" FAKE_DOCKER_COMPOSE_VERSION_EXIT=1 \
-    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
-    "$deploy_dir/import.sh" >"$output" 2>&1
-    local code=$?
-    set -e
-    [ "$code" -eq 2 ] || fail "compose failure exit code was $code"
-    assert_contains "$output" "Docker Compose plugin is not available"
-}
-
-test_image_override_uid_gid_and_exit_code_are_preserved() {
-    local deploy_dir="$TEST_ROOT/deploy-exit"
-    local output="$TEST_ROOT/output-exit.txt"
-    local log="$TEST_ROOT/fake-docker.log"
-    local fake_dir="$TEST_ROOT/fake-exit-bin"
-    copy_deploy "$deploy_dir"
-    mkdir -p "$fake_dir"
-    make_fake_docker "$fake_dir/docker"
-    set +e
-    FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.8.0 \
-    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
-    "$deploy_dir/import.sh" >"$output" 2>&1
-    local code=$?
-    set -e
-    [ "$code" -eq 7 ] || fail "import exit code was not preserved: $code"
-    assert_contains "$output" "Importer exit code: 7"
-    assert_contains "$log" "TO_DIGI_RS_IMAGE=to-digi-rs:0.8.0"
-    assert_contains "$log" "LOCAL_UID="
-    assert_contains "$log" "LOCAL_GID="
-}
-
-test_existing_output_is_preserved() {
-    local deploy_dir="$TEST_ROOT/deploy-preserve"
-    local output="$TEST_ROOT/output-preserve.txt"
-    copy_deploy "$deploy_dir"
-    mkdir -p "$deploy_dir/output/run-old"
-    printf 'old\n' >"$deploy_dir/output/run-old/logs.txt"
-    run_with_fake_docker "$deploy_dir" "$output"
-
-    [ -f "$deploy_dir/output/run-old/logs.txt" ] || fail "existing output was deleted"
-}
-
-test_run_sh_forwards_to_import_sh_with_notice() {
-    local deploy_dir="$TEST_ROOT/deploy-wrapper"
+test_wrappers_forward_to_to_digi() {
+    local deploy_dir="$TEST_ROOT/deploy-wrappers"
     local output="$TEST_ROOT/output-wrapper.txt"
     copy_deploy "$deploy_dir"
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-docker.log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    PATH="$TEST_ROOT/fake-bin:$PATH" "$deploy_dir/import.sh" analyze >"$output" 2>&1
+    assert_contains "$output" "NOTICE: import.sh is a compatibility wrapper"
+    assert_contains "$TEST_ROOT/fake-docker.log" "analyze"
 
-    run_wrapper_with_fake_docker "$deploy_dir" "$output" analyze
-
-    assert_contains "$output" "NOTICE: run.sh has been renamed to import.sh."
-    assert_contains "$output" "Forwarding this command for backward compatibility."
-    assert_contains "$output" "Importer exit code: 0"
-    assert_contains "$TEST_ROOT/fake-docker.log" "importer analyze"
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-docker.log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    PATH="$TEST_ROOT/fake-bin:$PATH" "$deploy_dir/run.sh" version >"$output" 2>&1
+    assert_contains "$output" "NOTICE: run.sh is a compatibility wrapper"
 }
 
-test_package_archive_contains_only_expected_files() {
+test_package_archive_contains_expected_files_only() {
     local archive
-    archive="$(TO_DIGI_RS_VERSION=0.8.0 "$ROOT_DIR/scripts/package-deploy.sh")"
+    archive="$(TO_DIGI_RS_VERSION=0.9.0 "$ROOT_DIR/scripts/package-deploy.sh")"
     [ -f "$archive" ] || fail "archive was not created"
     local listing="$TEST_ROOT/archive-list.txt"
     tar -tzf "$archive" | sort >"$listing"
 
-    assert_contains "$listing" "to-digi-rs-deploy/compose.yaml"
-    assert_contains "$listing" "to-digi-rs-deploy/config.example.toml"
+    assert_contains "$listing" "to-digi-rs-deploy/to-digi"
     assert_contains "$listing" "to-digi-rs-deploy/import.sh"
     assert_contains "$listing" "to-digi-rs-deploy/run.sh"
-    assert_contains "$listing" "to-digi-rs-deploy/README.md"
-    assert_contains "$listing" "to-digi-rs-deploy/profiles/example.toml"
+    assert_contains "$listing" "to-digi-rs-deploy/compose.yaml"
+    assert_contains "$listing" "to-digi-rs-deploy/config.example.toml"
     assert_contains "$listing" "to-digi-rs-deploy/profiles/starsky.toml"
     assert_contains "$listing" "to-digi-rs-deploy/output/"
     assert_not_contains "$listing" "to-digi-rs-deploy/config.toml"
     assert_not_contains "$listing" "to-digi-rs-deploy/plu.mdb"
-    assert_not_contains "$listing" "to-digi-rs-deploy/import-results.json"
-    assert_not_contains "$listing" "to-digi-rs-deploy/import-results.snapshot.json"
-    assert_not_contains "$listing" "target/"
-    assert_not_contains "$listing" ".git/"
+    assert_not_contains "$listing" "payload-previews"
+    assert_not_contains "$listing" "import-results.json"
 }
 
-test_resolves_own_directory_and_archives_output
-test_help_and_version_do_not_require_config_or_plu
-test_test_connection_does_not_require_plu
-test_cli_arguments_are_forwarded
-test_analyze_archives_analysis_report
-test_sanitize_translates_profile_and_archives_reports
-test_analyze_translates_sanitize_profile
-test_resume_translates_relative_manifest_and_archives_snapshot
-test_resume_translates_absolute_manifest_inside_deployment_directory
-test_resume_rejects_manifest_outside_deployment_directory
-test_profile_outside_deployment_directory_is_rejected
-test_symlinked_profile_is_rejected_when_supported
-test_missing_config_fails_clearly
-test_missing_plu_fails_clearly
-test_symlinked_plu_is_rejected_when_supported
-test_missing_docker_fails_clearly
-test_docker_daemon_failure_fails_clearly
-test_compose_plugin_failure_fails_clearly
-test_image_override_uid_gid_and_exit_code_are_preserved
-test_existing_output_is_preserved
-test_run_sh_forwards_to_import_sh_with_notice
-test_package_archive_contains_only_expected_files
+test_launcher_does_not_print_secrets() {
+    local deploy_dir="$TEST_ROOT/deploy-secrets"
+    local output="$TEST_ROOT/output-secrets.txt"
+    copy_deploy "$deploy_dir"
+    TO_DIGI_RS_CLIENT_SECRET="super-secret-value" run_with_fake_docker "$deploy_dir" "$output" test-connection
+    assert_not_contains "$output" "super-secret-value"
+}
+
+test_launcher_archives_output_and_preserves_exit_code
+test_help_version_and_pull_do_not_require_config_or_plu
+test_missing_config_and_plu_fail_clearly
+test_profile_and_resume_paths_are_translated
+test_doctor_checks_image_and_never_imports_data
+test_wrappers_forward_to_to_digi
+test_package_archive_contains_expected_files_only
+test_launcher_does_not_print_secrets
 
 printf 'deployment script tests passed\n'

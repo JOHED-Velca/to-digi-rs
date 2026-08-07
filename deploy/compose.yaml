@@ -1,11 +1,17 @@
 services:
   importer:
-    image: ${TO_DIGI_RS_IMAGE:-ghcr.io/johed-velca/to-digi-rs:0.8.0}
+    image: ${TO_DIGI_RS_IMAGE:-ghcr.io/johed-velca/to-digi-rs:0.9.0}
     network_mode: host
     working_dir: /work
     user: "${LOCAL_UID:?LOCAL_UID is required}:${LOCAL_GID:?LOCAL_GID is required}"
     environment:
       DIGIWEB_CLIENT_SECRET: ${DIGIWEB_CLIENT_SECRET:-}
+      TO_DIGI_RS_CLIENT_SECRET: ${TO_DIGI_RS_CLIENT_SECRET:-}
+      TO_DIGI_RS_CLIENT_SECRET_FILE: ${TO_DIGI_RS_CLIENT_SECRET_FILE:-}
+      TO_DIGI_RS_BASE_URL: ${TO_DIGI_RS_BASE_URL:-}
+      TO_DIGI_RS_STORE_NUMBER: ${TO_DIGI_RS_STORE_NUMBER:-}
+      TO_DIGI_RS_ALLOW_INVALID_CERTIFICATES: ${TO_DIGI_RS_ALLOW_INVALID_CERTIFICATES:-}
+      TO_DIGI_RS_DEFAULT_PROFILE: ${TO_DIGI_RS_DEFAULT_PROFILE:-}
       TO_DIGI_RS_IMPORT_MANIFEST_PATH: ${TO_DIGI_RS_IMPORT_MANIFEST_PATH:-}
     volumes:
       - type: bind

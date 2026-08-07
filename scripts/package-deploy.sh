@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${TO_DIGI_RS_VERSION:-0.8.0}"
+VERSION="${TO_DIGI_RS_VERSION:-0.9.0}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/target/release-bundles"
 BUNDLE_NAME="to-digi-rs-deploy"
@@ -12,6 +12,7 @@ rm -rf "$BUNDLE_DIR"
 mkdir -p "$BUNDLE_DIR/output" "$BUNDLE_DIR/profiles"
 
 install -m 0644 "$ROOT_DIR/deploy/compose.yaml" "$BUNDLE_DIR/compose.yaml"
+install -m 0755 "$ROOT_DIR/deploy/to-digi" "$BUNDLE_DIR/to-digi"
 install -m 0755 "$ROOT_DIR/deploy/import.sh" "$BUNDLE_DIR/import.sh"
 install -m 0755 "$ROOT_DIR/deploy/run.sh" "$BUNDLE_DIR/run.sh"
 install -m 0644 "$ROOT_DIR/deploy/config.example.toml" "$BUNDLE_DIR/config.example.toml"

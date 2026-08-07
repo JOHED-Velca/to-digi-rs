@@ -260,10 +260,10 @@ fn render_setup(report: &AnalysisReport, out: &mut String) {
     );
     blank(out);
     line(out, "Next:");
-    line(out, "./import.sh verify");
+    line(out, "./to-digi verify");
     blank(out);
     line(out, "Test one PLU:");
-    line(out, "./import.sh import --limit 1");
+    line(out, "./to-digi import --limit 1");
     line(out, SETUP_SEPARATOR);
 }
 
@@ -444,8 +444,8 @@ mod tests {
         assert!(output.contains(
             "It does not confirm whether these departments or groups already exist in DIGIweb."
         ));
-        assert!(output.contains("./import.sh verify"));
-        assert!(output.contains("./import.sh import --limit 1"));
+        assert!(output.contains("./to-digi verify"));
+        assert!(output.contains("./to-digi import --limit 1"));
         assert!(output.contains("/tmp/analysis-report.txt"));
         assert!(output.contains("/tmp/analysis-report.json"));
         assert!(output.contains("No authentication or DIGIweb API requests were attempted."));

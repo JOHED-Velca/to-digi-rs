@@ -15,21 +15,60 @@ pub struct Cli {
 pub enum CliCommand {
     /// Analyze plu.mdb without contacting DIGIweb
     Analyze(AnalyzeArgs),
+    /// Check deployment readiness without importing PLUs
+    Doctor(DoctorArgs),
+    /// Initialize a deployment directory with launchers and templates
+    Init(InitArgs),
     /// Import valid PLUs into DIGIweb
     Import(ImportArgs),
+    /// Pull the configured Docker image when using generated launchers
+    Pull,
+    /// Resume a previous import manifest
+    Resume(ResumeArgs),
     /// Preview profile-driven sanitization without contacting DIGIweb
     Sanitize(SanitizeArgs),
     /// Test DIGIweb authentication and connectivity
     TestConnection,
     /// Verify import readiness without writing PLUs
     Verify(VerifyArgs),
+    /// Print application version
+    Version,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
 pub struct AnalyzeArgs {
     /// Apply a fill-only sanitization profile before analysis
+    #[arg(long, value_name = "PROFILE", conflicts_with_all = ["profile", "raw"])]
+    pub sanitize_profile: Option<PathBuf>,
+    /// Apply a built-in profile such as starsky
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["sanitize_profile", "raw"])]
+    pub profile: Option<String>,
+    /// Analyze the raw source without any default deployment profile
+    #[arg(long, conflicts_with_all = ["sanitize_profile", "profile"])]
+    pub raw: bool,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct DoctorArgs {
+    /// Pull the selected image while checking launcher readiness
+    #[arg(long)]
+    pub pull: bool,
+    /// Internal marker used by generated launchers after host-side Docker checks
+    #[arg(long, hide = true)]
+    pub inside_container: bool,
+    /// Apply a built-in profile such as starsky during readiness checks
+    #[arg(long, value_name = "NAME", conflicts_with = "sanitize_profile")]
+    pub profile: Option<String>,
+    /// Apply an external sanitization profile during readiness checks
     #[arg(long, value_name = "PROFILE")]
     pub sanitize_profile: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct InitArgs {
+    /// Refresh known generated files, preserving customer files and creating backups
+    #[arg(long)]
+    pub refresh_generated_files: bool,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
@@ -50,15 +89,33 @@ pub struct ImportArgs {
     #[arg(long, requires = "resume")]
     pub retry_failed: bool,
     /// Apply a fill-only sanitization profile before import
-    #[arg(long, value_name = "PROFILE", conflicts_with = "resume")]
+    #[arg(long, value_name = "PROFILE", conflicts_with_all = ["resume", "profile"])]
     pub sanitize_profile: Option<PathBuf>,
+    /// Apply a built-in profile such as starsky before import
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["resume", "sanitize_profile"])]
+    pub profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct ResumeArgs {
+    /// Manifest produced by a previous import
+    pub manifest: PathBuf,
+    /// Retry only confirmed FAILED records
+    #[arg(long)]
+    pub retry_failed: bool,
+    /// Continue submitting later selected PLUs after a failure or unknown final status
+    #[arg(long)]
+    pub continue_on_error: bool,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
 pub struct SanitizeArgs {
-    /// TOML sanitization profile to preview
+    /// Built-in profile name such as starsky, or a profile path for compatibility
     #[arg(long, value_name = "PROFILE")]
-    pub profile: PathBuf,
+    pub profile: Option<String>,
+    /// External TOML sanitization profile to preview
+    #[arg(long, value_name = "PROFILE", conflicts_with = "profile")]
+    pub sanitize_profile: Option<PathBuf>,
     /// Explicit alias; sanitize is always a dry run
     #[arg(long)]
     pub dry_run: bool,
@@ -67,8 +124,34 @@ pub struct SanitizeArgs {
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
 pub struct VerifyArgs {
     /// Apply a fill-only sanitization profile before readiness verification
-    #[arg(long, value_name = "PROFILE")]
+    #[arg(long, value_name = "PROFILE", conflicts_with = "profile")]
     pub sanitize_profile: Option<PathBuf>,
+    /// Apply a built-in profile such as starsky before readiness verification
+    #[arg(long, value_name = "NAME", conflicts_with = "sanitize_profile")]
+    pub profile: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileSelection {
+    External(PathBuf),
+    BuiltIn(String),
+}
+
+impl ProfileSelection {
+    pub fn from_cli_profile(value: &str) -> Self {
+        if value == "starsky" {
+            Self::BuiltIn(value.to_string())
+        } else {
+            Self::External(PathBuf::from(value))
+        }
+    }
+
+    pub fn display(&self) -> String {
+        match self {
+            Self::External(path) => path.display().to_string(),
+            Self::BuiltIn(name) => format!("built-in:{name}"),
+        }
+    }
 }
 
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
@@ -86,7 +169,16 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
 pub enum EffectiveCommand {
     Analyze {
         legacy_used: bool,
-        sanitize_profile: Option<PathBuf>,
+        sanitize_profile: Option<ProfileSelection>,
+        raw: bool,
+    },
+    Doctor {
+        pull: bool,
+        inside_container: bool,
+        sanitize_profile: Option<ProfileSelection>,
+    },
+    Init {
+        refresh_generated_files: bool,
     },
     Import {
         limit: Option<usize>,
@@ -96,26 +188,32 @@ pub enum EffectiveCommand {
         retry_failed: bool,
         legacy_used: bool,
         defaulted_from_no_command: bool,
-        sanitize_profile: Option<PathBuf>,
+        sanitize_profile: Option<ProfileSelection>,
     },
+    Pull,
     Sanitize {
-        profile: PathBuf,
+        profile: ProfileSelection,
         dry_run: bool,
     },
     TestConnection,
     Verify {
-        sanitize_profile: Option<PathBuf>,
+        sanitize_profile: Option<ProfileSelection>,
     },
+    Version,
 }
 
 impl EffectiveCommand {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Analyze { .. } => "analyze",
+            Self::Doctor { .. } => "doctor",
+            Self::Init { .. } => "init",
             Self::Import { .. } => "import",
+            Self::Pull => "pull",
             Self::Sanitize { .. } => "sanitize",
             Self::TestConnection => "test-connection",
             Self::Verify { .. } => "verify",
+            Self::Version => "version",
         }
     }
 
@@ -123,7 +221,13 @@ impl EffectiveCommand {
         match self {
             Self::Analyze { legacy_used, .. } => *legacy_used,
             Self::Import { legacy_used, .. } => *legacy_used,
-            Self::Sanitize { .. } | Self::TestConnection | Self::Verify { .. } => false,
+            Self::Doctor { .. }
+            | Self::Init { .. }
+            | Self::Pull
+            | Self::Sanitize { .. }
+            | Self::TestConnection
+            | Self::Verify { .. }
+            | Self::Version => false,
         }
     }
 }
@@ -132,7 +236,26 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
     match &cli.command {
         Some(CliCommand::Analyze(args)) => EffectiveCommand::Analyze {
             legacy_used: false,
-            sanitize_profile: args.sanitize_profile.clone(),
+            sanitize_profile: resolve_optional_profile(
+                args.sanitize_profile.clone(),
+                args.profile.clone(),
+                args.raw,
+                config,
+            ),
+            raw: args.raw,
+        },
+        Some(CliCommand::Doctor(args)) => EffectiveCommand::Doctor {
+            pull: args.pull,
+            inside_container: args.inside_container,
+            sanitize_profile: resolve_optional_profile(
+                args.sanitize_profile.clone(),
+                args.profile.clone(),
+                false,
+                config,
+            ),
+        },
+        Some(CliCommand::Init(args)) => EffectiveCommand::Init {
+            refresh_generated_files: args.refresh_generated_files,
         },
         Some(CliCommand::Import(args)) => EffectiveCommand::Import {
             limit: if args.test { Some(1) } else { args.limit },
@@ -142,17 +265,83 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
             retry_failed: args.retry_failed,
             legacy_used: false,
             defaulted_from_no_command: false,
-            sanitize_profile: args.sanitize_profile.clone(),
+            sanitize_profile: resolve_optional_profile(
+                args.sanitize_profile.clone(),
+                args.profile.clone(),
+                false,
+                config,
+            ),
+        },
+        Some(CliCommand::Pull) => EffectiveCommand::Pull,
+        Some(CliCommand::Resume(args)) => EffectiveCommand::Import {
+            limit: None,
+            continue_on_error: args.continue_on_error,
+            test_mode: false,
+            resume: Some(args.manifest.clone()),
+            retry_failed: args.retry_failed,
+            legacy_used: false,
+            defaulted_from_no_command: false,
+            sanitize_profile: None,
         },
         Some(CliCommand::Sanitize(args)) => EffectiveCommand::Sanitize {
-            profile: args.profile.clone(),
+            profile: resolve_required_profile(
+                args.sanitize_profile.clone(),
+                args.profile.clone(),
+                config,
+            ),
             dry_run: args.dry_run,
         },
         Some(CliCommand::TestConnection) => EffectiveCommand::TestConnection,
         Some(CliCommand::Verify(args)) => EffectiveCommand::Verify {
-            sanitize_profile: args.sanitize_profile.clone(),
+            sanitize_profile: resolve_optional_profile(
+                args.sanitize_profile.clone(),
+                args.profile.clone(),
+                false,
+                config,
+            ),
         },
+        Some(CliCommand::Version) => EffectiveCommand::Version,
         None => legacy_effective_command(config),
+    }
+}
+
+fn resolve_optional_profile(
+    external: Option<PathBuf>,
+    builtin: Option<String>,
+    raw: bool,
+    config: &AppConfig,
+) -> Option<ProfileSelection> {
+    if raw {
+        return None;
+    }
+    external
+        .map(ProfileSelection::External)
+        .or_else(|| builtin.as_deref().map(ProfileSelection::from_cli_profile))
+        .or_else(|| default_profile(config))
+}
+
+fn resolve_required_profile(
+    external: Option<PathBuf>,
+    builtin_or_path: Option<String>,
+    config: &AppConfig,
+) -> ProfileSelection {
+    external
+        .map(ProfileSelection::External)
+        .or_else(|| {
+            builtin_or_path
+                .as_deref()
+                .map(ProfileSelection::from_cli_profile)
+        })
+        .or_else(|| default_profile(config))
+        .unwrap_or_else(|| ProfileSelection::BuiltIn("starsky".to_string()))
+}
+
+fn default_profile(config: &AppConfig) -> Option<ProfileSelection> {
+    let default = config.profiles.default.trim();
+    if default.is_empty() || default.eq_ignore_ascii_case("none") {
+        None
+    } else {
+        Some(ProfileSelection::from_cli_profile(default))
     }
 }
 
@@ -161,6 +350,7 @@ fn legacy_effective_command(config: &AppConfig) -> EffectiveCommand {
         EffectiveCommand::Analyze {
             legacy_used: true,
             sanitize_profile: None,
+            raw: true,
         }
     } else {
         EffectiveCommand::Import {
@@ -175,7 +365,7 @@ fn legacy_effective_command(config: &AppConfig) -> EffectiveCommand {
             retry_failed: false,
             legacy_used: true,
             defaulted_from_no_command: true,
-            sanitize_profile: None,
+            sanitize_profile: default_profile(config),
         }
     }
 }
@@ -217,17 +407,27 @@ mod tests {
             Some(CliCommand::Analyze(_))
         ));
         assert!(matches!(
+            parse(&["to-digi-rs", "doctor"]).command,
+            Some(CliCommand::Doctor(_))
+        ));
+        assert!(matches!(
+            parse(&["to-digi-rs", "init"]).command,
+            Some(CliCommand::Init(_))
+        ));
+        assert!(matches!(
             parse(&["to-digi-rs", "import"]).command,
             Some(CliCommand::Import(_))
         ));
         assert!(matches!(
-            parse(&[
-                "to-digi-rs",
-                "sanitize",
-                "--profile",
-                "profiles/starsky.toml"
-            ])
-            .command,
+            parse(&["to-digi-rs", "pull"]).command,
+            Some(CliCommand::Pull)
+        ));
+        assert!(matches!(
+            parse(&["to-digi-rs", "resume", "output/run/import-results.json"]).command,
+            Some(CliCommand::Resume(_))
+        ));
+        assert!(matches!(
+            parse(&["to-digi-rs", "sanitize", "--profile", "starsky"]).command,
             Some(CliCommand::Sanitize(_))
         ));
         assert!(matches!(
@@ -237,6 +437,10 @@ mod tests {
         assert!(matches!(
             parse(&["to-digi-rs", "verify"]).command,
             Some(CliCommand::Verify(_))
+        ));
+        assert!(matches!(
+            parse(&["to-digi-rs", "version"]).command,
+            Some(CliCommand::Version)
         ));
     }
 
@@ -371,10 +575,15 @@ mod tests {
     fn help_includes_all_commands_and_version_is_current() {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("analyze"));
+        assert!(help.contains("doctor"));
+        assert!(help.contains("init"));
         assert!(help.contains("import"));
+        assert!(help.contains("pull"));
+        assert!(help.contains("resume"));
         assert!(help.contains("sanitize"));
         assert!(help.contains("test-connection"));
         assert!(help.contains("verify"));
+        assert!(help.contains("version"));
         let mut command = CliCommand::augment_subcommands(clap::Command::new("to-digi-rs"));
         let import_help = command
             .find_subcommand_mut("import")
@@ -384,7 +593,7 @@ mod tests {
         assert!(import_help.contains("--resume"));
         assert!(import_help.contains("--retry-failed"));
         assert!(import_help.contains("--sanitize-profile"));
-        assert_eq!(Cli::command().get_version(), Some("0.8.0"));
+        assert_eq!(Cli::command().get_version(), Some("0.9.0"));
     }
 
     #[test]
@@ -396,6 +605,7 @@ mod tests {
             EffectiveCommand::Analyze {
                 legacy_used: true,
                 sanitize_profile: None,
+                raw: true,
             }
         );
 
@@ -488,5 +698,44 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn built_in_profile_options_parse_for_operational_commands() {
+        assert!(matches!(
+            effective_command(
+                &parse(&["to-digi-rs", "analyze", "--profile", "starsky"]),
+                &AppConfig::default()
+            ),
+            EffectiveCommand::Analyze {
+                sanitize_profile: Some(ProfileSelection::BuiltIn(name)),
+                ..
+            } if name == "starsky"
+        ));
+        assert!(matches!(
+            effective_command(
+                &parse(&["to-digi-rs", "import", "--profile", "starsky"]),
+                &AppConfig::default()
+            ),
+            EffectiveCommand::Import {
+                sanitize_profile: Some(ProfileSelection::BuiltIn(name)),
+                ..
+            } if name == "starsky"
+        ));
+    }
+
+    #[test]
+    fn raw_analysis_suppresses_default_profile() {
+        let mut config = AppConfig::default();
+        config.profiles.default = "starsky".to_string();
+
+        assert_eq!(
+            effective_command(&parse(&["to-digi-rs", "analyze", "--raw"]), &config),
+            EffectiveCommand::Analyze {
+                legacy_used: false,
+                sanitize_profile: None,
+                raw: true,
+            }
+        );
     }
 }

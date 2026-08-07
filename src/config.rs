@@ -9,6 +9,7 @@ use crate::error::AppError;
 
 const DEFAULT_BASE_URL: &str = "https://192.168.0.150";
 const DEFAULT_CLIENT_ID: &str = "digi";
+const DEFAULT_TOKEN_PATH: &str = "/auth/realms/skypro/protocol/openid-connect/token";
 const DEFAULT_REQUEST_STATUS_PATH_TEMPLATE: &str =
     "/api/thirdpartylinker/api/v1/requests/{request_id}";
 
@@ -19,6 +20,7 @@ pub struct AppConfig {
     pub timeouts: TimeoutConfig,
     pub import: ImportConfig,
     pub mapping: MappingConfig,
+    pub profiles: ProfileConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -62,6 +64,12 @@ pub struct MappingConfig {
     pub nutrition_table: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ProfileConfig {
+    pub default: String,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -69,6 +77,7 @@ impl Default for AppConfig {
             timeouts: TimeoutConfig::default(),
             import: ImportConfig::default(),
             mapping: MappingConfig::default(),
+            profiles: ProfileConfig::default(),
         }
     }
 }
@@ -80,7 +89,7 @@ impl Default for DigiwebConfig {
             client_id: DEFAULT_CLIENT_ID.to_string(),
             client_secret: String::new(),
             log_credentials_for_testing: false,
-            token_url: String::new(),
+            token_url: DEFAULT_TOKEN_PATH.to_string(),
             store_number: 1,
             allow_invalid_certificates: false,
             plu_upsert_path: "/api/v1/third-party/plus/write".to_string(),
@@ -122,19 +131,32 @@ impl Default for MappingConfig {
     }
 }
 
+impl Default for ProfileConfig {
+    fn default() -> Self {
+        Self {
+            default: String::new(),
+        }
+    }
+}
+
 impl AppConfig {
     pub fn load(path: &Path) -> Result<Self, AppError> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let contents = fs::read_to_string(path).map_err(|err| AppError::Config(err.to_string()))?;
-        toml::from_str(&contents).map_err(|err| AppError::Config(err.to_string()))
+        let mut config = if !path.exists() {
+            Self::default()
+        } else {
+            let contents =
+                fs::read_to_string(path).map_err(|err| AppError::Config(err.to_string()))?;
+            toml::from_str(&contents).map_err(|err| AppError::Config(err.to_string()))?
+        };
+        config.apply_environment_overrides()?;
+        Ok(config)
     }
 
     pub fn validate_startup(&self) -> Result<(), AppError> {
-        if self.digiweb.base_url.trim().is_empty() {
+        let base_url = self.digiweb.base_url.trim();
+        if base_url.is_empty() || is_placeholder(base_url) {
             return Err(AppError::Config(
-                "digiweb.base_url must not be empty".to_string(),
+                "digiweb.base_url must be set to the customer DIGIweb host or URL".to_string(),
             ));
         }
         if self.digiweb.client_id.trim().is_empty() {
@@ -173,12 +195,60 @@ impl AppConfig {
         Ok(())
     }
 
-    pub fn token_url(&self) -> Result<&str, AppError> {
-        required_configured_url("digiweb.token_url", &self.digiweb.token_url)
+    pub fn token_url(&self) -> Result<String, AppError> {
+        let raw = self.digiweb.token_url.trim();
+        if raw.is_empty() || is_placeholder(raw) {
+            return resolve_relative_url(&self.digiweb.base_url, DEFAULT_TOKEN_PATH);
+        }
+        if raw.starts_with("http://") || raw.starts_with("https://") {
+            reqwest::Url::parse(raw)
+                .map_err(|err| AppError::Config(format!("invalid digiweb.token_url: {err}")))?;
+            Ok(raw.to_string())
+        } else {
+            required_configured_path("digiweb.token_url", raw)?;
+            resolve_relative_url(&self.digiweb.base_url, raw)
+        }
     }
 
     pub fn plu_upsert_path(&self) -> Result<&str, AppError> {
         required_configured_path("digiweb.plu_upsert_path", &self.digiweb.plu_upsert_path)
+    }
+
+    pub fn deprecated_command_selector_flags_present(&self) -> bool {
+        self.import.send_only_first_plu || self.import.dry_run_inspect_only
+    }
+
+    fn apply_environment_overrides(&mut self) -> Result<(), AppError> {
+        if let Some(value) = env_nonempty("TO_DIGI_RS_BASE_URL") {
+            self.digiweb.base_url = value;
+        }
+        if let Some(value) = env_nonempty("TO_DIGI_RS_STORE_NUMBER") {
+            self.digiweb.store_number = value.parse::<u32>().map_err(|err| {
+                AppError::Config(format!("invalid TO_DIGI_RS_STORE_NUMBER: {err}"))
+            })?;
+        }
+        if let Some(value) = env_nonempty("TO_DIGI_RS_ALLOW_INVALID_CERTIFICATES") {
+            self.digiweb.allow_invalid_certificates =
+                parse_bool_env("TO_DIGI_RS_ALLOW_INVALID_CERTIFICATES", &value)?;
+        }
+        if let Some(value) = env_nonempty("TO_DIGI_RS_DEFAULT_PROFILE") {
+            self.profiles.default = value;
+        }
+        Ok(())
+    }
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn parse_bool_env(name: &str, value: &str) -> Result<bool, AppError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(AppError::Config(format!(
+            "{name} must be true/false, yes/no, on/off, or 1/0"
+        ))),
     }
 }
 
@@ -197,27 +267,45 @@ fn validate_optional_numeric_override(name: &str, value: &str) -> Result<(), App
 }
 
 pub fn load_client_secret(config: &AppConfig) -> Result<SecretString, AppError> {
-    resolve_client_secret(config, env::var("DIGIWEB_CLIENT_SECRET").ok())
+    resolve_client_secret(
+        config,
+        env::var("TO_DIGI_RS_CLIENT_SECRET").ok(),
+        env::var("DIGIWEB_CLIENT_SECRET").ok(),
+        env::var("TO_DIGI_RS_CLIENT_SECRET_FILE").ok(),
+    )
 }
 
 fn resolve_client_secret(
     config: &AppConfig,
-    env_secret: Option<String>,
+    primary_env_secret: Option<String>,
+    legacy_env_secret: Option<String>,
+    env_secret_file: Option<String>,
 ) -> Result<SecretString, AppError> {
-    if let Some(value) = env_secret.filter(|value| !value.is_empty()) {
+    if let Some(value) = primary_env_secret.filter(|value| !value.is_empty()) {
+        return Ok(SecretString::new(value));
+    }
+    if let Some(path) = env_secret_file.filter(|value| !value.trim().is_empty()) {
+        let secret = fs::read_to_string(path.trim())
+            .map_err(|err| AppError::Config(format!("failed to read client secret file: {err}")))?;
+        let secret = secret.trim_end_matches(['\r', '\n']).to_string();
+        if !secret.is_empty() {
+            return Ok(SecretString::new(secret));
+        }
+    }
+    if let Some(value) = legacy_env_secret.filter(|value| !value.is_empty()) {
         return Ok(SecretString::new(value));
     }
     let configured = config.digiweb.client_secret.trim();
-    if !configured.is_empty() && !configured.contains("REPLACE_WITH") {
+    if !configured.is_empty() && !is_placeholder(configured) {
         return Ok(SecretString::new(configured.to_string()));
     }
 
-    Err(AppError::MissingEnv("DIGIWEB_CLIENT_SECRET"))
+    Err(AppError::MissingEnv("TO_DIGI_RS_CLIENT_SECRET"))
 }
 
 pub fn client_secret_log_message(config: &AppConfig, env_secret_present: bool) -> &'static str {
-    if env_secret_present {
-        "loaded from DIGIWEB_CLIENT_SECRET (redacted)"
+    if env_secret_present || env::var("TO_DIGI_RS_CLIENT_SECRET_FILE").is_ok() {
+        "loaded from environment (redacted)"
     } else if config.digiweb.client_secret.trim().is_empty() {
         "not configured"
     } else {
@@ -225,14 +313,18 @@ pub fn client_secret_log_message(config: &AppConfig, env_secret_present: bool) -
     }
 }
 
-fn required_configured_url<'a>(name: &str, value: &'a str) -> Result<&'a str, AppError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.contains("REPLACE_WITH") {
-        return Err(AppError::Config(format!(
-            "{name} must be set to the confirmed DIGIweb endpoint before contacting DIGIweb"
-        )));
-    }
-    Ok(trimmed)
+fn resolve_relative_url(base_url: &str, path: &str) -> Result<String, AppError> {
+    let base = reqwest::Url::parse(base_url)
+        .map_err(|err| AppError::Config(format!("invalid digiweb.base_url: {err}")))?;
+    let joined = base
+        .join(path.trim_start_matches('/'))
+        .map_err(|err| AppError::Config(format!("invalid DIGIweb URL path '{path}': {err}")))?;
+    Ok(joined.to_string())
+}
+
+fn is_placeholder(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    upper.contains("CHANGE_ME") || upper.contains("REPLACE_WITH")
 }
 
 fn required_configured_path<'a>(name: &str, value: &'a str) -> Result<&'a str, AppError> {
@@ -253,9 +345,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_keeps_token_endpoint_unconfirmed() {
+    fn default_config_derives_token_endpoint_from_base_url() {
         let config = AppConfig::default();
-        assert!(config.token_url().is_err());
+        assert_eq!(
+            config.token_url().expect("token url"),
+            "https://192.168.0.150/auth/realms/skypro/protocol/openid-connect/token"
+        );
     }
 
     #[test]
@@ -263,11 +358,34 @@ mod tests {
         let mut config = AppConfig::default();
         config.digiweb.client_secret = "hard-coded-test-password".to_string();
 
-        let secret = resolve_client_secret(&config, None).expect("secret");
+        let secret = resolve_client_secret(&config, None, None, None).expect("secret");
 
         assert_eq!(
             secrecy::ExposeSecret::expose_secret(&secret),
             "hard-coded-test-password"
+        );
+    }
+
+    #[test]
+    fn relative_token_url_resolves_against_base_url() {
+        let mut config = AppConfig::default();
+        config.digiweb.base_url = "https://192.168.24.122".to_string();
+        config.digiweb.token_url = "/auth/realms/skypro/protocol/openid-connect/token".to_string();
+
+        assert_eq!(
+            config.token_url().expect("token url"),
+            "https://192.168.24.122/auth/realms/skypro/protocol/openid-connect/token"
+        );
+    }
+
+    #[test]
+    fn absolute_token_url_remains_compatible() {
+        let mut config = AppConfig::default();
+        config.digiweb.token_url = "https://identity.example/token".to_string();
+
+        assert_eq!(
+            config.token_url().expect("token url"),
+            "https://identity.example/token"
         );
     }
 
@@ -305,8 +423,13 @@ mod tests {
         let mut config = AppConfig::default();
         config.digiweb.client_secret = "config-password".to_string();
 
-        let secret =
-            resolve_client_secret(&config, Some("env-password".to_string())).expect("secret");
+        let secret = resolve_client_secret(
+            &config,
+            Some("env-password".to_string()),
+            Some("legacy-password".to_string()),
+            None,
+        )
+        .expect("secret");
 
         assert_eq!(
             secrecy::ExposeSecret::expose_secret(&secret),

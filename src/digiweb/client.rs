@@ -1185,7 +1185,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::config::{AppConfig, DigiwebConfig, ImportConfig, MappingConfig, TimeoutConfig};
+    use crate::config::{
+        AppConfig, DigiwebConfig, ImportConfig, MappingConfig, ProfileConfig, TimeoutConfig,
+    };
     use crate::models::plu::{Plu, PriceMode};
 
     #[test]
@@ -2156,6 +2158,7 @@ mod tests {
             },
             import: ImportConfig::default(),
             mapping: MappingConfig::default(),
+            profiles: ProfileConfig::default(),
         }
     }
 
