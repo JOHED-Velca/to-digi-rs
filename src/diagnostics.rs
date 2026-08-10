@@ -109,6 +109,57 @@ pub struct LabelFormatRequirement {
     pub label_format: u32,
     pub plu_count: usize,
     pub plu_numbers: Vec<u64>,
+    pub server_reference_required: bool,
+    pub semantic_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluDiagnosticDetail {
+    pub plu_number: u64,
+    pub local_validation_status: String,
+    pub disposition: DiagnosticDisposition,
+    pub department: Option<u32>,
+    pub group: Option<u32>,
+    pub product_name_present: bool,
+    pub raw_barcode: Option<String>,
+    pub effective_barcode: Option<String>,
+    pub source_barcode_format: Option<String>,
+    pub barcode_type: Option<String>,
+    pub barcode_reference_number: Option<String>,
+    pub label_format: Option<u32>,
+    pub label_format_server_reference_required: bool,
+    pub label_format_semantic_status: String,
+    pub best_before: Option<u32>,
+    pub use_by: Option<u32>,
+    pub quantity: Option<u32>,
+    pub quantity_symbol: Option<u32>,
+    pub tare: Option<String>,
+    pub ingredients_present: bool,
+    pub ingredient_source_row_count: usize,
+    pub nutrition_fact_count: usize,
+    pub required_references: Vec<RequiredReference>,
+    pub payload_destinations: Vec<String>,
+    pub duplicate_context: Option<DuplicateBarcodeContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequiredReference {
+    pub reference_type: String,
+    pub reference_number: u32,
+    pub parent_reference: Option<u32>,
+    pub source_field: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DuplicateBarcodeContext {
+    pub effective_barcode: String,
+    pub canonical_plu: u64,
+    pub all_conflicting_plus: Vec<u64>,
+    pub skipped_plus: Vec<u64>,
+    pub requested_plu_disposition: DiagnosticDisposition,
+    pub raw_barcodes: BTreeMap<u64, String>,
+    pub barcode_types: BTreeMap<u64, String>,
+    pub barcode_reference_numbers: BTreeMap<u64, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +193,7 @@ pub struct DiagnosticsReport {
     pub summary: DiagnosticsSummary,
     pub safety: DiagnosticsSafety,
     pub problems: Vec<DiagnosticProblem>,
+    pub plu_details: Vec<PluDiagnosticDetail>,
     pub duplicate_barcode_groups: Vec<DuplicateBarcodeGroup>,
     pub required_label_formats: Vec<LabelFormatRequirement>,
     pub timings: Vec<DiagnosticTiming>,
@@ -198,6 +250,24 @@ pub struct DryRunSummary {
     pub customer_action_required: usize,
     pub payload_build_failures: usize,
     pub api_write_requests: usize,
+    pub selection: DryRunSelectionSummary,
+    pub source_validation_findings: DryRunSourceValidationSummary,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DryRunSelectionSummary {
+    pub selected: usize,
+    pub would_submit: usize,
+    pub selected_invalid_skips: usize,
+    pub selected_duplicate_skips: usize,
+    pub selected_payload_failures: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DryRunSourceValidationSummary {
+    pub source_invalid_plus: usize,
+    pub duplicate_barcode_plus: usize,
+    pub customer_action_required_plus: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,6 +344,12 @@ pub fn build_diagnostics_report(input: DiagnosticsInput<'_>) -> DiagnosticsRepor
             plus_submitted: 0,
         },
         problems,
+        plu_details: plu_details(
+            input.all_normalized_plus,
+            input.valid_plus,
+            input.validation_report,
+            &duplicate_groups,
+        ),
         duplicate_barcode_groups: duplicate_groups,
         required_label_formats: label_format_requirements(input.valid_plus),
         timings: input.timings,
@@ -308,6 +384,28 @@ pub fn filter_diagnostics(
         let category_match =
             category.is_none_or(|target| target == DiagnosticCategory::DuplicateBarcode);
         let plu_match = plu.is_none_or(|target| group.all_plus.contains(&target));
+        category_match && plu_match
+    });
+    filtered.plu_details.retain(|detail| {
+        let plu_match = plu.is_none_or(|target| detail.plu_number == target);
+        let invalid_match =
+            !invalid_only || detail.disposition != DiagnosticDisposition::WouldSubmit;
+        let category_match = category.is_none_or(|target| match target {
+            DiagnosticCategory::DuplicateBarcode => detail.duplicate_context.is_some(),
+            DiagnosticCategory::InvalidDepartment => detail.department.is_none(),
+            DiagnosticCategory::InvalidGroup => detail.group.is_none(),
+            DiagnosticCategory::InvalidLabelFormat => detail.label_format.is_some(),
+            DiagnosticCategory::CustomerActionRequired => {
+                detail.disposition != DiagnosticDisposition::WouldSubmit
+            }
+            _ => true,
+        });
+        plu_match && invalid_match && category_match
+    });
+    filtered.required_label_formats.retain(|requirement| {
+        let category_match =
+            category.is_none_or(|target| target == DiagnosticCategory::InvalidLabelFormat);
+        let plu_match = plu.is_none_or(|target| requirement.plu_numbers.contains(&target));
         category_match && plu_match
     });
     filtered
@@ -391,6 +489,191 @@ pub fn render_diagnostics_console(report: &DiagnosticsReport) -> String {
                 report.problems.len() - CONSOLE_PROBLEM_LIMIT
             ),
         );
+    }
+    if report.plu_details.len() <= 5 {
+        for detail in &report.plu_details {
+            blank(&mut out);
+            line(&mut out, format!("PLU {} detail", detail.plu_number));
+            line(
+                &mut out,
+                format!(
+                    "Local validation status: {}",
+                    detail.local_validation_status
+                ),
+            );
+            line(&mut out, format!("Disposition: {:?}", detail.disposition));
+            line(
+                &mut out,
+                format!(
+                    "Department: {}",
+                    detail
+                        .department
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                ),
+            );
+            line(
+                &mut out,
+                format!(
+                    "Group: {}",
+                    detail
+                        .group
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                ),
+            );
+            line(
+                &mut out,
+                format!(
+                    "Product name present: {}",
+                    yes_no(detail.product_name_present)
+                ),
+            );
+            line(
+                &mut out,
+                format!(
+                    "Raw barcode: {}",
+                    detail.raw_barcode.as_deref().unwrap_or("unknown")
+                ),
+            );
+            line(
+                &mut out,
+                format!(
+                    "Effective DIGIweb barcode: {}",
+                    detail.effective_barcode.as_deref().unwrap_or("unknown")
+                ),
+            );
+            line(
+                &mut out,
+                format!(
+                    "Barcode format/type/reference: {}/{}/{}",
+                    detail.source_barcode_format.as_deref().unwrap_or("unknown"),
+                    detail.barcode_type.as_deref().unwrap_or("unknown"),
+                    detail
+                        .barcode_reference_number
+                        .as_deref()
+                        .unwrap_or("unknown")
+                ),
+            );
+            if let Some(label_format) = detail.label_format {
+                line(&mut out, format!("Label Format: {label_format}"));
+                line(
+                    &mut out,
+                    format!(
+                        "Label Format server reference required: {}",
+                        yes_no(detail.label_format_server_reference_required)
+                    ),
+                );
+                line(
+                    &mut out,
+                    format!(
+                        "Label Format semantic status: {}",
+                        detail.label_format_semantic_status
+                    ),
+                );
+            }
+            line(
+                &mut out,
+                format!(
+                    "Best Before: {}",
+                    detail
+                        .best_before
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "none".to_string())
+                ),
+            );
+            line(
+                &mut out,
+                format!(
+                    "Use By: {}",
+                    detail
+                        .use_by
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "none".to_string())
+                ),
+            );
+            line(
+                &mut out,
+                format!(
+                    "Quantity/tare: {}/{}/{}",
+                    detail
+                        .quantity
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    detail
+                        .quantity_symbol
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    detail.tare.as_deref().unwrap_or("none")
+                ),
+            );
+            line(
+                &mut out,
+                format!(
+                    "Ingredients present/count: {}/{}",
+                    yes_no(detail.ingredients_present),
+                    detail.ingredient_source_row_count
+                ),
+            );
+            line(
+                &mut out,
+                format!("Nutrition facts count: {}", detail.nutrition_fact_count),
+            );
+            if !detail.required_references.is_empty() {
+                line(&mut out, "Required DIGIweb references:");
+                for reference in &detail.required_references {
+                    line(
+                        &mut out,
+                        format!(
+                            "- {} {} parent={} source={}",
+                            reference.reference_type,
+                            reference.reference_number,
+                            reference
+                                .parent_reference
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "none".to_string()),
+                            reference.source_field
+                        ),
+                    );
+                }
+            }
+            line(
+                &mut out,
+                format!(
+                    "Payload destination summary: {}",
+                    detail.payload_destinations.join(", ")
+                ),
+            );
+            if let Some(context) = &detail.duplicate_context {
+                line(&mut out, "Duplicate barcode conflict group:");
+                line(
+                    &mut out,
+                    format!("Effective barcode: {}", context.effective_barcode),
+                );
+                line(
+                    &mut out,
+                    format!("Canonical/kept PLU: {}", context.canonical_plu),
+                );
+                line(
+                    &mut out,
+                    format!(
+                        "All conflicting PLUs: {}",
+                        join_numbers(&context.all_conflicting_plus)
+                    ),
+                );
+                line(
+                    &mut out,
+                    format!("Skipped PLUs: {}", join_numbers(&context.skipped_plus)),
+                );
+                line(
+                    &mut out,
+                    format!(
+                        "Requested PLU disposition: {:?}",
+                        context.requested_plu_disposition
+                    ),
+                );
+            }
+        }
     }
     blank(&mut out);
     line(&mut out, "Detailed report:");
@@ -487,6 +770,17 @@ pub fn render_diagnostics_text(report: &DiagnosticsReport) -> String {
         line(&mut out, format!("Used by: {} PLUs", format.plu_count));
         line(
             &mut out,
+            format!(
+                "Server reference required: {}",
+                yes_no(format.server_reference_required)
+            ),
+        );
+        line(
+            &mut out,
+            format!("Semantic status: {}", format.semantic_status),
+        );
+        line(
+            &mut out,
             format!("PLUs: {}", join_numbers(&format.plu_numbers)),
         );
     }
@@ -565,9 +859,168 @@ pub fn label_format_requirements(plus: &[Plu]) -> Vec<LabelFormatRequirement> {
                 label_format,
                 plu_count: plu_numbers.len(),
                 plu_numbers,
+                server_reference_required: label_format_server_reference_required(label_format),
+                semantic_status: label_format_semantic_status(label_format).to_string(),
             }
         })
         .collect()
+}
+
+fn label_format_server_reference_required(label_format: u32) -> bool {
+    label_format > 0
+}
+
+fn label_format_semantic_status(label_format: u32) -> &'static str {
+    if label_format == 0 {
+        "unresolved_zero_semantics_may_mean_default_or_no_explicit_label_format"
+    } else {
+        "positive_label_format_reference"
+    }
+}
+
+fn plu_details(
+    all_plus: &[Plu],
+    valid_plus: &[Plu],
+    validation_report: &ValidationReport,
+    duplicate_groups: &[DuplicateBarcodeGroup],
+) -> Vec<PluDiagnosticDetail> {
+    let valid_numbers = valid_plus
+        .iter()
+        .map(|plu| plu.plu_number)
+        .collect::<BTreeSet<_>>();
+    let error_numbers = validation_report
+        .issues
+        .iter()
+        .filter(|issue| issue.severity == Severity::Error)
+        .filter_map(|issue| issue.plu_number)
+        .collect::<BTreeSet<_>>();
+    all_plus
+        .iter()
+        .map(|plu| {
+            let duplicate_context = duplicate_groups
+                .iter()
+                .find(|group| group.all_plus.contains(&plu.plu_number))
+                .map(|group| DuplicateBarcodeContext {
+                    effective_barcode: group.effective_barcode.clone(),
+                    canonical_plu: group.canonical_plu,
+                    all_conflicting_plus: group.all_plus.clone(),
+                    skipped_plus: group.skipped_plus.clone(),
+                    requested_plu_disposition: if group.skipped_plus.contains(&plu.plu_number) {
+                        DiagnosticDisposition::SkippedDuplicateBarcode
+                    } else {
+                        DiagnosticDisposition::WouldSubmit
+                    },
+                    raw_barcodes: group.raw_barcodes.clone(),
+                    barcode_types: group.barcode_types.clone(),
+                    barcode_reference_numbers: group.barcode_reference_numbers.clone(),
+                });
+            let disposition = if duplicate_context
+                .as_ref()
+                .is_some_and(|context| context.skipped_plus.contains(&plu.plu_number))
+            {
+                DiagnosticDisposition::SkippedDuplicateBarcode
+            } else if valid_numbers.contains(&plu.plu_number) {
+                DiagnosticDisposition::WouldSubmit
+            } else if error_numbers.contains(&plu.plu_number) {
+                DiagnosticDisposition::SkippedInvalid
+            } else {
+                DiagnosticDisposition::WouldSubmit
+            };
+            let mut required_references = Vec::new();
+            if let Some(department) = plu.department_number {
+                required_references.push(RequiredReference {
+                    reference_type: "department".to_string(),
+                    reference_number: department,
+                    parent_reference: None,
+                    source_field: "Pludata.Department -> pludepartmentno".to_string(),
+                });
+            }
+            if let (Some(department), Some(group)) = (plu.department_number, plu.group_number) {
+                required_references.push(RequiredReference {
+                    reference_type: "group".to_string(),
+                    reference_number: group,
+                    parent_reference: Some(department),
+                    source_field: "Pludata.Main Group Code -> plugroupno".to_string(),
+                });
+            }
+            if let Some(label_format) = plu.label_format {
+                required_references.push(RequiredReference {
+                    reference_type: "label_format".to_string(),
+                    reference_number: label_format,
+                    parent_reference: None,
+                    source_field: "Pludata.Print Format Code -> plulabelformat".to_string(),
+                });
+            }
+            PluDiagnosticDetail {
+                plu_number: plu.plu_number,
+                local_validation_status: if valid_numbers.contains(&plu.plu_number) {
+                    "valid".to_string()
+                } else {
+                    "invalid".to_string()
+                },
+                disposition,
+                department: plu.department_number,
+                group: plu.group_number,
+                product_name_present: !plu.name.trim().is_empty(),
+                raw_barcode: plu.source_barcode.clone(),
+                effective_barcode: plu.barcode.clone(),
+                source_barcode_format: plu.source_barcode_format.clone(),
+                barcode_type: plu.barcode_type.clone(),
+                barcode_reference_number: plu.barcode_ref_no.clone(),
+                label_format: plu.label_format,
+                label_format_server_reference_required: plu
+                    .label_format
+                    .is_some_and(label_format_server_reference_required),
+                label_format_semantic_status: plu
+                    .label_format
+                    .map(label_format_semantic_status)
+                    .unwrap_or("absent")
+                    .to_string(),
+                best_before: plu.selling_date_term,
+                use_by: plu.expiration_days,
+                quantity: plu.quantity,
+                quantity_symbol: plu.quantity_symbol,
+                tare: plu.tare.map(|value| value.to_string()),
+                ingredients_present: plu
+                    .ingredients
+                    .as_ref()
+                    .is_some_and(|value| !value.is_empty()),
+                ingredient_source_row_count: plu.source_pluing_row_count,
+                nutrition_fact_count: plu.nutrition_facts.len(),
+                required_references,
+                payload_destinations: payload_destinations_for_plu(plu),
+                duplicate_context,
+            }
+        })
+        .collect()
+}
+
+fn payload_destinations_for_plu(plu: &Plu) -> Vec<String> {
+    let mut destinations = vec![
+        "pluno",
+        "pludepartmentno",
+        "plugroupno",
+        "plubarcodedata",
+        "plucommname",
+        "pluunitprice",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect::<Vec<_>>();
+    if plu.label_format.is_some() {
+        destinations.push("plulabelformat".to_string());
+    }
+    if plu
+        .ingredients
+        .as_ref()
+        .is_some_and(|value| !value.is_empty())
+    {
+        destinations.push("pluingredients".to_string());
+    }
+    if !plu.nutrition_facts.is_empty() {
+        destinations.push("plunft.data".to_string());
+    }
+    destinations
 }
 
 pub fn build_dry_run_manifest(
@@ -630,31 +1083,70 @@ pub fn build_dry_run_manifest(
     }
     records.sort_by_key(|record| (record.plu_number, disposition_sort(&record.disposition)));
     records.dedup_by_key(|record| record.plu_number);
+    let selected_numbers = selected
+        .iter()
+        .map(|plu| plu.plu_number)
+        .collect::<BTreeSet<_>>();
+    let selection_would_submit = records
+        .iter()
+        .filter(|record| selected_numbers.contains(&record.plu_number))
+        .filter(|record| record.disposition == DiagnosticDisposition::WouldSubmit)
+        .count();
+    let selection_skipped_invalid = records
+        .iter()
+        .filter(|record| selected_numbers.contains(&record.plu_number))
+        .filter(|record| record.disposition == DiagnosticDisposition::SkippedInvalid)
+        .count();
+    let selection_skipped_duplicate = records
+        .iter()
+        .filter(|record| selected_numbers.contains(&record.plu_number))
+        .filter(|record| record.disposition == DiagnosticDisposition::SkippedDuplicateBarcode)
+        .count();
+    let selection_payload_failures = records
+        .iter()
+        .filter(|record| selected_numbers.contains(&record.plu_number))
+        .filter(|record| record.disposition == DiagnosticDisposition::PayloadBuildFailed)
+        .count();
+    let source_invalid_plus = diagnostics
+        .problems
+        .iter()
+        .filter_map(|problem| problem.plu_number)
+        .collect::<BTreeSet<_>>()
+        .len();
+    let duplicate_barcode_plus = diagnostics.summary.skipped_duplicate_barcode;
+    let customer_action_required_plus = diagnostics
+        .problems
+        .iter()
+        .filter(|problem| problem.classification == "CUSTOMER_ACTION_REQUIRED")
+        .filter_map(|problem| problem.plu_number)
+        .collect::<BTreeSet<_>>()
+        .len();
     let summary = DryRunSummary {
         total_source_plus: dataset.plu_rows.len(),
         selected: selected_count,
         valid: valid_plus.len(),
-        would_submit: records
-            .iter()
-            .filter(|record| record.disposition == DiagnosticDisposition::WouldSubmit)
-            .count(),
-        skipped_invalid: records
-            .iter()
-            .filter(|record| record.disposition == DiagnosticDisposition::SkippedInvalid)
-            .count(),
-        skipped_duplicate_barcode: records
-            .iter()
-            .filter(|record| record.disposition == DiagnosticDisposition::SkippedDuplicateBarcode)
-            .count(),
+        would_submit: selection_would_submit,
+        skipped_invalid: selection_skipped_invalid,
+        skipped_duplicate_barcode: selection_skipped_duplicate,
         customer_action_required: records
             .iter()
+            .filter(|record| selected_numbers.contains(&record.plu_number))
             .filter(|record| record.disposition == DiagnosticDisposition::CustomerActionRequired)
             .count(),
-        payload_build_failures: records
-            .iter()
-            .filter(|record| record.disposition == DiagnosticDisposition::PayloadBuildFailed)
-            .count(),
+        payload_build_failures: selection_payload_failures,
         api_write_requests: 0,
+        selection: DryRunSelectionSummary {
+            selected: selected_count,
+            would_submit: selection_would_submit,
+            selected_invalid_skips: selection_skipped_invalid,
+            selected_duplicate_skips: selection_skipped_duplicate,
+            selected_payload_failures: selection_payload_failures,
+        },
+        source_validation_findings: DryRunSourceValidationSummary {
+            source_invalid_plus,
+            duplicate_barcode_plus,
+            customer_action_required_plus,
+        },
     };
     Ok(DryRunManifest {
         schema_version: 1,
@@ -698,27 +1190,66 @@ pub fn render_dry_run_console(manifest: &DryRunManifest) -> String {
         &mut out,
         format!("Source PLUs: {}", manifest.summary.total_source_plus),
     );
-    line(&mut out, format!("Selected: {}", manifest.summary.selected));
+    line(&mut out, "DRY-RUN SELECTION");
     line(
         &mut out,
-        format!("Would submit: {}", manifest.summary.would_submit),
+        format!("Selected: {}", manifest.summary.selection.selected),
     );
     line(
         &mut out,
-        format!("Skipped invalid: {}", manifest.summary.skipped_invalid),
+        format!("Would submit: {}", manifest.summary.selection.would_submit),
     );
     line(
         &mut out,
         format!(
-            "Skipped duplicate barcode: {}",
-            manifest.summary.skipped_duplicate_barcode
+            "Selected invalid skips: {}",
+            manifest.summary.selection.selected_invalid_skips
         ),
     );
     line(
         &mut out,
         format!(
-            "Payload build failures: {}",
-            manifest.summary.payload_build_failures
+            "Selected duplicate skips: {}",
+            manifest.summary.selection.selected_duplicate_skips
+        ),
+    );
+    line(
+        &mut out,
+        format!(
+            "Selected payload failures: {}",
+            manifest.summary.selection.selected_payload_failures
+        ),
+    );
+    blank(&mut out);
+    line(&mut out, "SOURCE VALIDATION FINDINGS");
+    line(
+        &mut out,
+        format!(
+            "Source invalid PLUs: {}",
+            manifest
+                .summary
+                .source_validation_findings
+                .source_invalid_plus
+        ),
+    );
+    line(
+        &mut out,
+        format!(
+            "Duplicate-barcode PLUs: {}",
+            manifest
+                .summary
+                .source_validation_findings
+                .duplicate_barcode_plus
+        ),
+    );
+    line(
+        &mut out,
+        format!(
+            "Customer-action-required PLUs: {}",
+            manifest
+                .summary
+                .source_validation_findings
+                .customer_action_required_plus
         ),
     );
     line(
@@ -981,6 +1512,10 @@ fn blank(out: &mut String) {
     out.push('\n');
 }
 
+fn yes_no(value: bool) -> &'static str {
+    if value { "YES" } else { "NO" }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1106,6 +1641,58 @@ mod tests {
     }
 
     #[test]
+    fn label_format_zero_is_reported_as_unresolved_not_required_server_reference() {
+        let mut a = plu(18, "0200018");
+        a.label_format = Some(0);
+
+        let requirements = label_format_requirements(&[a]);
+
+        assert_eq!(requirements[0].label_format, 0);
+        assert!(!requirements[0].server_reference_required);
+        assert!(
+            requirements[0]
+                .semantic_status
+                .contains("unresolved_zero_semantics")
+        );
+    }
+
+    #[test]
+    fn valid_plu_specific_diagnostics_include_label_format_and_references() {
+        let mut detail_plu = plu(18, "0200018");
+        detail_plu.label_format = Some(6);
+        detail_plu.ingredients = Some("Ingredient text".to_string());
+        detail_plu.source_pluing_row_count = 2;
+        detail_plu
+            .nutrition_facts
+            .push(crate::models::nutrition::NutritionFact {
+                name: "Calories".to_string(),
+                amount: Some("10".to_string()),
+                unit: None,
+            });
+        let dataset = source_dataset(vec![("18", "0001", "PLU 18", "0200018")]);
+        let validation_report = validate_plus(&[detail_plu.clone()]);
+        let report = diagnostics_report(
+            &dataset,
+            &[detail_plu.clone()],
+            &[detail_plu],
+            &[],
+            &validation_report,
+        );
+        let filtered = filter_diagnostics(&report, false, Some(18), None);
+        let text = render_diagnostics_text(&filtered);
+
+        assert_eq!(filtered.plu_details.len(), 1);
+        assert!(text.contains("PLU 18 detail"));
+        assert!(text.contains("Local validation status: valid"));
+        assert!(text.contains("Disposition: WouldSubmit"));
+        assert!(text.contains("Label Format: 6"));
+        assert!(text.contains("Label Format server reference required: YES"));
+        assert!(text.contains("label_format 6"));
+        assert!(text.contains("plulabelformat"));
+        assert!(text.contains("Nutrition facts count: 1"));
+    }
+
+    #[test]
     fn missing_product_name_is_row_level_customer_action_without_default() {
         let dataset = source_dataset(vec![("0", "0001", "", "")]);
         let row_issues = vec![ValidationIssue::error(
@@ -1156,7 +1743,14 @@ mod tests {
 
         assert_eq!(manifest.summary.selected, 1);
         assert_eq!(manifest.summary.would_submit, 1);
-        assert_eq!(manifest.summary.skipped_duplicate_barcode, 2);
+        assert_eq!(manifest.summary.skipped_duplicate_barcode, 0);
+        assert_eq!(
+            manifest
+                .summary
+                .source_validation_findings
+                .duplicate_barcode_plus,
+            2
+        );
         assert_eq!(manifest.summary.api_write_requests, 0);
         assert!(!manifest.safety.authentication_attempted);
         assert!(manifest.records.iter().any(|record| record.plu_number == 20
@@ -1165,5 +1759,63 @@ mod tests {
             && record.disposition == DiagnosticDisposition::SkippedDuplicateBarcode));
         assert!(manifest.records.iter().any(|record| record.plu_number == 22
             && record.disposition == DiagnosticDisposition::SkippedDuplicateBarcode));
+    }
+
+    #[test]
+    fn plu_specific_duplicate_diagnostics_include_canonical_and_group_context() {
+        let plus = vec![plu(20, "0200001"), plu(21, "0200001"), plu(22, "0200001")];
+        let validation_report = validate_plus(&plus);
+        let valid_plus = vec![plus[0].clone()];
+        let dataset = source_dataset(vec![
+            ("20", "0001", "PLU 20", "0200001"),
+            ("21", "0001", "PLU 21", "0200001"),
+            ("22", "0001", "PLU 22", "0200001"),
+        ]);
+        let report = diagnostics_report(&dataset, &plus, &valid_plus, &[], &validation_report);
+        let filtered = filter_diagnostics(&report, false, Some(21), None);
+        let text = render_diagnostics_text(&filtered);
+
+        assert!(text.contains("PLU 21 detail"));
+        assert!(text.contains("Raw barcode: 0200001"));
+        assert!(text.contains("Effective DIGIweb barcode: 0200001"));
+        assert!(text.contains("Canonical/kept PLU: 20"));
+        assert!(text.contains("All conflicting PLUs: 20, 21, 22"));
+        assert!(text.contains("Requested PLU disposition: SkippedDuplicateBarcode"));
+    }
+
+    #[test]
+    fn dry_run_limit_one_separates_selected_counts_from_source_findings() {
+        let plus = vec![plu(20, "0200001"), plu(21, "0200001"), plu(22, "0200001")];
+        let validation_report = validate_plus(&plus);
+        let valid_plus = vec![plus[0].clone()];
+        let dataset = source_dataset(vec![
+            ("20", "0001", "PLU 20", "0200001"),
+            ("21", "0001", "PLU 21", "0200001"),
+            ("22", "0001", "PLU 22", "0200001"),
+        ]);
+        let diagnostics = diagnostics_report(&dataset, &plus, &valid_plus, &[], &validation_report);
+
+        let manifest = build_dry_run_manifest(
+            "plu.mdb",
+            "abc123",
+            &dataset,
+            &plus,
+            &valid_plus,
+            &diagnostics,
+            &DigiwebConfig::default(),
+            Some(1),
+        )
+        .expect("manifest");
+
+        assert_eq!(manifest.summary.selection.selected, 1);
+        assert_eq!(manifest.summary.selection.would_submit, 1);
+        assert_eq!(manifest.summary.selection.selected_duplicate_skips, 0);
+        assert_eq!(
+            manifest
+                .summary
+                .source_validation_findings
+                .duplicate_barcode_plus,
+            2
+        );
     }
 }

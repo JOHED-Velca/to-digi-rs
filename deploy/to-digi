@@ -43,6 +43,10 @@ require_command() {
 }
 
 command_label() {
+    if has_arg_name "--help" "$@" || has_arg_name "-h" "$@"; then
+        printf 'info\n'
+        return 0
+    fi
     case "${1:-import}" in
         import)
             if has_arg_name "--dry-run" "$@"; then
@@ -383,7 +387,7 @@ if [ "$COMMAND_LABEL" = "doctor" ]; then
     fi
 fi
 
-validate_local_inputs "$@"
+validate_local_inputs "$COMMAND_LABEL"
 mkdir -p "$OUTPUT_DIR" || fail "Unable to create output directory: $OUTPUT_DIR" 2
 [ -w "$SCRIPT_DIR" ] || fail "The invoking user cannot write to the deployment directory: $SCRIPT_DIR" 2
 [ -w "$OUTPUT_DIR" ] || fail "The invoking user cannot write to the output directory: $OUTPUT_DIR" 2

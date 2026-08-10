@@ -57,13 +57,19 @@ if [ "$#" -ge 1 ] && [ "$1" = "run" ]; then
     printf 'TO_DIGI_RS_IMAGE=%s\n' "${TO_DIGI_RS_IMAGE:-}" >>"$log"
     printf 'TO_DIGI_RS_IMPORT_MANIFEST_PATH=%s\n' "${TO_DIGI_RS_IMPORT_MANIFEST_PATH:-}" >>"$log"
     printf 'SECRET_VISIBLE=%s\n' "${TO_DIGI_RS_CLIENT_SECRET:-}" >>"$log"
+    joined=" $* "
+    case "$joined" in
+        *" --help "*|*" -h "*)
+            printf 'help-ok\n'
+            exit 0
+            ;;
+    esac
     printf 'run-ok\n' >logs.txt
     if [ -n "${TO_DIGI_RS_IMPORT_MANIFEST_PATH:-}" ]; then
         manifest_path="${TO_DIGI_RS_IMPORT_MANIFEST_PATH#/work/}"
         mkdir -p "$(dirname "$manifest_path")"
         printf '{"schema_version":2,"run_status":"success"}\n' >"$manifest_path"
     fi
-    joined=" $* "
     case "$joined" in
         *" analyze "*)
             printf 'analysis-ok\n' >analysis-report.txt
@@ -187,6 +193,20 @@ test_help_version_and_pull_do_not_require_config_or_plu() {
 
     run_with_fake_docker "$deploy_dir" "$output" pull
     assert_contains "$TEST_ROOT/fake-docker.log" "ARGS:pull ghcr.io/johed-velca/to-digi-rs:0.9.0"
+}
+
+test_subcommand_help_does_not_warn_about_missing_logs() {
+    local deploy_dir="$TEST_ROOT/deploy-subcommand-help"
+    local output="$TEST_ROOT/output-subcommand-help.txt"
+    copy_deploy "$deploy_dir"
+    rm "$deploy_dir/config.toml" "$deploy_dir/plu.mdb"
+
+    run_with_fake_docker "$deploy_dir" "$output" diagnose --help
+
+    assert_contains "$TEST_ROOT/fake-docker.log" "diagnose --help"
+    assert_not_contains "$output" "WARNING: Importer did not create logs.txt."
+    assert_contains "$output" "Log file:"
+    assert_contains "$output" "<not created>"
 }
 
 test_missing_config_and_plu_fail_clearly() {
@@ -325,6 +345,7 @@ test_launcher_does_not_print_secrets() {
 
 test_launcher_archives_output_and_preserves_exit_code
 test_help_version_and_pull_do_not_require_config_or_plu
+test_subcommand_help_does_not_warn_about_missing_logs
 test_missing_config_and_plu_fail_clearly
 test_profile_and_resume_paths_are_translated
 test_offline_diagnostics_archive_reports_without_config

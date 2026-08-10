@@ -153,6 +153,8 @@ pub struct LabelFormatRequirement {
     pub plu_count: usize,
     pub plu_numbers: Vec<u64>,
     pub source_field: String,
+    pub server_reference_required: bool,
+    pub semantic_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -158,6 +158,13 @@ fn label_format_requirements(plus: &[Plu]) -> Vec<LabelFormatRequirement> {
                 plu_count: plu_numbers.len(),
                 plu_numbers,
                 source_field: "Pludata.Print Format Code -> plulabelformat".to_string(),
+                server_reference_required: label_format > 0,
+                semantic_status: if label_format == 0 {
+                    "unresolved_zero_semantics_may_mean_default_or_no_explicit_label_format"
+                        .to_string()
+                } else {
+                    "positive_label_format_reference".to_string()
+                },
             }
         })
         .collect()
@@ -811,9 +818,14 @@ fn recommended_actions(
         ));
     }
     if status != AnalysisStatus::Fail {
+        actions.push(
+            "Run `to-digi-rs diagnose --invalid-only` if any invalid/skipped PLUs are reported."
+                .to_string(),
+        );
+        actions.push("Run `to-digi-rs dry-run --test` before any live PLU write.".to_string());
         actions
             .push("Run `to-digi-rs verify` after DIGIweb configuration is complete.".to_string());
-        actions.push("Run `to-digi-rs import --limit 1` before the full import.".to_string());
+        actions.push("Only after readiness is confirmed, run `to-digi-rs import --test` before the full import.".to_string());
     }
     actions
 }

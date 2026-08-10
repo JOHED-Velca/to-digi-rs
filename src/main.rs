@@ -1193,7 +1193,11 @@ fn run_dry_run(
     logger.kv("Dry-run manifest", "dry-run-manifest.json")?;
     logger.kv(
         "Skipped duplicate barcode",
-        &manifest.summary.skipped_duplicate_barcode.to_string(),
+        &manifest
+            .summary
+            .source_validation_findings
+            .duplicate_barcode_plus
+            .to_string(),
     )?;
     logger.line("API write requests: 0")?;
     logger.line("DIGIweb modified: NO")?;
@@ -1201,9 +1205,11 @@ fn run_dry_run(
     log_duplicate_barcode_section(logger, &diagnostics.duplicate_barcode_groups)?;
     logger.final_import_summary(FinalImportLog {
         status: if manifest.summary.payload_build_failures == 0
-            && manifest.summary.skipped_invalid == 0
-            && manifest.summary.skipped_duplicate_barcode == 0
-            && manifest.summary.customer_action_required == 0
+            && manifest
+                .summary
+                .source_validation_findings
+                .source_invalid_plus
+                == 0
         {
             "DRY_RUN_SUCCESS"
         } else {
@@ -1213,7 +1219,10 @@ fn run_dry_run(
         placeholders_ignored: source.placeholder_ignored,
         invalid_source_rows: source.invalid_source_rows,
         validation_skipped: source.validation_skipped,
-        skipped_duplicate_barcode: manifest.summary.skipped_duplicate_barcode,
+        skipped_duplicate_barcode: manifest
+            .summary
+            .source_validation_findings
+            .duplicate_barcode_plus,
         normalized: source.plus.len(),
         valid: source.valid_plus.len(),
         selected: manifest.summary.selected,
@@ -1230,9 +1239,11 @@ fn run_dry_run(
     })?;
     print!("{}", render_dry_run_console(&manifest));
     let exit_code = if manifest.summary.payload_build_failures == 0
-        && manifest.summary.skipped_invalid == 0
-        && manifest.summary.skipped_duplicate_barcode == 0
-        && manifest.summary.customer_action_required == 0
+        && manifest
+            .summary
+            .source_validation_findings
+            .source_invalid_plus
+            == 0
     {
         0
     } else {
@@ -1758,7 +1769,10 @@ async fn run_verify(
     let client = DigiwebClient::new(config.clone())?;
     authenticate(client.http(), config, &client_secret).await?;
     let required_group_references = collect_required_references(&source.valid_plus);
-    let required_label_formats = label_format_requirements(&source.valid_plus);
+    let required_label_formats = label_format_requirements(&source.valid_plus)
+        .into_iter()
+        .filter(|label_format| label_format.server_reference_required)
+        .collect::<Vec<_>>();
     logger.kv(
         "Local source analysis status",
         analysis_report.analysis_status.as_text(),

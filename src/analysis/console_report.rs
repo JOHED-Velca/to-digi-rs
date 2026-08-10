@@ -320,10 +320,12 @@ fn render_setup(report: &AnalysisReport, out: &mut String) {
     );
     blank(out);
     line(out, "Next:");
+    line(out, "./to-digi diagnose --invalid-only");
+    line(out, "./to-digi dry-run --test");
     line(out, "./to-digi verify");
     blank(out);
-    line(out, "Test one PLU:");
-    line(out, "./to-digi import --limit 1");
+    line(out, "After verify confirms readiness:");
+    line(out, "./to-digi import --test");
     line(out, SETUP_SEPARATOR);
 }
 
@@ -507,8 +509,11 @@ mod tests {
         assert!(output.contains(
             "It does not confirm whether these departments, groups, or label formats already exist in DIGIweb."
         ));
+        assert!(output.contains("./to-digi diagnose --invalid-only"));
+        assert!(output.contains("./to-digi dry-run --test"));
         assert!(output.contains("./to-digi verify"));
-        assert!(output.contains("./to-digi import --limit 1"));
+        assert!(output.contains("./to-digi import --test"));
+        assert!(!output.contains("./to-digi import --limit 1"));
         assert!(output.contains("/tmp/analysis-report.txt"));
         assert!(output.contains("/tmp/analysis-report.json"));
         assert!(output.contains("No authentication or DIGIweb API requests were attempted."));

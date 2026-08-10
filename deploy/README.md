@@ -29,6 +29,7 @@ Then edit `config.toml`, place `plu.mdb` beside `to-digi`, and run:
 ./to-digi analyze
 ./to-digi discover
 ./to-digi diagnose
+./to-digi diagnose --plu 18
 ./to-digi map-audit
 ./to-digi profile suggest --name bigway
 ./to-digi sanitize
@@ -108,9 +109,20 @@ The launcher does not prune, stop, remove, or modify unrelated Docker resources.
 
 `discover`, `diagnose`, `dry-run`, `map-audit`, and `profile suggest` are offline-only diagnostics. They require `plu.mdb`, but not `config.toml` or credentials, and they do not authenticate, contact DIGIweb, submit PLUs, or modify the source MDB.
 
-`diagnose` writes exact invalid/skipped PLU details, duplicate effective barcode groups, and required label formats to `diagnostics-report.txt/json`. `dry-run` writes `dry-run-report.txt` and `dry-run-manifest.json`, may build payload previews, and always records zero API write requests.
+`diagnose` writes exact invalid/skipped PLU details, duplicate effective barcode groups, and required label formats to `diagnostics-report.txt/json`. `diagnose --plu N` also shows local details for valid PLUs, including Label Format, required references, ingredient/NFT counts, and payload destination summary. `dry-run` writes `dry-run-report.txt` and `dry-run-manifest.json`, may build payload previews, and always records zero API write requests.
 
 `verify` checks connectivity and import readiness, but it is fail-closed for DIGIweb prerequisites. If required departments, groups, or label formats cannot be confirmed through a supported lookup endpoint, it reports `NOT READY / UNVERIFIED REFERENCE` rather than claiming the customer is ready for import.
+
+Use this safe sequence before live writes:
+
+```bash
+./to-digi diagnose --invalid-only
+./to-digi dry-run --test
+./to-digi verify
+./to-digi import --test
+```
+
+Run the live test import only after dry-run output has been reviewed and readiness is confirmed. Label Format `0` is reported with unresolved semantics rather than assumed to be a real server object; positive Label Formats are treated as required server-side references.
 
 ## Configuration
 

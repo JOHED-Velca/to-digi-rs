@@ -330,6 +330,21 @@ pub fn render_text_report(report: &AnalysisReport) -> String {
         );
         line(
             &mut out,
+            format!(
+                "Server reference required: {}",
+                if label_format.server_reference_required {
+                    "YES"
+                } else {
+                    "NO"
+                }
+            ),
+        );
+        line(
+            &mut out,
+            format!("Semantic status: {}", label_format.semantic_status),
+        );
+        line(
+            &mut out,
             format!("PLUs: {}", join_numbers(&label_format.plu_numbers)),
         );
     }

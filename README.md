@@ -62,6 +62,7 @@ Then place the customer database in the same directory using the exact filename 
 ./to-digi map-audit
 ./to-digi profile suggest --name bigway
 ./to-digi sanitize
+./to-digi diagnose --plu 18
 ./to-digi dry-run --test
 ./to-digi verify
 ./to-digi import
@@ -93,11 +94,23 @@ Then place the customer database in the same directory using the exact filename 
 
 - `discover` writes `discovery-report.txt/json` with raw MDB field-quality, department/group reference, setup, sanitization-candidate, and timing details.
 - `diagnose` writes `diagnostics-report.txt/json` with exact invalid/skipped PLUs, row-level missing required values, duplicate effective barcodes, and required label formats.
+- `diagnose --plu N` also reports useful local details for valid PLUs, including Label Format, required references, derived barcode, ingredient/NFT counts, and payload destination summary.
 - `dry-run` writes `dry-run-report.txt` and `dry-run-manifest.json`, builds selected payload previews when enabled, and records `api_write_requests = 0`.
 - `map-audit` writes `mapping-report.txt/json` showing the current source-to-payload mappings, including ingredient versus nutrition separation and bounded payload metadata samples.
 - `profile suggest --name NAME` writes `profiles/NAME.draft.toml` and `profile-recommendations.txt` without overwriting an existing draft. Only deterministic safe findings become active rules; ambiguous findings stay as comments/recommendations.
 
 `verify` is intentionally fail-closed for external DIGIweb prerequisites. If the source requires departments, groups, or label formats and no supported read/lookup endpoint confirms them, `verify` reports `NOT READY / UNVERIFIED REFERENCE` instead of giving a false ready signal.
+
+Safe pre-import order:
+
+```bash
+./to-digi diagnose --invalid-only
+./to-digi dry-run --test
+./to-digi verify
+./to-digi import --test
+```
+
+Run the live test import only after dry-run output is clean enough for the customer and `verify` has not found an unverified hard reference.
 
 ## Profiles
 
@@ -118,6 +131,8 @@ Profile precedence is deterministic:
 Use `./to-digi analyze --raw` when you need an unsanitized source analysis. The built-in Starsky profile and `profiles/starsky.toml` are kept equivalent.
 
 Starsky rules fill empty Department with `1`, empty Barcode with the normalized PLU code, empty Barcode Format with `05`, and empty Print Format Code with `00`. They also treat Best Before `0` as disabled/default, preserve `1..999`, and replace empty, malformed, negative, or greater-than-999 Best Before values with `0`. These rules affect DIGIweb `plusellingdateterm`; use-by fields keep their separate source mappings.
+
+Label Format `0` is reported with unresolved semantics because the current repository does not prove whether it is a real DIGIweb Label Format object or a default/no-explicit-format value. Positive Label Formats are treated as required server-side references.
 
 ## Configuration
 

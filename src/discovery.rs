@@ -156,6 +156,8 @@ pub struct RequiredLabelFormat {
     pub label_format: u32,
     pub plu_count: usize,
     pub plu_numbers: Vec<u64>,
+    pub server_reference_required: bool,
+    pub semantic_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -272,9 +274,30 @@ pub fn render_discovery_console(report: &DiscoveryReport) -> String {
     );
     kv(
         &mut out,
+        "Label formats observed",
+        report.references.label_formats_used,
+    );
+    kv(
+        &mut out,
         "Unknown group names",
         report.references.missing_group_names,
     );
+    if !report.required_label_formats.is_empty() {
+        line(&mut out, "Label Formats");
+        for label_format in &report.required_label_formats {
+            line(
+                &mut out,
+                format!(
+                    "  Label Format {} | PLUs: {} | Used by: {} | Server reference required: {} | {}",
+                    label_format.label_format,
+                    label_format.plu_count,
+                    join_numbers(&label_format.plu_numbers),
+                    yes_no(label_format.server_reference_required),
+                    label_format.semantic_status
+                ),
+            );
+        }
+    }
     blank(&mut out);
     line(&mut out, "Potential sanitization");
     for field in &report.fields {
@@ -284,17 +307,6 @@ pub fn render_discovery_console(report: &DiscoveryReport) -> String {
         if problems > 0 {
             kv(&mut out, &field.field, problems);
         }
-    }
-    for label_format in &report.required_label_formats {
-        line(
-            &mut out,
-            format!(
-                "Label Format {} | PLUs: {} | Used by: {}",
-                label_format.label_format,
-                label_format.plu_count,
-                join_numbers(&label_format.plu_numbers)
-            ),
-        );
     }
     blank(&mut out);
     line(&mut out, "Result");
@@ -350,6 +362,22 @@ fn render_discovery_text(report: &DiscoveryReport) -> String {
                     group.source_name.as_deref().unwrap_or("UNKNOWN"),
                     group.plu_count,
                     group.action
+                ),
+            );
+        }
+    }
+    if !report.required_label_formats.is_empty() {
+        line(&mut out, "Label Formats");
+        for label_format in &report.required_label_formats {
+            line(
+                &mut out,
+                format!(
+                    "  Label Format {} | PLUs: {} | Server reference required: {} | Semantic status: {} | Used by: {}",
+                    label_format.label_format,
+                    label_format.plu_count,
+                    yes_no(label_format.server_reference_required),
+                    label_format.semantic_status,
+                    join_numbers(&label_format.plu_numbers)
                 ),
             );
         }
@@ -895,6 +923,13 @@ fn required_label_formats(plus: &[Plu]) -> Vec<RequiredLabelFormat> {
                 label_format,
                 plu_count: plu_numbers.len(),
                 plu_numbers,
+                server_reference_required: label_format > 0,
+                semantic_status: if label_format == 0 {
+                    "unresolved_zero_semantics_may_mean_default_or_no_explicit_label_format"
+                        .to_string()
+                } else {
+                    "positive_label_format_reference".to_string()
+                },
             }
         })
         .collect()
@@ -1039,6 +1074,10 @@ fn blank(out: &mut String) {
     out.push('\n');
 }
 
+fn yes_no(value: bool) -> &'static str {
+    if value { "YES" } else { "NO" }
+}
+
 fn join_numbers(numbers: &[u64]) -> String {
     if numbers.is_empty() {
         "none".to_string()
@@ -1055,7 +1094,10 @@ fn join_numbers(numbers: &[u64]) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
+    use rust_decimal::Decimal;
+
     use super::*;
+    use crate::models::plu::{Plu, PriceMode};
     use crate::validation::validator::ValidationReport;
 
     fn row(plu: &str, group: &str, best_before: &str) -> SourceRow {
@@ -1071,6 +1113,44 @@ mod tests {
                 ("Barcode Format".to_string(), "05".to_string()),
                 ("Best Before".to_string(), best_before.to_string()),
             ]),
+        }
+    }
+
+    fn valid_plu(plu_number: u64, label_format: u32) -> Plu {
+        Plu {
+            plu_number,
+            store_number: 1,
+            department_number: Some(1),
+            group_number: Some(997),
+            source_department: Some("0001".to_string()),
+            source_group: Some("997".to_string()),
+            group_default_applied: false,
+            name: format!("PLU {plu_number}"),
+            barcode: Some(format!("020{plu_number:05}")),
+            barcode_type: Some("5".to_string()),
+            barcode_ref_no: Some("5".to_string()),
+            source_barcode: Some(plu_number.to_string()),
+            source_barcode_format: Some("05".to_string()),
+            source_flag_data: Some("02".to_string()),
+            price: Decimal::new(100, 2),
+            price_mode: PriceMode::ByEach,
+            price_calc_method: Some(0),
+            quantity: Some(0),
+            quantity_symbol: Some(0),
+            tare: Some(Decimal::ZERO),
+            discount_type: Some(0),
+            packing_date_print: Some(0),
+            packing_time_print: Some(0),
+            selling_date_print: Some(0),
+            selling_date_term: Some(0),
+            expiration_days: None,
+            label_format: Some(label_format),
+            traceability: Some(0),
+            short_description: None,
+            key_label: None,
+            ingredients: None,
+            nutrition_facts: Vec::new(),
+            source_pluing_row_count: 0,
         }
     }
 
@@ -1141,5 +1221,50 @@ mod tests {
         assert!(!report.safety.authentication_attempted);
         assert!(!report.safety.digiweb_api_requests_attempted);
         assert_eq!(report.safety.plus_submitted, 0);
+    }
+
+    #[test]
+    fn label_formats_are_references_not_sanitization_candidates() {
+        let dataset = SourceDataset {
+            plu_rows: vec![row("18", "997", "0")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+        let plus = vec![valid_plu(18, 6), valid_plu(19, 0)];
+        let now = Local::now();
+        let report = build_discovery_report(DiscoveryInput {
+            command: "discover",
+            source_path: "plu.mdb",
+            source_sha256: "abc",
+            started_at: now,
+            finished_at: now,
+            dataset: &dataset,
+            valid_plus: &plus,
+            all_normalized_plus: &plus,
+            row_issues: &[],
+            validation_report: &ValidationReport { issues: Vec::new() },
+            placeholder_ignored: 0,
+            reference_tables: &[],
+            timings: Vec::new(),
+        });
+        let console = render_discovery_console(&report);
+        let potential = console
+            .split("Potential sanitization")
+            .nth(1)
+            .unwrap()
+            .split("Result")
+            .next()
+            .unwrap();
+
+        assert!(console.contains("Label Formats"));
+        assert!(console.contains("Label Format 6"));
+        assert!(console.contains("Label Format 0"));
+        assert!(!potential.contains("Label Format"));
+        assert!(
+            report
+                .required_label_formats
+                .iter()
+                .any(|format| format.label_format == 0 && !format.server_reference_required)
+        );
     }
 }

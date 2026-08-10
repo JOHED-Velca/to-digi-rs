@@ -146,7 +146,7 @@ pub fn build_mapping_audit_report(
         .map(|plu| DigiwebPluPayload::from_plu(plu, input.config).map(|payload| (*plu, payload)))
         .collect::<Result<Vec<_>, AppError>>()?;
     let destinations = destinations(input.dataset, &payloads);
-    let separation = separation_audit(input.dataset, &payloads);
+    let separation = separation_audit(input.dataset, &payloads, &destinations);
     let mut warnings = destinations
         .iter()
         .filter_map(|destination| destination.warning.clone())
@@ -505,6 +505,7 @@ fn dest(
 fn separation_audit(
     dataset: &SourceDataset,
     payloads: &[(&Plu, DigiwebPluPayload)],
+    destinations: &[MappingDestination],
 ) -> SeparationAudit {
     let ingredient_payload = payloads
         .iter()
@@ -542,31 +543,15 @@ fn separation_audit(
                 .to_string(),
         );
     }
-    for (_, payload) in payloads {
-        if payload
-            .pluingredients
-            .as_deref()
-            .is_some_and(looks_like_nutrition_text)
-        {
-            warnings.push(
-                "possible nutrition token found in ingredient payload text; review source data"
-                    .to_string(),
-            );
-        }
-        if payload.plunft.as_ref().is_some_and(|nft| {
-            nft.data
-                .iter()
-                .any(|data| looks_like_ingredient_text(&data.name))
-        }) {
-            warnings.push(
-                "possible ingredient token found in nutrition payload names; review source data"
-                    .to_string(),
-            );
-        }
-    }
+    warnings.extend(provenance_warnings(destinations));
     warnings.sort();
     warnings.dedup();
-    let status = if warnings.is_empty() {
+    let status = if warnings
+        .iter()
+        .any(|warning| warning.contains("wrong provenance"))
+    {
+        MappingAuditStatus::Fail
+    } else if warnings.is_empty() {
         MappingAuditStatus::Pass
     } else {
         MappingAuditStatus::Warning
@@ -654,18 +639,35 @@ fn has_any(row: &crate::source::SourceRow, columns: &[&str]) -> bool {
         .any(|value| !value.trim().is_empty())
 }
 
-fn looks_like_nutrition_text(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    ["calories", "cholesterol", "sodium", "protein", "total fat"]
-        .iter()
-        .any(|token| lower.contains(token))
-}
-
-fn looks_like_ingredient_text(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    ["ingredient", "may contain", "contains"]
-        .iter()
-        .any(|token| lower.contains(token))
+fn provenance_warnings(destinations: &[MappingDestination]) -> Vec<String> {
+    let ingredient_fields = ingredient_source_fields()
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    let nutrition_fields = nutrition_source_fields()
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut warnings = Vec::new();
+    for destination in destinations {
+        if destination.destination == "pluingredients" {
+            for column in &destination.source_columns {
+                if nutrition_fields.contains(column) {
+                    warnings.push(format!(
+                        "wrong provenance: PluIng.{column} -> pluingredients"
+                    ));
+                }
+            }
+        }
+        if destination.destination == "plunft.data" {
+            for column in &destination.source_columns {
+                if ingredient_fields.contains(column) {
+                    warnings.push(format!("wrong provenance: PluIng.{column} -> plunft.data"));
+                }
+            }
+        }
+    }
+    warnings
 }
 
 fn line(out: &mut String, text: impl AsRef<str>) {
@@ -780,6 +782,84 @@ mod tests {
         );
         assert!(report.samples[0].ingredient_present);
         assert_eq!(report.samples[0].nutrition_fact_count, 1);
+    }
+
+    #[test]
+    fn ingredient_text_with_nutrition_word_is_not_cross_mapping_warning() {
+        let mut plu = plu();
+        plu.ingredients = Some("Pea protein, salt".to_string());
+        plu.nutrition_facts = Vec::new();
+        let dataset = SourceDataset {
+            plu_rows: Vec::new(),
+            ingredient_rows: vec![SourceRow {
+                table: "PluIng".to_string(),
+                values: BTreeMap::from([(
+                    "Ing Name 1".to_string(),
+                    "Pea protein, salt".to_string(),
+                )]),
+            }],
+            nutrition_rows: Vec::new(),
+        };
+        let now = Local::now();
+        let report = build_mapping_audit_report(MappingAuditInput {
+            source_path: "plu.mdb",
+            source_sha256: "abc",
+            started_at: now,
+            finished_at: now,
+            dataset: &dataset,
+            valid_plus: &[plu],
+            config: &DigiwebConfig::default(),
+            sample_limit: 5,
+            target_plu: None,
+            timings: Vec::new(),
+        })
+        .expect("audit");
+
+        assert_eq!(
+            report.ingredient_nutrition_separation.status,
+            MappingAuditStatus::Pass
+        );
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("nutrition token"))
+        );
+    }
+
+    #[test]
+    fn wrong_provenance_mapping_is_detected() {
+        let warnings = provenance_warnings(&[
+            MappingDestination {
+                destination: "pluingredients".to_string(),
+                source_table: "PluIng".to_string(),
+                source_columns: vec!["Calories".to_string()],
+                transformation: "bad".to_string(),
+                plus_with_source_data: 1,
+                plus_with_populated_target: 1,
+                rejected_or_skipped: 0,
+                representative_plus: vec![1],
+                warning: None,
+            },
+            MappingDestination {
+                destination: "plunft.data".to_string(),
+                source_table: "PluIng".to_string(),
+                source_columns: vec!["Ing Name 1".to_string()],
+                transformation: "bad".to_string(),
+                plus_with_source_data: 1,
+                plus_with_populated_target: 1,
+                rejected_or_skipped: 0,
+                representative_plus: vec![1],
+                warning: None,
+            },
+        ]);
+
+        assert!(
+            warnings.contains(&"wrong provenance: PluIng.Calories -> pluingredients".to_string())
+        );
+        assert!(
+            warnings.contains(&"wrong provenance: PluIng.Ing Name 1 -> plunft.data".to_string())
+        );
     }
 
     #[test]
