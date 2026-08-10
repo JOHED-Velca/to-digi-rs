@@ -12,6 +12,7 @@ pub struct FinalImportLog<'a> {
     pub placeholders_ignored: usize,
     pub invalid_source_rows: usize,
     pub validation_skipped: usize,
+    pub skipped_duplicate_barcode: usize,
     pub normalized: usize,
     pub valid: usize,
     pub selected: usize,
@@ -111,6 +112,10 @@ impl AuditLogger {
         self.kv(
             "PLUs skipped due to validation error",
             &summary.validation_skipped.to_string(),
+        )?;
+        self.kv(
+            "Skipped duplicate barcode",
+            &summary.skipped_duplicate_barcode.to_string(),
         )?;
         if summary.dry_run {
             self.kv("Valid PLUs identified", &summary.valid.to_string())?;
@@ -252,6 +257,7 @@ mod tests {
                 placeholders_ignored: 1,
                 invalid_source_rows: 0,
                 validation_skipped: 0,
+                skipped_duplicate_barcode: 0,
                 normalized: 4,
                 valid: 4,
                 selected: 1,
@@ -274,6 +280,7 @@ mod tests {
         assert!(contents.contains("Successful PLUs: 1"));
         assert!(contents.contains("Failed PLUs: None"));
         assert!(contents.contains("Ignored source placeholders: 1"));
+        assert!(contents.contains("Skipped duplicate barcode: 0"));
     }
 
     #[test]
@@ -289,6 +296,7 @@ mod tests {
                 placeholders_ignored: 1,
                 invalid_source_rows: 0,
                 validation_skipped: 0,
+                skipped_duplicate_barcode: 0,
                 normalized: 4,
                 valid: 4,
                 selected: 0,
@@ -325,6 +333,7 @@ mod tests {
                 placeholders_ignored: 1,
                 invalid_source_rows: 0,
                 validation_skipped: 0,
+                skipped_duplicate_barcode: 0,
                 normalized: 4,
                 valid: 4,
                 selected: 0,

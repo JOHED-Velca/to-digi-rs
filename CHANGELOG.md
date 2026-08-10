@@ -9,8 +9,14 @@
 - Added built-in Starsky profile selection and deployment default profile support
 - Added `analyze --raw` for explicit unsanitized analysis
 - Added offline `discover` reports for raw customer MDB field quality, references, setup, and sanitization candidates
+- Added offline `diagnose` reports for exact invalid/skipped PLUs, duplicate barcodes, and required label formats
+- Added offline `dry-run` command and `import --dry-run` alias with zero API writes and dry-run manifests
 - Added offline `map-audit` reports for current source-to-DIGIweb payload mapping diagnostics
 - Added `profile suggest --name NAME` to generate non-overwriting draft profiles and recommendations from deterministic findings
+- Made `verify` fail closed when required departments, groups, or label formats cannot be confirmed through supported DIGIweb lookup endpoints
+- Improved duplicate barcode diagnostics so the first PLU remains canonical and later duplicates are skipped explicitly
+- Added label-format prerequisite reporting to analysis and discovery output
+- Added a legacy `dry_run_inspect_only` conflict guard for live imports
 - Added minimal generated configuration with documented defaults
 - Added relative token URL resolution against `base_url`
 - Added `TO_DIGI_RS_*` environment overrides and client-secret file support

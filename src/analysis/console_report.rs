@@ -59,6 +59,8 @@ pub fn render_console_summary(
     blank(&mut out);
     render_groups(report, &mut out);
     blank(&mut out);
+    render_label_formats(report, &mut out);
+    blank(&mut out);
     render_installation_warnings(report, &mut out);
     blank(&mut out);
     render_setup(report, &mut out);
@@ -144,6 +146,36 @@ fn render_groups(report: &AnalysisReport, out: &mut String) {
                 ),
             );
         }
+    }
+}
+
+fn render_label_formats(report: &AnalysisReport, out: &mut String) {
+    line(
+        out,
+        format!("Required label formats: {}", report.label_formats.len()),
+    );
+    if report.label_formats.is_empty() {
+        line(out, "No label format prerequisites were identified.");
+        return;
+    }
+    if report.label_formats.len() > DISPLAY_LIMIT {
+        line(
+            out,
+            format!(
+                "Showing first {DISPLAY_LIMIT} of {} required label formats.",
+                report.label_formats.len()
+            ),
+        );
+        line(out, "Complete list: ./analysis-report.txt");
+    }
+    for label_format in report.label_formats.iter().take(DISPLAY_LIMIT) {
+        line(
+            out,
+            format!(
+                "- Label Format {} used by {} PLUs",
+                label_format.label_format, label_format.plu_count
+            ),
+        );
     }
 }
 
@@ -253,10 +285,38 @@ fn render_setup(report: &AnalysisReport, out: &mut String) {
         }
     }
     blank(out);
+    line(out, "Create or confirm these label formats:");
+    if report.label_formats.is_empty() {
+        blank(out);
+        line(out, "No label format prerequisites were identified.");
+    } else {
+        blank(out);
+        for (index, label_format) in report.label_formats.iter().take(DISPLAY_LIMIT).enumerate() {
+            line(
+                out,
+                format!(
+                    "{}. Label Format ID: {}",
+                    index + 1,
+                    label_format.label_format
+                ),
+            );
+            line(out, format!("   Used by {} PLUs", label_format.plu_count));
+        }
+        if report.label_formats.len() > DISPLAY_LIMIT {
+            line(
+                out,
+                format!(
+                    "... {} more label formats omitted. Complete list: ./analysis-report.txt",
+                    report.label_formats.len() - DISPLAY_LIMIT
+                ),
+            );
+        }
+    }
+    blank(out);
     line(out, "This analysis reads only plu.mdb.");
     line(
         out,
-        "It does not confirm whether these departments or groups already exist in DIGIweb.",
+        "It does not confirm whether these departments, groups, or label formats already exist in DIGIweb.",
     );
     blank(out);
     line(out, "Next:");
@@ -356,6 +416,8 @@ mod tests {
                 source_maingroup_table_status: TableStatus::Empty,
                 source_reference_match: ReferenceMatchStatus::EmptyTable,
             }],
+            label_formats: Vec::new(),
+            invalid_plu_findings: Vec::new(),
             barcode_formats: Vec::new(),
             price_categories: Vec::new(),
             ingredient_analysis: IngredientAnalysis {
@@ -441,8 +503,9 @@ mod tests {
         assert!(output.contains("REQUIRED DIGIWEB SETUP"));
         assert!(output.contains("Create or confirm these departments:"));
         assert!(output.contains("Create or confirm these groups:"));
+        assert!(output.contains("Create or confirm these label formats:"));
         assert!(output.contains(
-            "It does not confirm whether these departments or groups already exist in DIGIweb."
+            "It does not confirm whether these departments, groups, or label formats already exist in DIGIweb."
         ));
         assert!(output.contains("./to-digi verify"));
         assert!(output.contains("./to-digi import --limit 1"));

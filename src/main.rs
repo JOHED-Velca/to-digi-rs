@@ -2,6 +2,7 @@ mod analysis;
 mod cli;
 mod config;
 mod deployment;
+mod diagnostics;
 mod digiweb;
 mod discovery;
 mod error;
@@ -26,6 +27,12 @@ use clap::Parser;
 use cli::{Cli, CliCommand, EffectiveCommand, ProfileSelection, effective_command};
 use config::{AppConfig, client_secret_log_message, load_client_secret};
 use deployment::{run_doctor, run_init};
+use diagnostics::{
+    DiagnosticCategory, DiagnosticTiming, DiagnosticsInput, build_diagnostics_report,
+    build_dry_run_manifest, filter_diagnostics, label_format_requirements,
+    render_diagnostics_console, render_dry_run_console, write_diagnostics_reports,
+    write_dry_run_outputs,
+};
 use digiweb::auth::authenticate;
 use digiweb::client::DigiwebClient;
 use digiweb::payload::DigiwebPluPayload;
@@ -88,6 +95,8 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
     let config_not_required_for_dispatch = matches!(
         cli.command,
         Some(CliCommand::Discover(_))
+            | Some(CliCommand::Diagnose(_))
+            | Some(CliCommand::DryRun(_))
             | Some(CliCommand::Init(_))
             | Some(CliCommand::MapAudit(_))
             | Some(CliCommand::Profile(_))
@@ -104,6 +113,8 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
         command,
         EffectiveCommand::Analyze { .. }
             | EffectiveCommand::Discover { .. }
+            | EffectiveCommand::Diagnose { .. }
+            | EffectiveCommand::DryRun { .. }
             | EffectiveCommand::MapAudit { .. }
             | EffectiveCommand::ProfileSuggest { .. }
             | EffectiveCommand::Sanitize { .. }
@@ -115,6 +126,8 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
         command,
         EffectiveCommand::Analyze { .. }
             | EffectiveCommand::Discover { .. }
+            | EffectiveCommand::Diagnose { .. }
+            | EffectiveCommand::DryRun { .. }
             | EffectiveCommand::Doctor { .. }
             | EffectiveCommand::MapAudit { .. }
             | EffectiveCommand::ProfileSuggest { .. }
@@ -136,6 +149,8 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
         command,
         EffectiveCommand::Analyze { .. }
             | EffectiveCommand::Discover { .. }
+            | EffectiveCommand::Diagnose { .. }
+            | EffectiveCommand::DryRun { .. }
             | EffectiveCommand::MapAudit { .. }
             | EffectiveCommand::ProfileSuggest { .. }
             | EffectiveCommand::Sanitize { .. }
@@ -163,6 +178,11 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
             sanitize_profile, ..
         } => run_analyze(&config, logger, sanitize_profile.as_ref()),
         EffectiveCommand::Discover { timings } => run_discover(&config, logger, timings),
+        EffectiveCommand::Diagnose {
+            invalid_only,
+            plu,
+            category,
+        } => run_diagnose(&config, logger, invalid_only, plu, category),
         EffectiveCommand::Doctor {
             pull,
             inside_container,
@@ -186,6 +206,12 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
             sanitize_profile,
             ..
         } => {
+            if config.import.dry_run_inspect_only {
+                return Err(AppError::Config(
+                    "CONFIGURATION CONFLICT\n\nconfig.toml contains:\ndry_run_inspect_only = true\n\nThe requested command performs live writes:\n./to-digi import\n\nNo PLUs were submitted.\n\nUse:\n./to-digi dry-run\n\nor explicitly migrate/remove the deprecated setting after reviewing the configuration."
+                        .to_string(),
+                ));
+            }
             run_import_command(
                 &config,
                 limit,
@@ -198,6 +224,11 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
             )
             .await
         }
+        EffectiveCommand::DryRun {
+            limit,
+            test_mode,
+            sanitize_profile,
+        } => run_dry_run(&config, logger, limit, test_mode, sanitize_profile.as_ref()),
         EffectiveCommand::Pull => {
             println!("Pull is handled by the generated ./to-digi launcher.");
             println!(
@@ -255,6 +286,23 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
                 "Detailed timings requested",
                 if *timings { "yes" } else { "no" },
             )?;
+        }
+        EffectiveCommand::Diagnose {
+            invalid_only,
+            plu,
+            category,
+        } => {
+            logger.kv("Network access permitted", "no")?;
+            logger.kv("Authentication attempted", "NO")?;
+            logger.kv("DIGIweb API requests attempted", "NO")?;
+            logger.kv("Source database modified", "NO")?;
+            logger.kv("Invalid only", if *invalid_only { "yes" } else { "no" })?;
+            if let Some(plu) = plu {
+                logger.kv("PLU filter", &plu.to_string())?;
+            }
+            if let Some(category) = category {
+                logger.kv("Diagnostic category", category.as_str())?;
+            }
         }
         EffectiveCommand::Doctor {
             pull,
@@ -326,6 +374,29 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
                 "Legacy configuration used",
                 if *legacy_used { "yes" } else { "no" },
             )?;
+        }
+        EffectiveCommand::DryRun {
+            limit,
+            test_mode,
+            sanitize_profile,
+        } => {
+            logger.kv("Network access permitted", "no")?;
+            logger.kv("Authentication attempted", "NO")?;
+            logger.kv("DIGIweb API requests attempted", "NO")?;
+            logger.kv("Source database modified", "NO")?;
+            logger.kv("API write requests", "0")?;
+            if *test_mode {
+                logger.line("Dry-run test mode enabled: equivalent to --limit 1.")?;
+            }
+            logger.kv(
+                "Dry-run limit",
+                &limit
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+            )?;
+            if let Some(profile) = sanitize_profile {
+                logger.kv("Sanitization profile", &profile.display())?;
+            }
         }
         EffectiveCommand::Pull => {
             logger.kv("PLU write permitted", "no")?;
@@ -747,6 +818,7 @@ fn run_analyze(
         placeholders_ignored: source.placeholder_ignored,
         invalid_source_rows: source.invalid_source_rows,
         validation_skipped: source.validation_skipped,
+        skipped_duplicate_barcode: skipped_duplicate_barcode_count(&source),
         normalized: source.plus.len(),
         valid: source.valid_plus.len(),
         selected: 0,
@@ -832,6 +904,7 @@ fn run_discover(
         placeholders_ignored: source.placeholder_ignored,
         invalid_source_rows: source.invalid_source_rows,
         validation_skipped: source.validation_skipped,
+        skipped_duplicate_barcode: skipped_duplicate_barcode_count(&source),
         normalized: source.plus.len(),
         valid: source.valid_plus.len(),
         selected: 0,
@@ -904,6 +977,7 @@ fn run_map_audit(
         placeholders_ignored: source.placeholder_ignored,
         invalid_source_rows: source.invalid_source_rows,
         validation_skipped: source.validation_skipped,
+        skipped_duplicate_barcode: skipped_duplicate_barcode_count(&source),
         normalized: source.plus.len(),
         valid: source.valid_plus.len(),
         selected: report.selected_plu_count,
@@ -969,6 +1043,7 @@ fn run_profile_suggest(
         placeholders_ignored: source.placeholder_ignored,
         invalid_source_rows: source.invalid_source_rows,
         validation_skipped: source.validation_skipped,
+        skipped_duplicate_barcode: skipped_duplicate_barcode_count(&source),
         normalized: source.plus.len(),
         valid: source.valid_plus.len(),
         selected: 0,
@@ -986,6 +1061,243 @@ fn run_profile_suggest(
     print!("{}", render_profile_suggestion_console(&report));
     println!("Final status: SUCCESS");
     Ok(0)
+}
+
+fn run_diagnose(
+    config: &AppConfig,
+    logger: &mut AuditLogger,
+    invalid_only: bool,
+    plu: Option<u64>,
+    category: Option<DiagnosticCategory>,
+) -> Result<i32, AppError> {
+    println!("Starting PLU diagnostics...");
+    println!(
+        "Outputs will be written to diagnostics-report.txt, diagnostics-report.json, and logs.txt"
+    );
+    logger.line("PLU DIAGNOSTICS ONLY")?;
+    logger.line("Network access permitted: NO")?;
+    logger.line("Authentication attempted: NO")?;
+    logger.line("DIGIweb API requests attempted: NO")?;
+    logger.line("Source database modified: NO")?;
+    let started_at = chrono::Local::now();
+    let source_started = Instant::now();
+    let source = read_source_context(config, logger, None)?;
+    let finished_at = chrono::Local::now();
+    let report = build_diagnostics_report(DiagnosticsInput {
+        source_path: FIXED_SOURCE_FILE,
+        source_sha256: &source.source_identity.sha256,
+        started_at,
+        finished_at,
+        dataset: &source.dataset,
+        all_normalized_plus: &source.plus,
+        valid_plus: &source.valid_plus,
+        row_issues: &source.row_issues,
+        validation_report: &source.validation_report,
+        timings: vec![DiagnosticTiming::from_duration(
+            "MDB source read and normalization",
+            source_started.elapsed(),
+        )],
+    });
+    let report = filter_diagnostics(&report, invalid_only, plu, category);
+    write_diagnostics_reports(
+        Path::new("diagnostics-report.txt"),
+        Path::new("diagnostics-report.json"),
+        &report,
+    )?;
+    logger.kv("Text diagnostics report", "diagnostics-report.txt")?;
+    logger.kv("JSON diagnostics report", "diagnostics-report.json")?;
+    logger.line("Authentication attempted: NO")?;
+    logger.line("DIGIweb API requests attempted: NO")?;
+    logger.line("Source database modified: NO")?;
+    logger.line("PLUs submitted: 0")?;
+    log_duplicate_barcode_section(logger, &report.duplicate_barcode_groups)?;
+    logger.final_import_summary(FinalImportLog {
+        status: "DIAGNOSTICS_COMPLETE",
+        source_discovered: source.dataset.plu_rows.len(),
+        placeholders_ignored: source.placeholder_ignored,
+        invalid_source_rows: source.invalid_source_rows,
+        validation_skipped: source.validation_skipped,
+        skipped_duplicate_barcode: report.summary.skipped_duplicate_barcode,
+        normalized: source.plus.len(),
+        valid: source.valid_plus.len(),
+        selected: 0,
+        submitted: 0,
+        succeeded: 0,
+        failed: 0,
+        unknown: 0,
+        not_attempted: 0,
+        intentionally_skipped_by_limit: 0,
+        successful_plu_numbers: &[],
+        failed_plu_numbers: &[],
+        unknown_plu_numbers: &[],
+        dry_run: true,
+    })?;
+    print!("{}", render_diagnostics_console(&report));
+    println!("Final status: DIAGNOSTICS_COMPLETE");
+    Ok(0)
+}
+
+fn run_dry_run(
+    config: &AppConfig,
+    logger: &mut AuditLogger,
+    limit: Option<usize>,
+    _test_mode: bool,
+    sanitize_profile_path: Option<&ProfileSelection>,
+) -> Result<i32, AppError> {
+    println!("DRY RUN");
+    println!("NO API WRITES");
+    println!("Outputs will be written to dry-run-report.txt, dry-run-manifest.json, and logs.txt");
+    logger.line("DRY RUN")?;
+    logger.line("NO API WRITES")?;
+    logger.line("Network access permitted: NO")?;
+    logger.line("Authentication attempted: NO")?;
+    logger.line("DIGIweb API requests attempted: NO")?;
+    logger.line("API write requests: 0")?;
+    logger.line("DIGIweb modified: NO")?;
+    logger.line("Source database modified: NO")?;
+    let profile = load_optional_sanitization_profile(sanitize_profile_path)?;
+    let started = Instant::now();
+    let source = read_source_context(config, logger, profile)?;
+    let diagnostics = build_diagnostics_report(DiagnosticsInput {
+        source_path: FIXED_SOURCE_FILE,
+        source_sha256: &source.source_identity.sha256,
+        started_at: chrono::Local::now(),
+        finished_at: chrono::Local::now(),
+        dataset: &source.dataset,
+        all_normalized_plus: &source.plus,
+        valid_plus: &source.valid_plus,
+        row_issues: &source.row_issues,
+        validation_report: &source.validation_report,
+        timings: vec![DiagnosticTiming::from_duration(
+            "Dry-run source read and normalization",
+            started.elapsed(),
+        )],
+    });
+    let manifest = build_dry_run_manifest(
+        FIXED_SOURCE_FILE,
+        &source.source_identity.sha256,
+        &source.dataset,
+        &source.plus,
+        &source.valid_plus,
+        &diagnostics,
+        &config.digiweb,
+        limit,
+    )?;
+    write_dry_run_payload_previews(config, &source.valid_plus, limit)?;
+    write_dry_run_outputs(
+        Path::new("dry-run-report.txt"),
+        Path::new("dry-run-manifest.json"),
+        &manifest,
+    )?;
+    logger.kv("Dry-run report", "dry-run-report.txt")?;
+    logger.kv("Dry-run manifest", "dry-run-manifest.json")?;
+    logger.kv(
+        "Skipped duplicate barcode",
+        &manifest.summary.skipped_duplicate_barcode.to_string(),
+    )?;
+    logger.line("API write requests: 0")?;
+    logger.line("DIGIweb modified: NO")?;
+    logger.line("PLUs submitted: 0")?;
+    log_duplicate_barcode_section(logger, &diagnostics.duplicate_barcode_groups)?;
+    logger.final_import_summary(FinalImportLog {
+        status: if manifest.summary.payload_build_failures == 0
+            && manifest.summary.skipped_invalid == 0
+            && manifest.summary.skipped_duplicate_barcode == 0
+            && manifest.summary.customer_action_required == 0
+        {
+            "DRY_RUN_SUCCESS"
+        } else {
+            "DRY_RUN_COMPLETED_WITH_ISSUES"
+        },
+        source_discovered: source.dataset.plu_rows.len(),
+        placeholders_ignored: source.placeholder_ignored,
+        invalid_source_rows: source.invalid_source_rows,
+        validation_skipped: source.validation_skipped,
+        skipped_duplicate_barcode: manifest.summary.skipped_duplicate_barcode,
+        normalized: source.plus.len(),
+        valid: source.valid_plus.len(),
+        selected: manifest.summary.selected,
+        submitted: 0,
+        succeeded: 0,
+        failed: 0,
+        unknown: 0,
+        not_attempted: 0,
+        intentionally_skipped_by_limit: 0,
+        successful_plu_numbers: &[],
+        failed_plu_numbers: &[],
+        unknown_plu_numbers: &[],
+        dry_run: true,
+    })?;
+    print!("{}", render_dry_run_console(&manifest));
+    let exit_code = if manifest.summary.payload_build_failures == 0
+        && manifest.summary.skipped_invalid == 0
+        && manifest.summary.skipped_duplicate_barcode == 0
+        && manifest.summary.customer_action_required == 0
+    {
+        0
+    } else {
+        1
+    };
+    println!(
+        "Final status: {}",
+        if exit_code == 0 {
+            "DRY_RUN_SUCCESS"
+        } else {
+            "DRY_RUN_COMPLETED_WITH_ISSUES"
+        }
+    );
+    Ok(exit_code)
+}
+
+fn write_dry_run_payload_previews(
+    config: &AppConfig,
+    valid_plus: &[Plu],
+    limit: Option<usize>,
+) -> Result<(), AppError> {
+    if !config.import.write_payload_preview {
+        return Ok(());
+    }
+    let preview_dir = Path::new("payload-previews");
+    if preview_dir.exists() {
+        std::fs::remove_dir_all(preview_dir).map_err(|err| {
+            AppError::Internal(format!("failed to clean payload preview directory: {err}"))
+        })?;
+    }
+    std::fs::create_dir_all(preview_dir).map_err(|err| {
+        AppError::Internal(format!("failed to create payload preview directory: {err}"))
+    })?;
+    let selected = match limit {
+        Some(limit) => &valid_plus[..valid_plus.len().min(limit)],
+        None => valid_plus,
+    };
+    for plu in selected {
+        let payload = DigiwebPluPayload::from_plu(plu, &config.digiweb)?;
+        let json = serde_json::to_string_pretty(&payload)
+            .map_err(|err| AppError::Internal(format!("payload serialization failed: {err}")))?;
+        std::fs::write(
+            preview_dir.join(format!("plu-{}.json", plu.plu_number)),
+            json,
+        )
+        .map_err(|err| AppError::Internal(format!("failed to write payload preview: {err}")))?;
+    }
+    Ok(())
+}
+
+fn log_duplicate_barcode_section(
+    logger: &mut AuditLogger,
+    groups: &[diagnostics::DuplicateBarcodeGroup],
+) -> Result<(), AppError> {
+    if groups.is_empty() {
+        return Ok(());
+    }
+    logger.line("SKIPPED - DUPLICATE BARCODE")?;
+    for group in groups {
+        logger.line(format!("Barcode: {}", group.effective_barcode))?;
+        logger.line(format!("Kept PLU: {}", group.canonical_plu))?;
+        logger.line(format!("Skipped PLUs: {:?}", group.skipped_plus))?;
+        logger.line("Customer action: Assign unique valid barcodes to the skipped PLUs and add/reimport them manually.")?;
+    }
+    Ok(())
 }
 
 fn run_sanitize(
@@ -1365,6 +1677,7 @@ async fn run_import_command(
         placeholders_ignored: source.placeholder_ignored,
         invalid_source_rows: source.invalid_source_rows,
         validation_skipped: source.validation_skipped,
+        skipped_duplicate_barcode: skipped_duplicate_barcode_count(&source),
         normalized: source.plus.len(),
         valid: summary.discovered,
         selected: summary.selected,
@@ -1444,6 +1757,8 @@ async fn run_verify(
     )?;
     let client = DigiwebClient::new(config.clone())?;
     authenticate(client.http(), config, &client_secret).await?;
+    let required_group_references = collect_required_references(&source.valid_plus);
+    let required_label_formats = label_format_requirements(&source.valid_plus);
     logger.kv(
         "Local source analysis status",
         analysis_report.analysis_status.as_text(),
@@ -1469,8 +1784,48 @@ async fn run_verify(
             &sanitization.after_invalid.to_string(),
         )?;
     }
-    logger.kv("DIGIweb department/group existence", "NOT CHECKED")?;
+    logger.kv("DIGIweb department/group existence", "UNVERIFIED")?;
+    logger.kv("DIGIweb label format existence", "UNVERIFIED")?;
     logger.kv("Write operation attempted", "NO")?;
+    if !required_group_references.is_empty() || !required_label_formats.is_empty() {
+        logger.line("VERIFY RESULT: NOT READY")?;
+        if !required_group_references.is_empty() {
+            logger.line("Unverified Departments/Groups:")?;
+            for reference in &required_group_references {
+                logger.line(format!(
+                    "Department {} / Group {} required by PLUs {:?}",
+                    reference.department_number,
+                    reference.group_number,
+                    reference.source_plu_numbers
+                ))?;
+            }
+        }
+        if !required_label_formats.is_empty() {
+            logger.line("Missing or unverified Label Formats:")?;
+            for label_format in &required_label_formats {
+                logger.line(format!(
+                    "Label Format {} required by PLUs {:?}",
+                    label_format.label_format, label_format.plu_numbers
+                ))?;
+            }
+        }
+        logger.line("Import readiness cannot be confirmed safely because supported DIGIweb reference lookup endpoints are not configured in this version.")?;
+        logger.kv("IMPORT READINESS", "NOT READY / UNVERIFIED REFERENCE")?;
+        logger.flush()?;
+        println!("VERIFY RESULT: NOT READY");
+        if !required_label_formats.is_empty() {
+            println!();
+            println!("Missing or unverified Label Formats:");
+            for label_format in &required_label_formats {
+                println!(
+                    "Label Format {} required by PLUs: {:?}",
+                    label_format.label_format, label_format.plu_numbers
+                );
+            }
+        }
+        println!("Final status: NOT_READY_UNVERIFIED_REFERENCE");
+        return Ok(1);
+    }
     logger.kv(
         "IMPORT READINESS",
         if source.valid_plus.is_empty() {
@@ -1572,6 +1927,19 @@ fn build_analysis_report(source: &SourceContext) -> analysis::model::AnalysisRep
         nutrition_source_table: &source.nutrition_source_table,
         sanitization: source.sanitization.as_ref(),
     })
+}
+
+fn skipped_duplicate_barcode_count(source: &SourceContext) -> usize {
+    source
+        .validation_report
+        .issues
+        .iter()
+        .filter(|issue| {
+            issue.severity == Severity::Error
+                && issue.field == "barcode"
+                && issue.message.contains("duplicate barcode")
+        })
+        .count()
 }
 
 fn read_reference_tables(

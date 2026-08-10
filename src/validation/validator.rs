@@ -132,12 +132,14 @@ pub fn validate_plus(plus: &[Plu]) -> ValidationReport {
                     "barcode exceeds 32 characters",
                 ));
             }
-            if let Some(previous_plu) = seen_barcodes.insert(barcode.clone(), plu.plu_number) {
+            if let Some(previous_plu) = seen_barcodes.get(barcode).copied() {
                 issues.push(ValidationIssue::error(
                     Some(plu.plu_number),
                     "barcode",
                     format!("duplicate barcode also used by PLU {previous_plu}"),
                 ));
+            } else {
+                seen_barcodes.insert(barcode.clone(), plu.plu_number);
             }
         } else {
             issues.push(ValidationIssue::error(

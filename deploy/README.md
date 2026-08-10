@@ -28,9 +28,11 @@ Then edit `config.toml`, place `plu.mdb` beside `to-digi`, and run:
 ./to-digi test-connection
 ./to-digi analyze
 ./to-digi discover
+./to-digi diagnose
 ./to-digi map-audit
 ./to-digi profile suggest --name bigway
 ./to-digi sanitize
+./to-digi dry-run --test
 ./to-digi verify
 ./to-digi import
 ```
@@ -63,11 +65,14 @@ The bundle never includes a real `plu.mdb`, customer credentials, logs, manifest
 ./to-digi test-connection
 ./to-digi analyze [--raw]
 ./to-digi discover [--timings]
+./to-digi diagnose [--invalid-only] [--plu PLU_NUMBER] [--category CATEGORY]
 ./to-digi map-audit [--sample N] [--plu PLU_NUMBER] [--timings]
 ./to-digi profile suggest --name bigway
 ./to-digi sanitize
+./to-digi dry-run [--limit N] [--test]
 ./to-digi verify
 ./to-digi import
+./to-digi import --dry-run
 ./to-digi import --limit 1
 ./to-digi import --continue-on-error
 ./to-digi resume output/run-YYYYMMDD-HHMMSS-import/import-results.json
@@ -101,7 +106,11 @@ Pull only the selected image:
 
 The launcher does not prune, stop, remove, or modify unrelated Docker resources.
 
-`discover`, `map-audit`, and `profile suggest` are offline-only diagnostics. They require `plu.mdb`, but not `config.toml` or credentials, and they do not authenticate, contact DIGIweb, submit PLUs, or modify the source MDB.
+`discover`, `diagnose`, `dry-run`, `map-audit`, and `profile suggest` are offline-only diagnostics. They require `plu.mdb`, but not `config.toml` or credentials, and they do not authenticate, contact DIGIweb, submit PLUs, or modify the source MDB.
+
+`diagnose` writes exact invalid/skipped PLU details, duplicate effective barcode groups, and required label formats to `diagnostics-report.txt/json`. `dry-run` writes `dry-run-report.txt` and `dry-run-manifest.json`, may build payload previews, and always records zero API write requests.
+
+`verify` checks connectivity and import readiness, but it is fail-closed for DIGIweb prerequisites. If required departments, groups, or label formats cannot be confirmed through a supported lookup endpoint, it reports `NOT READY / UNVERIFIED REFERENCE` rather than claiming the customer is ready for import.
 
 ## Configuration
 
@@ -167,6 +176,8 @@ Each command gets a separate output directory:
 ```text
 output/run-20260722-143000-analyze/
 output/run-20260722-143500-discover/
+output/run-20260722-143700-diagnose/
+output/run-20260722-143800-dry-run/
 output/run-20260722-144000-map-audit/
 output/run-20260722-144200-profile/
 output/run-20260722-144500-sanitize/
@@ -174,7 +185,7 @@ output/run-20260722-150500-import/
 output/run-20260722-151500-resume/
 ```
 
-The launcher preserves previous output and only removes transient root-level reports before the next run.
+The launcher preserves previous output and only removes transient root-level reports before the next run. It archives diagnostics reports, dry-run reports, dry-run manifests, and payload previews when those files are produced.
 
 ## Troubleshooting
 
@@ -189,6 +200,10 @@ The launcher preserves previous output and only removes transient root-level rep
 `Missing config.toml`: run `./to-digi init` or copy `config.example.toml` to `config.toml`.
 
 `Missing plu.mdb`: place the customer Access database beside `to-digi` using the exact lowercase filename `plu.mdb`.
+
+`dry_run_inspect_only conflict`: run `./to-digi dry-run` or remove the deprecated setting before running a live `./to-digi import`.
+
+`verify reports NOT READY / UNVERIFIED REFERENCE`: create or confirm the listed departments, groups, and label formats in DIGIweb, then rerun readiness checks. The tool does not fabricate or assume these references.
 
 `Invalid profile path`: keep external profiles inside the deployment directory. Symlinks and outside paths are rejected.
 

@@ -56,6 +56,8 @@ mod tests {
             tables: Vec::new(),
             departments: Vec::new(),
             groups: Vec::new(),
+            label_formats: Vec::new(),
+            invalid_plu_findings: Vec::new(),
             barcode_formats: Vec::new(),
             price_categories: Vec::new(),
             ingredient_analysis: IngredientAnalysis {

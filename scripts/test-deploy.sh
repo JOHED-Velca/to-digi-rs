@@ -73,6 +73,14 @@ if [ "$#" -ge 1 ] && [ "$1" = "run" ]; then
             printf 'discovery-ok\n' >discovery-report.txt
             printf '{"schema_version":1}\n' >discovery-report.json
             ;;
+        *" diagnose "*)
+            printf 'diagnostics-ok\n' >diagnostics-report.txt
+            printf '{"schema_version":1}\n' >diagnostics-report.json
+            ;;
+        *" dry-run "*|*" --dry-run "*)
+            printf 'dry-run-ok\n' >dry-run-report.txt
+            printf '{"schema_version":1,"summary":{"api_write_requests":0}}\n' >dry-run-manifest.json
+            ;;
         *" map-audit "*)
             printf 'mapping-ok\n' >mapping-report.txt
             printf '{"schema_version":1}\n' >mapping-report.json
@@ -227,6 +235,16 @@ test_offline_diagnostics_archive_reports_without_config() {
     assert_contains "$TEST_ROOT/fake-docker.log" "discover"
     [ -f "$deploy_dir"/output/run-*-discover/discovery-report.txt ] || fail "discovery report was not archived"
     [ -f "$deploy_dir"/output/run-*-discover/discovery-report.json ] || fail "discovery JSON was not archived"
+
+    run_with_fake_docker "$deploy_dir" "$output" diagnose --invalid-only
+    assert_contains "$TEST_ROOT/fake-docker.log" "diagnose --invalid-only"
+    [ -f "$deploy_dir"/output/run-*-diagnose/diagnostics-report.txt ] || fail "diagnostics report was not archived"
+    [ -f "$deploy_dir"/output/run-*-diagnose/diagnostics-report.json ] || fail "diagnostics JSON was not archived"
+
+    run_with_fake_docker "$deploy_dir" "$output" dry-run
+    assert_contains "$TEST_ROOT/fake-docker.log" "dry-run"
+    [ -f "$deploy_dir"/output/run-*-dry-run/dry-run-report.txt ] || fail "dry-run report was not archived"
+    [ -f "$deploy_dir"/output/run-*-dry-run/dry-run-manifest.json ] || fail "dry-run manifest was not archived"
 
     run_with_fake_docker "$deploy_dir" "$output" map-audit --sample 2 --plu 1
     assert_contains "$TEST_ROOT/fake-docker.log" "map-audit --sample 2 --plu 1"

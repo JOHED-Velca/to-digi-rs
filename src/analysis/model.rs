@@ -42,6 +42,8 @@ pub struct AnalysisReport {
     pub tables: Vec<TableAnalysis>,
     pub departments: Vec<DepartmentRequirement>,
     pub groups: Vec<GroupRequirement>,
+    pub label_formats: Vec<LabelFormatRequirement>,
+    pub invalid_plu_findings: Vec<InvalidPluFinding>,
     pub barcode_formats: Vec<BarcodeFormatAnalysis>,
     pub price_categories: Vec<PriceCategoryAnalysis>,
     pub ingredient_analysis: IngredientAnalysis,
@@ -143,6 +145,25 @@ pub struct GroupRequirement {
     pub default_group_applied_count: usize,
     pub source_maingroup_table_status: TableStatus,
     pub source_reference_match: ReferenceMatchStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LabelFormatRequirement {
+    pub label_format: u32,
+    pub plu_count: usize,
+    pub plu_numbers: Vec<u64>,
+    pub source_field: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InvalidPluFinding {
+    pub plu_number: Option<u64>,
+    pub department: Option<String>,
+    pub field: String,
+    pub category: String,
+    pub reason: String,
+    pub disposition: String,
+    pub customer_action_required: bool,
 }
 
 #[allow(dead_code)]

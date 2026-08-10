@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 use crate::config::AppConfig;
+use crate::diagnostics::DiagnosticCategory;
 
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about = "One-shot DIGIweb PLU importer")]
@@ -17,8 +18,12 @@ pub enum CliCommand {
     Analyze(AnalyzeArgs),
     /// Discover raw MDB structure and data quality without profile or network access
     Discover(DiscoverArgs),
+    /// Diagnose exact invalid/skipped PLUs without contacting DIGIweb
+    Diagnose(DiagnoseArgs),
     /// Check deployment readiness without importing PLUs
     Doctor(DoctorArgs),
+    /// Build payloads and manifests without any PLU API writes
+    DryRun(DryRunArgs),
     /// Initialize a deployment directory with launchers and templates
     Init(InitArgs),
     /// Import valid PLUs into DIGIweb
@@ -59,6 +64,35 @@ pub struct DiscoverArgs {
     /// Include detailed phase timing in the report
     #[arg(long)]
     pub timings: bool,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct DiagnoseArgs {
+    /// Show only records that would not be imported cleanly
+    #[arg(long)]
+    pub invalid_only: bool,
+    /// Diagnose one PLU number
+    #[arg(long)]
+    pub plu: Option<u64>,
+    /// Limit output to a diagnostic category
+    #[arg(long, value_parser = parse_diagnostic_category)]
+    pub category: Option<DiagnosticCategory>,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct DryRunArgs {
+    /// Select only the first N valid normalized PLUs
+    #[arg(long, value_parser = parse_positive_usize)]
+    pub limit: Option<usize>,
+    /// Convenience alias for --limit 1
+    #[arg(long)]
+    pub test: bool,
+    /// Apply a fill-only sanitization profile before dry-run payload building
+    #[arg(long, value_name = "PROFILE", conflicts_with = "profile")]
+    pub sanitize_profile: Option<PathBuf>,
+    /// Apply a built-in profile such as starsky before dry-run payload building
+    #[arg(long, value_name = "NAME", conflicts_with = "sanitize_profile")]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
@@ -105,6 +139,9 @@ pub struct ImportArgs {
     /// Convenience alias for --limit 1
     #[arg(long, conflicts_with = "resume")]
     pub test: bool,
+    /// Alias for the offline dry-run command; no PLU writes are performed
+    #[arg(long, conflicts_with = "resume")]
+    pub dry_run: bool,
     /// Continue submitting later selected PLUs after a failure or unknown final status
     #[arg(long)]
     pub continue_on_error: bool,
@@ -210,6 +247,10 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
     }
 }
 
+fn parse_diagnostic_category(value: &str) -> Result<DiagnosticCategory, String> {
+    DiagnosticCategory::parse(value)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectiveCommand {
     Analyze {
@@ -219,6 +260,11 @@ pub enum EffectiveCommand {
     },
     Discover {
         timings: bool,
+    },
+    Diagnose {
+        invalid_only: bool,
+        plu: Option<u64>,
+        category: Option<DiagnosticCategory>,
     },
     Doctor {
         pull: bool,
@@ -236,6 +282,11 @@ pub enum EffectiveCommand {
         retry_failed: bool,
         legacy_used: bool,
         defaulted_from_no_command: bool,
+        sanitize_profile: Option<ProfileSelection>,
+    },
+    DryRun {
+        limit: Option<usize>,
+        test_mode: bool,
         sanitize_profile: Option<ProfileSelection>,
     },
     Pull,
@@ -263,7 +314,9 @@ impl EffectiveCommand {
         match self {
             Self::Analyze { .. } => "analyze",
             Self::Discover { .. } => "discover",
+            Self::Diagnose { .. } => "diagnose",
             Self::Doctor { .. } => "doctor",
+            Self::DryRun { .. } => "dry-run",
             Self::Init { .. } => "init",
             Self::Import { .. } => "import",
             Self::Pull => "pull",
@@ -281,7 +334,9 @@ impl EffectiveCommand {
             Self::Analyze { legacy_used, .. } => *legacy_used,
             Self::Import { legacy_used, .. } => *legacy_used,
             Self::Discover { .. }
+            | Self::Diagnose { .. }
             | Self::Doctor { .. }
+            | Self::DryRun { .. }
             | Self::Init { .. }
             | Self::MapAudit { .. }
             | Self::ProfileSuggest { .. }
@@ -309,6 +364,11 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
         Some(CliCommand::Discover(args)) => EffectiveCommand::Discover {
             timings: args.timings,
         },
+        Some(CliCommand::Diagnose(args)) => EffectiveCommand::Diagnose {
+            invalid_only: args.invalid_only,
+            plu: args.plu,
+            category: args.category,
+        },
         Some(CliCommand::Doctor(args)) => EffectiveCommand::Doctor {
             pull: args.pull,
             inside_container: args.inside_container,
@@ -321,6 +381,14 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
         },
         Some(CliCommand::Init(args)) => EffectiveCommand::Init {
             refresh_generated_files: args.refresh_generated_files,
+        },
+        Some(CliCommand::Import(args)) if args.dry_run => EffectiveCommand::DryRun {
+            limit: if args.test { Some(1) } else { args.limit },
+            test_mode: args.test,
+            sanitize_profile: resolve_explicit_profile(
+                args.sanitize_profile.clone(),
+                args.profile.clone(),
+            ),
         },
         Some(CliCommand::Import(args)) => EffectiveCommand::Import {
             limit: if args.test { Some(1) } else { args.limit },
@@ -335,6 +403,14 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
                 args.profile.clone(),
                 false,
                 config,
+            ),
+        },
+        Some(CliCommand::DryRun(args)) => EffectiveCommand::DryRun {
+            limit: if args.test { Some(1) } else { args.limit },
+            test_mode: args.test,
+            sanitize_profile: resolve_explicit_profile(
+                args.sanitize_profile.clone(),
+                args.profile.clone(),
             ),
         },
         Some(CliCommand::Pull) => EffectiveCommand::Pull,
@@ -409,6 +485,17 @@ fn resolve_required_profile(
         })
         .or_else(|| default_profile(config))
         .unwrap_or_else(|| ProfileSelection::BuiltIn("starsky".to_string()))
+}
+
+fn resolve_explicit_profile(
+    external: Option<PathBuf>,
+    builtin_or_path: Option<String>,
+) -> Option<ProfileSelection> {
+    external.map(ProfileSelection::External).or_else(|| {
+        builtin_or_path
+            .as_deref()
+            .map(ProfileSelection::from_cli_profile)
+    })
 }
 
 fn default_profile(config: &AppConfig) -> Option<ProfileSelection> {
@@ -486,8 +573,16 @@ mod tests {
             Some(CliCommand::Discover(_))
         ));
         assert!(matches!(
+            parse(&["to-digi-rs", "diagnose", "--invalid-only"]).command,
+            Some(CliCommand::Diagnose(_))
+        ));
+        assert!(matches!(
             parse(&["to-digi-rs", "doctor"]).command,
             Some(CliCommand::Doctor(_))
+        ));
+        assert!(matches!(
+            parse(&["to-digi-rs", "dry-run"]).command,
+            Some(CliCommand::DryRun(_))
         ));
         assert!(matches!(
             parse(&["to-digi-rs", "init"]).command,
@@ -663,7 +758,9 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("analyze"));
         assert!(help.contains("discover"));
+        assert!(help.contains("diagnose"));
         assert!(help.contains("doctor"));
+        assert!(help.contains("dry-run"));
         assert!(help.contains("init"));
         assert!(help.contains("import"));
         assert!(help.contains("pull"));
@@ -856,6 +953,39 @@ mod tests {
             ),
             EffectiveCommand::ProfileSuggest {
                 name: "bigway".to_string(),
+            }
+        );
+        assert_eq!(
+            effective_command(
+                &parse(&["to-digi-rs", "diagnose", "--category", "duplicate-barcode"]),
+                &AppConfig::default()
+            ),
+            EffectiveCommand::Diagnose {
+                invalid_only: false,
+                plu: None,
+                category: Some(DiagnosticCategory::DuplicateBarcode),
+            }
+        );
+        assert_eq!(
+            effective_command(
+                &parse(&["to-digi-rs", "dry-run", "--limit", "2"]),
+                &AppConfig::default()
+            ),
+            EffectiveCommand::DryRun {
+                limit: Some(2),
+                test_mode: false,
+                sanitize_profile: None,
+            }
+        );
+        assert_eq!(
+            effective_command(
+                &parse(&["to-digi-rs", "import", "--dry-run", "--test"]),
+                &AppConfig::default()
+            ),
+            EffectiveCommand::DryRun {
+                limit: Some(1),
+                test_mode: true,
+                sanitize_profile: None,
             }
         );
     }

@@ -112,6 +112,27 @@ pub fn render_text_report(report: &AnalysisReport) -> String {
         &mut out,
         format!("Invalid PLUs: {}", report.summary.invalid_plus),
     );
+    if !report.invalid_plu_findings.is_empty() {
+        line(&mut out, "Invalid/skipped PLU details:");
+        for finding in &report.invalid_plu_findings {
+            line(
+                &mut out,
+                format!(
+                    "- PLU {} Department {} Field {} Category {} Reason: {} Disposition: {} Customer action required: {}",
+                    finding
+                        .plu_number
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    finding.department.as_deref().unwrap_or("unknown"),
+                    finding.field,
+                    finding.category,
+                    finding.reason,
+                    finding.disposition,
+                    yes_no(finding.customer_action_required)
+                ),
+            );
+        }
+    }
     line(&mut out, "Valid PLU numbers:");
     for plu in &report.summary.valid_plu_numbers {
         line(&mut out, format!("- {plu}"));
@@ -279,6 +300,37 @@ pub fn render_text_report(report: &AnalysisReport) -> String {
                 "Source-reference match: {}",
                 group.source_reference_match.as_text()
             ),
+        );
+    }
+    blank(&mut out);
+
+    section(&mut out, "5a. Required label formats");
+    line(
+        &mut out,
+        format!(
+            "Unique required label formats: {}",
+            report.label_formats.len()
+        ),
+    );
+    if report.label_formats.is_empty() {
+        line(&mut out, "No label format prerequisites were identified.");
+    }
+    for label_format in &report.label_formats {
+        line(
+            &mut out,
+            format!("Label Format {}", label_format.label_format),
+        );
+        line(
+            &mut out,
+            format!("Source field: {}", label_format.source_field),
+        );
+        line(
+            &mut out,
+            format!("Used by: {} PLUs", label_format.plu_count),
+        );
+        line(
+            &mut out,
+            format!("PLUs: {}", join_numbers(&label_format.plu_numbers)),
         );
     }
     blank(&mut out);
@@ -628,6 +680,8 @@ mod tests {
             tables: Vec::new(),
             departments: Vec::new(),
             groups: Vec::new(),
+            label_formats: Vec::new(),
+            invalid_plu_findings: Vec::new(),
             barcode_formats: Vec::new(),
             price_categories: Vec::new(),
             ingredient_analysis: crate::analysis::model::IngredientAnalysis {

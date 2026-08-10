@@ -58,9 +58,11 @@ Then place the customer database in the same directory using the exact filename 
 ./to-digi test-connection
 ./to-digi analyze
 ./to-digi discover
+./to-digi diagnose
 ./to-digi map-audit
 ./to-digi profile suggest --name bigway
 ./to-digi sanitize
+./to-digi dry-run --test
 ./to-digi verify
 ./to-digi import
 ```
@@ -73,11 +75,13 @@ Then place the customer database in the same directory using the exact filename 
 ./to-digi test-connection
 ./to-digi analyze [--raw] [--profile starsky] [--sanitize-profile profiles/custom.toml]
 ./to-digi discover [--timings]
+./to-digi diagnose [--invalid-only] [--plu PLU_NUMBER] [--category CATEGORY]
 ./to-digi map-audit [--sample N] [--plu PLU_NUMBER] [--timings]
 ./to-digi profile suggest --name bigway
 ./to-digi sanitize [--profile starsky|profiles/custom.toml]
+./to-digi dry-run [--limit N] [--test] [--profile starsky] [--sanitize-profile profiles/custom.toml]
 ./to-digi verify [--profile starsky] [--sanitize-profile profiles/custom.toml]
-./to-digi import [--limit N] [--test] [--continue-on-error]
+./to-digi import [--limit N] [--test] [--dry-run] [--continue-on-error]
 ./to-digi import [--profile starsky] [--sanitize-profile profiles/custom.toml]
 ./to-digi resume output/run-YYYYMMDD-HHMMSS-import/import-results.json [--retry-failed]
 ./to-digi version
@@ -85,11 +89,15 @@ Then place the customer database in the same directory using the exact filename 
 
 `import.sh` and `run.sh` remain compatibility wrappers around `to-digi`.
 
-`discover`, `map-audit`, and `profile suggest` are strictly offline diagnostics. They do not require `config.toml`, do not load credentials, do not authenticate, do not contact DIGIweb, do not submit PLUs, and do not modify `plu.mdb`.
+`discover`, `diagnose`, `dry-run`, `map-audit`, and `profile suggest` are strictly offline diagnostics. They do not require `config.toml`, do not load credentials, do not authenticate, do not contact DIGIweb, do not submit PLUs, and do not modify `plu.mdb`.
 
 - `discover` writes `discovery-report.txt/json` with raw MDB field-quality, department/group reference, setup, sanitization-candidate, and timing details.
+- `diagnose` writes `diagnostics-report.txt/json` with exact invalid/skipped PLUs, row-level missing required values, duplicate effective barcodes, and required label formats.
+- `dry-run` writes `dry-run-report.txt` and `dry-run-manifest.json`, builds selected payload previews when enabled, and records `api_write_requests = 0`.
 - `map-audit` writes `mapping-report.txt/json` showing the current source-to-payload mappings, including ingredient versus nutrition separation and bounded payload metadata samples.
 - `profile suggest --name NAME` writes `profiles/NAME.draft.toml` and `profile-recommendations.txt` without overwriting an existing draft. Only deterministic safe findings become active rules; ambiguous findings stay as comments/recommendations.
+
+`verify` is intentionally fail-closed for external DIGIweb prerequisites. If the source requires departments, groups, or label formats and no supported read/lookup endpoint confirms them, `verify` reports `NOT READY / UNVERIFIED REFERENCE` instead of giving a false ready signal.
 
 ## Profiles
 
@@ -142,7 +150,7 @@ TO_DIGI_RS_IMAGE
 
 `DIGIWEB_CLIENT_SECRET` is still accepted for compatibility. Do not pass secrets on the command line, because they may enter shell history or process listings. Secrets, tokens, refresh tokens, and authorization headers are never printed or logged.
 
-Deprecated `[import]` command-selector values such as `send_only_first_plu` and `dry_run_inspect_only` still parse during the compatibility period, but new generated configuration does not include them. Use CLI commands and flags instead.
+Deprecated `[import]` command-selector values such as `send_only_first_plu` and `dry_run_inspect_only` still parse during the compatibility period, but new generated configuration does not include them. Use CLI commands and flags instead. A live `import` command refuses to run when legacy `dry_run_inspect_only = true` is still set, and points the operator to `./to-digi dry-run`.
 
 ## Output And Resume
 
@@ -150,11 +158,13 @@ The launcher creates a timestamped output directory for each run:
 
 ```text
 output/run-20260722-143000-analyze/
+output/run-20260722-143200-diagnose/
+output/run-20260722-143300-dry-run/
 output/run-20260722-150500-import/
 output/run-20260722-151500-resume/
 ```
 
-It archives logs, analysis reports, discovery reports, mapping reports, profile recommendations, sanitization reports, profile snapshots, payload previews, manifests, and resume snapshots when present. Existing output and manifests are preserved. Draft profiles remain under `profiles/` for review.
+It archives logs, analysis reports, discovery reports, diagnostics reports, dry-run reports, dry-run manifests, mapping reports, profile recommendations, sanitization reports, profile snapshots, payload previews, manifests, and resume snapshots when present. Existing output and manifests are preserved. Draft profiles remain under `profiles/` for review.
 
 Resume with:
 
@@ -183,6 +193,8 @@ On Ubuntu without Docker:
 sudo apt install mdbtools
 cargo run -- analyze --raw
 cargo run -- discover
+cargo run -- diagnose --invalid-only
+cargo run -- dry-run --test
 cargo run -- map-audit --sample 5
 cargo run -- profile suggest --name bigway
 cargo run -- test-connection

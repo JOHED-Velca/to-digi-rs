@@ -53,6 +53,7 @@ pub struct DiscoveryReport {
     pub fields: Vec<FieldDiscovery>,
     pub sanitization_candidates: SanitizationCandidateSummary,
     pub setup: Vec<RequiredDepartment>,
+    pub required_label_formats: Vec<RequiredLabelFormat>,
     pub timings: Vec<PhaseTiming>,
 }
 
@@ -96,6 +97,7 @@ pub struct ReferenceDiscovery {
     pub missing_group_names: usize,
     pub empty_group_references: usize,
     pub invalid_group_references: usize,
+    pub label_formats_used: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -150,6 +152,13 @@ pub struct RequiredGroup {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RequiredLabelFormat {
+    pub label_format: u32,
+    pub plu_count: usize,
+    pub plu_numbers: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PhaseTiming {
     pub phase: String,
     pub milliseconds: u128,
@@ -169,6 +178,7 @@ pub fn build_discovery_report(input: DiscoveryInput<'_>) -> DiscoveryReport {
     let fields = field_discoveries(input.dataset);
     let references = reference_discovery(&input);
     let setup = required_setup(&input);
+    let required_label_formats = required_label_formats(input.valid_plus);
     let sanitization_candidates = sanitization_summary(&fields, &input);
     DiscoveryReport {
         schema_version: 1,
@@ -207,6 +217,7 @@ pub fn build_discovery_report(input: DiscoveryInput<'_>) -> DiscoveryReport {
         fields,
         sanitization_candidates,
         setup,
+        required_label_formats,
         timings: input.timings,
     }
 }
@@ -267,15 +278,23 @@ pub fn render_discovery_console(report: &DiscoveryReport) -> String {
     blank(&mut out);
     line(&mut out, "Potential sanitization");
     for field in &report.fields {
-        let problems = field.empty
-            + field.malformed
-            + field.negative
-            + field.out_of_supported_range
-            + field.unsupported
+        let problems = field.deterministic_normalization
+            + field.safe_profile_candidate
             + field.human_decision_required;
         if problems > 0 {
             kv(&mut out, &field.field, problems);
         }
+    }
+    for label_format in &report.required_label_formats {
+        line(
+            &mut out,
+            format!(
+                "Label Format {} | PLUs: {} | Used by: {}",
+                label_format.label_format,
+                label_format.plu_count,
+                join_numbers(&label_format.plu_numbers)
+            ),
+        );
     }
     blank(&mut out);
     line(&mut out, "Result");
@@ -789,6 +808,7 @@ fn reference_discovery(input: &DiscoveryInput<'_>) -> ReferenceDiscovery {
             .iter()
             .filter(|issue| issue.field == "group_number")
             .count(),
+        label_formats_used: required_label_formats(input.valid_plus).len(),
     }
 }
 
@@ -854,6 +874,29 @@ fn required_departments(plus: &[Plu]) -> BTreeSet<u32> {
 fn required_groups(plus: &[Plu]) -> BTreeSet<(u32, u32)> {
     plus.iter()
         .filter_map(|plu| Some((plu.department_number?, plu.group_number?)))
+        .collect()
+}
+
+fn required_label_formats(plus: &[Plu]) -> Vec<RequiredLabelFormat> {
+    let mut by_format: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
+    for plu in plus {
+        if let Some(label_format) = plu.label_format {
+            by_format
+                .entry(label_format)
+                .or_default()
+                .insert(plu.plu_number);
+        }
+    }
+    by_format
+        .into_iter()
+        .map(|(label_format, plus)| {
+            let plu_numbers = plus.into_iter().collect::<Vec<_>>();
+            RequiredLabelFormat {
+                label_format,
+                plu_count: plu_numbers.len(),
+                plu_numbers,
+            }
+        })
         .collect()
 }
 
@@ -994,6 +1037,18 @@ fn kv(out: &mut String, key: &str, value: usize) {
 
 fn blank(out: &mut String) {
     out.push('\n');
+}
+
+fn join_numbers(numbers: &[u64]) -> String {
+    if numbers.is_empty() {
+        "none".to_string()
+    } else {
+        numbers
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 #[cfg(test)]

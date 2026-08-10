@@ -5,9 +5,9 @@ use chrono::Local;
 use crate::analysis::model::{
     AnalysisBlockingError, AnalysisReport, AnalysisSanitization, AnalysisStatus, AnalysisWarning,
     BarcodeFormatAnalysis, DepartmentRequirement, GroupRequirement, IngredientAnalysis,
-    NutritionAnalysis, PluClassification, PluFieldCount, PriceCategoryAnalysis,
-    ReferenceMatchStatus, ReferenceTableSnapshot, SafetyConfirmation, SourceSummary, TableAnalysis,
-    TableStatus,
+    InvalidPluFinding, LabelFormatRequirement, NutritionAnalysis, PluClassification, PluFieldCount,
+    PriceCategoryAnalysis, ReferenceMatchStatus, ReferenceTableSnapshot, SafetyConfirmation,
+    SourceSummary, TableAnalysis, TableStatus,
 };
 use crate::models::plu::{Plu, PriceMode};
 use crate::sanitization::SanitizationIntegration;
@@ -56,6 +56,8 @@ pub fn collect_analysis(input: AnalysisInput<'_>) -> AnalysisReport {
     let tables = table_analysis(&input);
     let departments = department_requirements(&input);
     let groups = group_requirements(&input);
+    let label_formats = label_format_requirements(input.valid_plus);
+    let invalid_plu_findings = invalid_plu_findings(&input);
     let barcode_formats = barcode_analysis(&input);
     let price_categories = price_analysis(&input);
     let mut warnings = warnings(&input, &ingredient_analysis);
@@ -117,6 +119,8 @@ pub fn collect_analysis(input: AnalysisInput<'_>) -> AnalysisReport {
         tables,
         departments,
         groups,
+        label_formats,
+        invalid_plu_findings,
         barcode_formats,
         price_categories,
         ingredient_analysis,
@@ -132,6 +136,102 @@ pub fn collect_analysis(input: AnalysisInput<'_>) -> AnalysisReport {
             source_database_modified: false,
             opened_only_exact_plu_mdb: true,
         },
+    }
+}
+
+fn label_format_requirements(plus: &[Plu]) -> Vec<LabelFormatRequirement> {
+    let mut by_format: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
+    for plu in plus {
+        if let Some(label_format) = plu.label_format {
+            by_format
+                .entry(label_format)
+                .or_default()
+                .insert(plu.plu_number);
+        }
+    }
+    by_format
+        .into_iter()
+        .map(|(label_format, plus)| {
+            let plu_numbers = plus.into_iter().collect::<Vec<_>>();
+            LabelFormatRequirement {
+                label_format,
+                plu_count: plu_numbers.len(),
+                plu_numbers,
+                source_field: "Pludata.Print Format Code -> plulabelformat".to_string(),
+            }
+        })
+        .collect()
+}
+
+fn invalid_plu_findings(input: &AnalysisInput<'_>) -> Vec<InvalidPluFinding> {
+    let mut findings = Vec::new();
+    for issue in input.row_issues {
+        findings.push(invalid_finding(input, issue));
+    }
+    for issue in &input.validation_report.issues {
+        if issue.severity == Severity::Error {
+            findings.push(invalid_finding(input, issue));
+        }
+    }
+    findings.sort_by(|left, right| {
+        left.plu_number
+            .cmp(&right.plu_number)
+            .then(left.field.cmp(&right.field))
+            .then(left.reason.cmp(&right.reason))
+    });
+    findings
+}
+
+fn invalid_finding(input: &AnalysisInput<'_>, issue: &ValidationIssue) -> InvalidPluFinding {
+    InvalidPluFinding {
+        plu_number: issue.plu_number,
+        department: issue_department(input, issue.plu_number),
+        field: display_issue_field(&issue.field).to_string(),
+        category: issue_category(issue).to_string(),
+        reason: issue.message.clone(),
+        disposition: if issue.field == "barcode" && issue.message.contains("duplicate barcode") {
+            "SKIPPED_DUPLICATE_BARCODE".to_string()
+        } else {
+            "SKIPPED_INVALID".to_string()
+        },
+        customer_action_required: true,
+    }
+}
+
+fn issue_department(input: &AnalysisInput<'_>, plu_number: Option<u64>) -> Option<String> {
+    let plu_number = plu_number?;
+    input
+        .all_normalized_plus
+        .iter()
+        .find(|plu| plu.plu_number == plu_number)
+        .and_then(|plu| plu.department_number.map(|value| value.to_string()))
+        .or_else(|| {
+            input.dataset.plu_rows.iter().find_map(|row| {
+                let row_plu = row.get("Plucode")?.trim().parse::<u64>().ok()?;
+                (row_plu == plu_number).then(|| row.get("Department").unwrap_or("").to_string())
+            })
+        })
+}
+
+fn display_issue_field(field: &str) -> &str {
+    match field {
+        "name" => "product name",
+        "department_number" => "department",
+        "group_number" => "group",
+        "label_format" => "label format",
+        other => other,
+    }
+}
+
+fn issue_category(issue: &ValidationIssue) -> &str {
+    match issue.field.as_str() {
+        "name" => "missing-required-field",
+        "barcode" if issue.message.contains("duplicate barcode") => "duplicate-barcode",
+        "barcode" => "barcode-format",
+        "department_number" => "invalid-department",
+        "group_number" => "invalid-group",
+        "label_format" => "invalid-label-format",
+        _ => "mapping",
     }
 }
 

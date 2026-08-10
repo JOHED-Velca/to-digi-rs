@@ -45,14 +45,16 @@ require_command() {
 command_label() {
     case "${1:-import}" in
         import)
-            if has_resume_arg "$@"; then
+            if has_arg_name "--dry-run" "$@"; then
+                printf 'dry-run\n'
+            elif has_resume_arg "$@"; then
                 printf 'resume\n'
             else
                 printf 'import\n'
             fi
             ;;
         resume) printf 'resume\n' ;;
-        analyze|discover|map-audit|profile|sanitize|verify|test-connection|doctor|pull|init|version) printf '%s\n' "$1" ;;
+        analyze|diagnose|discover|dry-run|map-audit|profile|sanitize|verify|test-connection|doctor|pull|init|version) printf '%s\n' "$1" ;;
         --help|-h|--version|-V) printf 'info\n' ;;
         *) printf 'cli\n' ;;
     esac
@@ -113,7 +115,7 @@ needs_config() {
 
 needs_source_mdb() {
     case "${1:-import}" in
-        import|resume|analyze|discover|map-audit|profile|verify|sanitize|doctor) return 0 ;;
+        import|resume|analyze|diagnose|discover|dry-run|map-audit|profile|verify|sanitize|doctor) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -209,6 +211,10 @@ clean_transient_outputs() {
     rm -f "$SCRIPT_DIR/analysis-report.json" || fail "Unable to clean transient analysis-report.json before execution." 2
     rm -f "$SCRIPT_DIR/discovery-report.txt" || fail "Unable to clean transient discovery-report.txt before execution." 2
     rm -f "$SCRIPT_DIR/discovery-report.json" || fail "Unable to clean transient discovery-report.json before execution." 2
+    rm -f "$SCRIPT_DIR/diagnostics-report.txt" || fail "Unable to clean transient diagnostics-report.txt before execution." 2
+    rm -f "$SCRIPT_DIR/diagnostics-report.json" || fail "Unable to clean transient diagnostics-report.json before execution." 2
+    rm -f "$SCRIPT_DIR/dry-run-report.txt" || fail "Unable to clean transient dry-run-report.txt before execution." 2
+    rm -f "$SCRIPT_DIR/dry-run-manifest.json" || fail "Unable to clean transient dry-run-manifest.json before execution." 2
     rm -f "$SCRIPT_DIR/mapping-report.txt" || fail "Unable to clean transient mapping-report.txt before execution." 2
     rm -f "$SCRIPT_DIR/mapping-report.json" || fail "Unable to clean transient mapping-report.json before execution." 2
     rm -f "$SCRIPT_DIR/profile-recommendations.txt" || fail "Unable to clean transient profile-recommendations.txt before execution." 2
@@ -247,6 +253,27 @@ archive_outputs() {
     if [ -f "$SCRIPT_DIR/discovery-report.json" ]; then
         mv "$SCRIPT_DIR/discovery-report.json" "$RUN_DIR/discovery-report.json" || warn "Could not archive discovery-report.json to $RUN_DIR"
         discovery_json_path="$RUN_DIR/discovery-report.json"
+    fi
+    local diagnostics_path=""
+    if [ -f "$SCRIPT_DIR/diagnostics-report.txt" ]; then
+        mv "$SCRIPT_DIR/diagnostics-report.txt" "$RUN_DIR/diagnostics-report.txt" || warn "Could not archive diagnostics-report.txt to $RUN_DIR"
+        diagnostics_path="$RUN_DIR/diagnostics-report.txt"
+    fi
+    local diagnostics_json_path=""
+    if [ -f "$SCRIPT_DIR/diagnostics-report.json" ]; then
+        mv "$SCRIPT_DIR/diagnostics-report.json" "$RUN_DIR/diagnostics-report.json" || warn "Could not archive diagnostics-report.json to $RUN_DIR"
+        diagnostics_json_path="$RUN_DIR/diagnostics-report.json"
+    fi
+    local dry_run_path=""
+    if [ -f "$SCRIPT_DIR/dry-run-report.txt" ]; then
+        mv "$SCRIPT_DIR/dry-run-report.txt" "$RUN_DIR/dry-run-report.txt" || warn "Could not archive dry-run-report.txt to $RUN_DIR"
+        dry_run_path="$RUN_DIR/dry-run-report.txt"
+    fi
+    local dry_run_manifest_path=""
+    if [ -f "$SCRIPT_DIR/dry-run-manifest.json" ]; then
+        mv "$SCRIPT_DIR/dry-run-manifest.json" "$RUN_DIR/dry-run-manifest.json" || warn "Could not archive dry-run-manifest.json to $RUN_DIR"
+        chmod 600 "$RUN_DIR/dry-run-manifest.json" 2>/dev/null || true
+        dry_run_manifest_path="$RUN_DIR/dry-run-manifest.json"
     fi
     local mapping_path=""
     if [ -f "$SCRIPT_DIR/mapping-report.txt" ]; then
@@ -313,6 +340,10 @@ archive_outputs() {
     [ -z "$analysis_json_path" ] || printf 'JSON analysis report:\n%s\n' "$analysis_json_path"
     [ -z "$discovery_path" ] || printf 'Text discovery report:\n%s\n' "$discovery_path"
     [ -z "$discovery_json_path" ] || printf 'JSON discovery report:\n%s\n' "$discovery_json_path"
+    [ -z "$diagnostics_path" ] || printf 'Text diagnostics report:\n%s\n' "$diagnostics_path"
+    [ -z "$diagnostics_json_path" ] || printf 'JSON diagnostics report:\n%s\n' "$diagnostics_json_path"
+    [ -z "$dry_run_path" ] || printf 'Dry-run report:\n%s\n' "$dry_run_path"
+    [ -z "$dry_run_manifest_path" ] || printf 'Dry-run manifest:\n%s\n' "$dry_run_manifest_path"
     [ -z "$mapping_path" ] || printf 'Text mapping report:\n%s\n' "$mapping_path"
     [ -z "$mapping_json_path" ] || printf 'JSON mapping report:\n%s\n' "$mapping_json_path"
     [ -z "$recommendations_path" ] || printf 'Profile recommendations:\n%s\n' "$recommendations_path"
