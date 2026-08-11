@@ -101,6 +101,17 @@ Then place the customer database in the same directory using the exact filename 
 
 `verify` is intentionally fail-closed for external DIGIweb prerequisites. If the source requires departments, groups, or label formats and no supported read/lookup endpoint confirms them, `verify` reports `NOT READY / UNVERIFIED REFERENCE` instead of giving a false ready signal.
 
+Because this version has no supported DIGIweb read endpoint for Department, Group, or Label Format existence, operators can explicitly record independent server-side confirmations in `[verification]`. These confirmations are manual audit evidence, not API proof:
+
+```toml
+[verification]
+confirmed_departments = [2]
+confirmed_groups = ["2:997", "2:998"]
+confirmed_label_formats = [1, 2, 3, 4, 6, 8, 21]
+```
+
+Extra confirmations that are not required by the current MDB are reported as stale warnings only. Missing required confirmations keep `verify` and `import` fail-closed.
+
 Safe pre-import order:
 
 ```bash
@@ -119,6 +130,11 @@ Initialized Starsky deployments set:
 ```toml
 [profiles]
 default = "starsky"
+
+[verification]
+confirmed_departments = []
+confirmed_groups = []
+confirmed_label_formats = []
 ```
 
 Profile precedence is deterministic:
@@ -165,6 +181,18 @@ TO_DIGI_RS_IMAGE
 
 `DIGIWEB_CLIENT_SECRET` is still accepted for compatibility. Do not pass secrets on the command line, because they may enter shell history or process listings. Secrets, tokens, refresh tokens, and authorization headers are never printed or logged.
 
+Manual readiness workflow:
+
+```bash
+./to-digi analyze
+# Check listed Departments, Groups, and effective Label Formats in DIGIweb.
+# Edit [verification] in config.toml with only independently confirmed objects.
+./to-digi verify
+./to-digi import --test
+```
+
+`verify` writes `verify-report.txt/json`. If all required references are manually confirmed and eligible PLUs are ready, the result is `READY`. If eligible PLUs are ready but some source records are intentionally excluded for customer action, the result is `READY_WITH_SKIPS`. Both are safe to proceed to `import --test`; `NOT_READY` blocks import.
+
 Deprecated `[import]` command-selector values such as `send_only_first_plu` and `dry_run_inspect_only` still parse during the compatibility period, but new generated configuration does not include them. Use CLI commands and flags instead. A live `import` command refuses to run when legacy `dry_run_inspect_only = true` is still set, and points the operator to `./to-digi dry-run`.
 
 ## Output And Resume
@@ -179,7 +207,7 @@ output/run-20260722-150500-import/
 output/run-20260722-151500-resume/
 ```
 
-It archives logs, analysis reports, discovery reports, diagnostics reports, dry-run reports, dry-run manifests, mapping reports, profile recommendations, sanitization reports, profile snapshots, payload previews, manifests, and resume snapshots when present. Existing output and manifests are preserved. Draft profiles remain under `profiles/` for review.
+It archives logs, analysis reports, discovery reports, diagnostics reports, dry-run reports, dry-run manifests, verify reports, mapping reports, profile recommendations, sanitization reports, profile snapshots, payload previews, manifests, and resume snapshots when present. Existing output and manifests are preserved. Draft profiles remain under `profiles/` for review.
 
 Resume with:
 

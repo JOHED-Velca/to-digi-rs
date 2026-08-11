@@ -5,6 +5,7 @@ use crate::config::{AppConfig, client_secret_log_message, load_client_secret};
 use crate::digiweb::auth::AuthSession;
 use crate::digiweb::client::DigiwebClient;
 use crate::digiweb::payload::DigiwebPluPayload;
+use crate::digiweb::preflight::{ReferenceConfirmationStatus, evaluate_reference_readiness};
 use crate::digiweb::status::ProcessingStatus;
 use crate::error::AppError;
 use crate::import::result::{ImportSummary, RecordImportResult};
@@ -42,6 +43,58 @@ pub async fn run_import(
 ) -> Result<ImportSummary, AppError> {
     config.token_url()?;
     config.plu_upsert_path()?;
+    let reference_readiness = evaluate_reference_readiness(plus, &config.verification, 0)?;
+    if !reference_readiness.is_ready() {
+        logger.line("IMPORT BLOCKED")?;
+        logger.line("Unverified required references:")?;
+        for department in reference_readiness
+            .departments
+            .iter()
+            .filter(|reference| reference.status == ReferenceConfirmationStatus::Unverified)
+        {
+            logger.line(format!(
+                "- Department {} | Used by: {} PLUs | Examples: {}",
+                department.number,
+                department.source_plu_numbers.len(),
+                format_limited_u64s(&department.source_plu_numbers, 8)
+            ))?;
+        }
+        for group in reference_readiness
+            .groups
+            .iter()
+            .filter(|reference| reference.status == ReferenceConfirmationStatus::Unverified)
+        {
+            logger.line(format!(
+                "- Department {} / Group {} | Used by: {} PLUs | Examples: {}",
+                group.department,
+                group.number,
+                group.source_plu_numbers.len(),
+                format_limited_u64s(&group.source_plu_numbers, 8)
+            ))?;
+        }
+        for label_format in reference_readiness
+            .label_formats
+            .iter()
+            .filter(|reference| reference.status == ReferenceConfirmationStatus::Unverified)
+        {
+            logger.line(format!(
+                "- Label Format {} | Used by: {} PLUs | Examples: {}",
+                label_format.number,
+                label_format.source_plu_numbers.len(),
+                format_limited_u64s(&label_format.source_plu_numbers, 8)
+            ))?;
+        }
+        logger.line("No PLUs were submitted.")?;
+        logger.kv("PLU write requests", "0")?;
+        logger.line("Run: ./to-digi verify")?;
+        print!(
+            "IMPORT BLOCKED\n\nUnverified required references: {}\n\nNo PLUs were submitted.\n\nRun:\n./to-digi verify\n\n",
+            reference_readiness.unverified_reference_count
+        );
+        return Err(AppError::ValidationPayload(
+            "import blocked by unverified required DIGIweb references".to_string(),
+        ));
+    }
     let client = DigiwebClient::new(config.clone())?;
 
     prepare_payload_preview_dir(config.import.write_payload_preview)?;
@@ -354,6 +407,23 @@ pub async fn run_import(
         manifest.summary.not_attempted
     );
     Ok(summary_from_manifest(&manifest, plus.len()))
+}
+
+fn format_limited_u64s(values: &[u64], limit: usize) -> String {
+    if values.is_empty() {
+        return "none".to_string();
+    }
+    let shown = values
+        .iter()
+        .take(limit)
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if values.len() > limit {
+        format!("{shown}, ...")
+    } else {
+        shown
+    }
 }
 
 fn environment_secret_present() -> bool {
@@ -1074,6 +1144,53 @@ mod tests {
         assert!(!log.contains("client-secret"));
     }
 
+    #[tokio::test]
+    async fn import_refuses_before_write_when_required_reference_is_unverified() {
+        let mut config = AppConfig::default();
+        config.digiweb.client_secret = "client-secret".to_string();
+        config.import.write_payload_preview = false;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = temp.path().join("import-results.json");
+        let log_path = temp.path().join("logs.txt");
+        let mut logger = AuditLogger::create(&log_path).expect("logger");
+        let records = vec![plu(1)];
+
+        let err = run_import(
+            config,
+            &records,
+            SourceIdentity {
+                filename: "plu.mdb".to_string(),
+                size_bytes: 123,
+                sha256: "0".repeat(64),
+            },
+            TargetIdentity {
+                base_url: "https://example.invalid".to_string(),
+                store_number: 1,
+                client_id: "digi".to_string(),
+            },
+            &manifest_path,
+            None,
+            None,
+            ImportRunOptions {
+                limit: None,
+                continue_after_record_failure: false,
+                test_mode: false,
+                retry_failed: false,
+            },
+            &mut logger,
+        )
+        .await
+        .expect_err("blocked");
+        logger.flush().expect("flush");
+
+        let log = fs::read_to_string(log_path).expect("log");
+        assert!(matches!(err, AppError::ValidationPayload(_)));
+        assert!(log.contains("IMPORT BLOCKED"));
+        assert!(log.contains("No PLUs were submitted."));
+        assert!(log.contains("PLU write requests: 0"));
+        assert!(!manifest_path.exists());
+    }
+
     fn test_import_config(base_url: &str) -> AppConfig {
         AppConfig {
             digiweb: crate::config::DigiwebConfig {
@@ -1097,6 +1214,11 @@ mod tests {
             import: crate::config::ImportConfig::default(),
             mapping: crate::config::MappingConfig::default(),
             profiles: crate::config::ProfileConfig::default(),
+            verification: crate::config::VerificationConfig {
+                confirmed_departments: vec![1],
+                confirmed_groups: vec!["1:1".to_string()],
+                confirmed_label_formats: Vec::new(),
+            },
         }
     }
 

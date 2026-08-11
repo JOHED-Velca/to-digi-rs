@@ -219,6 +219,8 @@ clean_transient_outputs() {
     rm -f "$SCRIPT_DIR/diagnostics-report.json" || fail "Unable to clean transient diagnostics-report.json before execution." 2
     rm -f "$SCRIPT_DIR/dry-run-report.txt" || fail "Unable to clean transient dry-run-report.txt before execution." 2
     rm -f "$SCRIPT_DIR/dry-run-manifest.json" || fail "Unable to clean transient dry-run-manifest.json before execution." 2
+    rm -f "$SCRIPT_DIR/verify-report.txt" || fail "Unable to clean transient verify-report.txt before execution." 2
+    rm -f "$SCRIPT_DIR/verify-report.json" || fail "Unable to clean transient verify-report.json before execution." 2
     rm -f "$SCRIPT_DIR/mapping-report.txt" || fail "Unable to clean transient mapping-report.txt before execution." 2
     rm -f "$SCRIPT_DIR/mapping-report.json" || fail "Unable to clean transient mapping-report.json before execution." 2
     rm -f "$SCRIPT_DIR/profile-recommendations.txt" || fail "Unable to clean transient profile-recommendations.txt before execution." 2
@@ -278,6 +280,16 @@ archive_outputs() {
         mv "$SCRIPT_DIR/dry-run-manifest.json" "$RUN_DIR/dry-run-manifest.json" || warn "Could not archive dry-run-manifest.json to $RUN_DIR"
         chmod 600 "$RUN_DIR/dry-run-manifest.json" 2>/dev/null || true
         dry_run_manifest_path="$RUN_DIR/dry-run-manifest.json"
+    fi
+    local verify_path=""
+    if [ -f "$SCRIPT_DIR/verify-report.txt" ]; then
+        mv "$SCRIPT_DIR/verify-report.txt" "$RUN_DIR/verify-report.txt" || warn "Could not archive verify-report.txt to $RUN_DIR"
+        verify_path="$RUN_DIR/verify-report.txt"
+    fi
+    local verify_json_path=""
+    if [ -f "$SCRIPT_DIR/verify-report.json" ]; then
+        mv "$SCRIPT_DIR/verify-report.json" "$RUN_DIR/verify-report.json" || warn "Could not archive verify-report.json to $RUN_DIR"
+        verify_json_path="$RUN_DIR/verify-report.json"
     fi
     local mapping_path=""
     if [ -f "$SCRIPT_DIR/mapping-report.txt" ]; then
@@ -348,6 +360,8 @@ archive_outputs() {
     [ -z "$diagnostics_json_path" ] || printf 'JSON diagnostics report:\n%s\n' "$diagnostics_json_path"
     [ -z "$dry_run_path" ] || printf 'Dry-run report:\n%s\n' "$dry_run_path"
     [ -z "$dry_run_manifest_path" ] || printf 'Dry-run manifest:\n%s\n' "$dry_run_manifest_path"
+    [ -z "$verify_path" ] || printf 'Verify report:\n%s\n' "$verify_path"
+    [ -z "$verify_json_path" ] || printf 'Verify JSON report:\n%s\n' "$verify_json_path"
     [ -z "$mapping_path" ] || printf 'Text mapping report:\n%s\n' "$mapping_path"
     [ -z "$mapping_json_path" ] || printf 'JSON mapping report:\n%s\n' "$mapping_json_path"
     [ -z "$recommendations_path" ] || printf 'Profile recommendations:\n%s\n' "$recommendations_path"

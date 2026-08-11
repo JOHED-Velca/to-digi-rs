@@ -21,6 +21,7 @@ pub struct AppConfig {
     pub import: ImportConfig,
     pub mapping: MappingConfig,
     pub profiles: ProfileConfig,
+    pub verification: VerificationConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -70,6 +71,14 @@ pub struct ProfileConfig {
     pub default: String,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct VerificationConfig {
+    pub confirmed_departments: Vec<u32>,
+    pub confirmed_groups: Vec<String>,
+    pub confirmed_label_formats: Vec<u32>,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -78,6 +87,7 @@ impl Default for AppConfig {
             import: ImportConfig::default(),
             mapping: MappingConfig::default(),
             profiles: ProfileConfig::default(),
+            verification: VerificationConfig::default(),
         }
     }
 }
@@ -395,6 +405,38 @@ mod tests {
         assert_eq!(config.mapping.main_plu_table, "Pludata");
         assert_eq!(config.mapping.ingredient_table, "PluIng");
         assert!(config.mapping.nutrition_table.is_empty());
+    }
+
+    #[test]
+    fn verification_confirmations_default_empty() {
+        let config = AppConfig::default();
+
+        assert!(config.verification.confirmed_departments.is_empty());
+        assert!(config.verification.confirmed_groups.is_empty());
+        assert!(config.verification.confirmed_label_formats.is_empty());
+    }
+
+    #[test]
+    fn verification_confirmations_parse_from_toml() {
+        let config: AppConfig = toml::from_str(
+            r#"
+            [verification]
+            confirmed_departments = [2]
+            confirmed_groups = ["2:997", "2:998"]
+            confirmed_label_formats = [1, 2, 3, 4, 6, 8, 21]
+            "#,
+        )
+        .expect("config");
+
+        assert_eq!(config.verification.confirmed_departments, vec![2]);
+        assert_eq!(
+            config.verification.confirmed_groups,
+            vec!["2:997".to_string(), "2:998".to_string()]
+        );
+        assert_eq!(
+            config.verification.confirmed_label_formats,
+            vec![1, 2, 3, 4, 6, 8, 21]
+        );
     }
 
     #[test]

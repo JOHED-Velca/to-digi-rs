@@ -15,6 +15,9 @@
 - Added offline `map-audit` reports for current source-to-DIGIweb payload mapping diagnostics
 - Added `profile suggest --name NAME` to generate non-overwriting draft profiles and recommendations from deterministic findings
 - Made `verify` fail closed when required departments, groups, or label formats cannot be confirmed through supported DIGIweb lookup endpoints
+- Added explicit `[verification]` manual confirmations so `verify` can report `READY` or `READY_WITH_SKIPS` without inventing unsupported lookup results
+- Added a shared reference-readiness gate that blocks import before any PLU write when required references are unverified
+- Added `verify-report.txt/json` with manual/API/unverified reference status, stale confirmation warnings, skipped source records, and zero-write safety fields
 - Improved duplicate barcode diagnostics so the first PLU remains canonical and later duplicates are skipped explicitly
 - Added label-format prerequisite reporting to analysis and discovery output
 - Confirmed source Label Format 0 defaults to effective Label Format 1 while preserving raw provenance in diagnostics

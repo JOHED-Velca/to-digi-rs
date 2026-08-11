@@ -17,3 +17,10 @@ allow_invalid_certificates = true
 # Initialized Starsky deployments use the built-in Starsky profile by default.
 # Use `./to-digi analyze --raw` to inspect the source without any profile.
 default = "starsky"
+
+[verification]
+# Fill these only after an operator independently confirms the objects exist in DIGIweb.
+# Do not copy values from the MDB without checking the server setup.
+confirmed_departments = []
+confirmed_groups = []
+confirmed_label_formats = []

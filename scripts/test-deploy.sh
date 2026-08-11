@@ -87,6 +87,10 @@ if [ "$#" -ge 1 ] && [ "$1" = "run" ]; then
             printf 'dry-run-ok\n' >dry-run-report.txt
             printf '{"schema_version":1,"summary":{"api_write_requests":0}}\n' >dry-run-manifest.json
             ;;
+        *" verify "*)
+            printf 'verify-ok\n' >verify-report.txt
+            printf '{"schema_version":1,"readiness":"READY"}\n' >verify-report.json
+            ;;
         *" map-audit "*)
             printf 'mapping-ok\n' >mapping-report.txt
             printf '{"schema_version":1}\n' >mapping-report.json

@@ -113,6 +113,17 @@ The launcher does not prune, stop, remove, or modify unrelated Docker resources.
 
 `verify` checks connectivity and import readiness, but it is fail-closed for DIGIweb prerequisites. If required departments, groups, or label formats cannot be confirmed through a supported lookup endpoint, it reports `NOT READY / UNVERIFIED REFERENCE` rather than claiming the customer is ready for import.
 
+This version has no supported DIGIweb lookup endpoint for Department, Group, or Label Format existence. After checking those objects directly in DIGIweb, record manual confirmations in `config.toml`:
+
+```toml
+[verification]
+confirmed_departments = [2]
+confirmed_groups = ["2:997", "2:998"]
+confirmed_label_formats = [1, 2, 3, 4, 6, 8, 21]
+```
+
+Manual confirmation means an operator checked the object independently. It is not labeled as API-confirmed. Extra confirmations not needed by the current MDB are reported as stale warnings.
+
 Use this safe sequence before live writes:
 
 ```bash
@@ -137,6 +148,11 @@ allow_invalid_certificates = true
 
 [profiles]
 default = "starsky"
+
+[verification]
+confirmed_departments = []
+confirmed_groups = []
+confirmed_label_formats = []
 ```
 
 Existing full `v0.8.0` configs continue to parse. Defaults are supplied for client id, token path, PLU write path, request-status path, timeouts, mapping table names, and payload previews. `token_url` may be omitted, absolute, or a relative path resolved against `base_url`.
@@ -161,6 +177,18 @@ TO_DIGI_RS_IMAGE
 ```
 
 `DIGIWEB_CLIENT_SECRET` is accepted for compatibility. Command-line secrets are discouraged because they can enter shell history or process listings.
+
+Recommended readiness workflow:
+
+```bash
+./to-digi analyze
+# Check listed Departments, Groups, and effective Label Formats in DIGIweb.
+# Edit [verification] confirmations in config.toml.
+./to-digi verify
+./to-digi import --test
+```
+
+`verify` writes `verify-report.txt/json`. `READY` means all eligible PLUs and references are ready. `READY_WITH_SKIPS` means eligible PLUs are ready while some source records remain intentionally excluded for customer action. `NOT_READY` blocks import before any PLU write.
 
 ## Profiles
 
@@ -197,7 +225,7 @@ output/run-20260722-150500-import/
 output/run-20260722-151500-resume/
 ```
 
-The launcher preserves previous output and only removes transient root-level reports before the next run. It archives diagnostics reports, dry-run reports, dry-run manifests, and payload previews when those files are produced.
+The launcher preserves previous output and only removes transient root-level reports before the next run. It archives diagnostics reports, dry-run reports, dry-run manifests, verify reports, mapping reports, sanitization reports, and payload previews when those files are produced.
 
 ## Troubleshooting
 
@@ -215,7 +243,7 @@ The launcher preserves previous output and only removes transient root-level rep
 
 `dry_run_inspect_only conflict`: run `./to-digi dry-run` or remove the deprecated setting before running a live `./to-digi import`.
 
-`verify reports NOT READY / UNVERIFIED REFERENCE`: create or confirm the listed departments, groups, and label formats in DIGIweb, then rerun readiness checks. The tool does not fabricate or assume these references.
+`verify reports NOT READY / UNVERIFIED REFERENCE`: create or confirm the listed departments, groups, and effective label formats in DIGIweb, record them in `[verification]`, then rerun readiness checks. The tool does not fabricate, auto-confirm, or call manual confirmations API-confirmed.
 
 `Invalid profile path`: keep external profiles inside the deployment directory. Symlinks and outside paths are rejected.
 

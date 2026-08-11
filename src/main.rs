@@ -16,6 +16,7 @@ mod sanitization;
 mod source;
 mod validation;
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -29,14 +30,16 @@ use config::{AppConfig, client_secret_log_message, load_client_secret};
 use deployment::{run_doctor, run_init};
 use diagnostics::{
     DiagnosticCategory, DiagnosticTiming, DiagnosticsInput, build_diagnostics_report,
-    build_dry_run_manifest, filter_diagnostics, label_format_requirements,
-    render_diagnostics_console, render_dry_run_console, write_diagnostics_reports,
-    write_dry_run_outputs,
+    build_dry_run_manifest, filter_diagnostics, render_diagnostics_console, render_dry_run_console,
+    write_diagnostics_reports, write_dry_run_outputs,
 };
 use digiweb::auth::authenticate;
 use digiweb::client::DigiwebClient;
 use digiweb::payload::DigiwebPluPayload;
-use digiweb::preflight::collect_required_references;
+use digiweb::preflight::{
+    AuthenticationReadinessStatus, ReadinessResult, ReferenceConfirmationStatus,
+    ReferenceReadiness, collect_required_references, evaluate_reference_readiness,
+};
 use discovery::{DiscoveryInput, PhaseTiming, render_discovery_console, write_discovery_reports};
 use error::AppError;
 use import::runner::{ImportRunOptions, run_import};
@@ -53,6 +56,7 @@ use sanitization::{
     SanitizationIntegration, SanitizationProfile, SanitizationReportInput, apply_profile,
     load_profile_from_safe_path, validate_profile_path, write_sanitization_reports,
 };
+use serde::Serialize;
 use source::SourceDataset;
 use source::mapping::{normalize_dataset, validate_source_schema};
 use source::mdb_tools::MdbTools;
@@ -456,6 +460,7 @@ fn read_source_context(
     config: &AppConfig,
     logger: &mut AuditLogger,
     sanitization_profile: Option<SanitizationProfile>,
+    detailed_plu_logging: bool,
 ) -> Result<SourceContext, AppError> {
     let source_path = Path::new(FIXED_SOURCE_FILE);
     logger.kv("Path checked for source file", "./plu.mdb")?;
@@ -620,78 +625,87 @@ fn read_source_context(
     let invalid_group_values = normalization_report.invalid_group_values;
     let plus = normalization_report.plus;
     logger.kv("Normalized PLU records", &plus.len().to_string())?;
-    for plu in &plus {
-        logger.line(format!("PLU: {}", plu.plu_number))?;
-        logger.kv(
-            "Raw department",
-            &format!("{:?}", plu.source_department.as_deref().unwrap_or("")),
-        )?;
-        logger.kv(
-            "Normalized department reference",
-            &plu.department_number
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "missing".to_string()),
-        )?;
-        logger.kv(
-            "Raw Main Group Code",
-            &format!("{:?}", plu.source_group.as_deref().unwrap_or("")),
-        )?;
-        logger.kv(
-            "Normalized group reference",
-            &plu.group_number
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "missing".to_string()),
-        )?;
-        logger.kv(
-            "Group default applied",
-            if plu.group_default_applied {
-                "yes"
-            } else {
-                "no"
-            },
-        )?;
-        logger.kv(
-            "Raw Barcode Format",
-            &format!("{:?}", plu.source_barcode_format.as_deref().unwrap_or("")),
-        )?;
-        logger.kv(
-            "Raw Barcode",
-            &format!("{:?}", plu.source_barcode.as_deref().unwrap_or("")),
-        )?;
-        logger.kv(
-            "Raw Flag Data",
-            &format!("{:?}", plu.source_flag_data.as_deref().unwrap_or("")),
-        )?;
-        logger.kv(
-            "Derived DIGIweb barcode type",
-            plu.barcode_type.as_deref().unwrap_or("missing"),
-        )?;
-        logger.kv(
-            "Derived DIGIweb barcode reference",
-            plu.barcode_ref_no.as_deref().unwrap_or("missing"),
-        )?;
-        logger.kv(
-            "Derived barcode data",
-            &format!("{:?}", plu.barcode.as_deref().unwrap_or("")),
-        )?;
-        if let Some(group) = plu.group_number {
-            logger.line(format!(
-                "PLU {} group reference: {} - local validation passed",
-                plu.plu_number, group
-            ))?;
-            logger.line(format!("Source Main Group Code: {}", group))?;
-            logger.line(format!("DIGIweb group reference number: {}", group))?;
-            logger.line("Internal DIGIweb group UUID: resolved by DIGIweb")?;
-            logger.kv("Group validation", "accepted as positive integer")?;
+    if detailed_plu_logging {
+        for plu in &plus {
+            logger.line(format!("PLU: {}", plu.plu_number))?;
+            logger.kv(
+                "Raw department",
+                &format!("{:?}", plu.source_department.as_deref().unwrap_or("")),
+            )?;
+            logger.kv(
+                "Normalized department reference",
+                &plu.department_number
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "missing".to_string()),
+            )?;
+            logger.kv(
+                "Raw Main Group Code",
+                &format!("{:?}", plu.source_group.as_deref().unwrap_or("")),
+            )?;
+            logger.kv(
+                "Normalized group reference",
+                &plu.group_number
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "missing".to_string()),
+            )?;
+            logger.kv(
+                "Group default applied",
+                if plu.group_default_applied {
+                    "yes"
+                } else {
+                    "no"
+                },
+            )?;
+            logger.kv(
+                "Raw Barcode Format",
+                &format!("{:?}", plu.source_barcode_format.as_deref().unwrap_or("")),
+            )?;
+            logger.kv(
+                "Raw Barcode",
+                &format!("{:?}", plu.source_barcode.as_deref().unwrap_or("")),
+            )?;
+            logger.kv(
+                "Raw Flag Data",
+                &format!("{:?}", plu.source_flag_data.as_deref().unwrap_or("")),
+            )?;
+            logger.kv(
+                "Derived DIGIweb barcode type",
+                plu.barcode_type.as_deref().unwrap_or("missing"),
+            )?;
+            logger.kv(
+                "Derived DIGIweb barcode reference",
+                plu.barcode_ref_no.as_deref().unwrap_or("missing"),
+            )?;
+            logger.kv(
+                "Derived barcode data",
+                &format!("{:?}", plu.barcode.as_deref().unwrap_or("")),
+            )?;
+            if let Some(group) = plu.group_number {
+                logger.line(format!(
+                    "PLU {} group reference: {} - local validation passed",
+                    plu.plu_number, group
+                ))?;
+                logger.line(format!("Source Main Group Code: {}", group))?;
+                logger.line(format!("DIGIweb group reference number: {}", group))?;
+                logger.line("Server existence: UNVERIFIED during local source normalization")?;
+                logger.line("Internal UUID: not resolved during preflight")?;
+                logger.kv("Group validation", "accepted as positive integer")?;
+            }
         }
+    } else {
+        logger.kv(
+            "Per-PLU normalization detail",
+            "omitted; use diagnose --plu for record-level details",
+        )?;
     }
     let required_references = collect_required_references(&plus);
     for reference in &required_references {
         logger.line(format!(
-            "Required DIGIweb reference: department {} + group {} from PLUs {:?} => {}",
+            "Required DIGIweb reference: department {} + group {} used by {} PLUs; examples: {} => {}",
             reference.department_number,
             reference.group_number,
-            reference.source_plu_numbers,
+            reference.source_plu_numbers.len(),
+            format_limited_u64s(&reference.source_plu_numbers, 8),
             reference.status.as_str()
         ))?;
     }
@@ -800,7 +814,7 @@ fn run_analyze(
     logger.line("DIGIweb API requests attempted: NO")?;
     logger.line("Source database modified: NO")?;
     let profile = load_optional_sanitization_profile(sanitize_profile_path)?;
-    let source = read_source_context(config, logger, profile)?;
+    let source = read_source_context(config, logger, profile, true)?;
     let report = build_analysis_report(&source);
     write_text_report(Path::new("analysis-report.txt"), &report)?;
     write_json_report(Path::new("analysis-report.json"), &report)?;
@@ -859,7 +873,7 @@ fn run_discover(
     let started_at = chrono::Local::now();
     let total_started = Instant::now();
     let source_started = Instant::now();
-    let source = read_source_context(config, logger, None)?;
+    let source = read_source_context(config, logger, None, true)?;
     let source_timing = PhaseTiming::from_duration("MDB source read", source_started.elapsed());
     let report_started = Instant::now();
     let finished_at = chrono::Local::now();
@@ -941,7 +955,7 @@ fn run_map_audit(
     let started_at = chrono::Local::now();
     let total_started = Instant::now();
     let source_started = Instant::now();
-    let source = read_source_context(config, logger, None)?;
+    let source = read_source_context(config, logger, None, true)?;
     let finished_at = chrono::Local::now();
     let timings = vec![
         PhaseTiming::from_duration("MDB source read", source_started.elapsed()),
@@ -1015,7 +1029,7 @@ fn run_profile_suggest(
     let started_at = chrono::Local::now();
     let total_started = Instant::now();
     let source_started = Instant::now();
-    let source = read_source_context(config, logger, None)?;
+    let source = read_source_context(config, logger, None, true)?;
     let finished_at = chrono::Local::now();
     let timings = vec![
         PhaseTiming::from_duration("MDB source read", source_started.elapsed()),
@@ -1081,7 +1095,7 @@ fn run_diagnose(
     logger.line("Source database modified: NO")?;
     let started_at = chrono::Local::now();
     let source_started = Instant::now();
-    let source = read_source_context(config, logger, None)?;
+    let source = read_source_context(config, logger, None, true)?;
     let finished_at = chrono::Local::now();
     let report = build_diagnostics_report(DiagnosticsInput {
         source_path: FIXED_SOURCE_FILE,
@@ -1157,7 +1171,7 @@ fn run_dry_run(
     logger.line("Source database modified: NO")?;
     let profile = load_optional_sanitization_profile(sanitize_profile_path)?;
     let started = Instant::now();
-    let source = read_source_context(config, logger, profile)?;
+    let source = read_source_context(config, logger, profile, true)?;
     let diagnostics = build_diagnostics_report(DiagnosticsInput {
         source_path: FIXED_SOURCE_FILE,
         source_sha256: &source.source_identity.sha256,
@@ -1326,7 +1340,7 @@ fn run_sanitize(
     logger.line("DIGIweb API requests attempted: NO")?;
     logger.line("Source database modified: NO")?;
     let profile = load_sanitization_profile(profile_selection)?;
-    let source = read_source_context(config, logger, Some(profile))?;
+    let source = read_source_context(config, logger, Some(profile), true)?;
     let sanitization = source.sanitization.as_ref().ok_or_else(|| {
         AppError::Internal("sanitize command did not produce a sanitization report".to_string())
     })?;
@@ -1591,7 +1605,7 @@ async fn run_import_command(
     println!("Starting import...");
     println!("Outputs will be written under output/ when launched with ./to-digi.");
     let profile = profile_for_import_or_resume(resume_manifest, sanitize_profile_path)?;
-    let source = read_source_context(config, logger, profile)?;
+    let source = read_source_context(config, logger, profile, true)?;
     if source.valid_plus.is_empty() {
         logger.final_failure("validation", "no valid PLUs are available to send", true)?;
         return Ok(2);
@@ -1750,16 +1764,30 @@ async fn run_verify(
     logger: &mut AuditLogger,
     sanitize_profile_path: Option<&ProfileSelection>,
 ) -> Result<i32, AppError> {
+    let started_at = chrono::Local::now();
     println!("Starting import readiness verification...");
-    println!("Outputs will be written to logs.txt");
+    println!("Outputs will be written to logs.txt, verify-report.txt, and verify-report.json");
     logger.line("Verify scope: import-readiness verification only; no source-versus-DIGIweb post-import comparison is attempted.")?;
     let profile = load_optional_sanitization_profile(sanitize_profile_path)?;
-    let source = read_source_context(config, logger, profile)?;
-    let analysis_report = build_analysis_report(&source);
+    let source = read_source_context(config, logger, profile, false)?;
     for plu in &source.valid_plus {
         DigiwebPluPayload::from_plu(plu, &config.digiweb)?;
     }
-    logger.kv("Payload validation", "PASSED")?;
+    let excluded_plu_numbers = excluded_plu_numbers(&source);
+    let excluded_count = excluded_plu_numbers.len();
+    let reference_readiness =
+        evaluate_reference_readiness(&source.valid_plus, &config.verification, excluded_count)?;
+    logger.kv("Source PLUs", &source.dataset.plu_rows.len().to_string())?;
+    logger.kv("Eligible PLUs", &source.valid_plus.len().to_string())?;
+    logger.kv(
+        "Customer-action-required / excluded",
+        &excluded_count.to_string(),
+    )?;
+    logger.kv("Eligible payload validation", "PASSED")?;
+    logger.kv(
+        "Source contains excluded issues",
+        if excluded_count > 0 { "YES" } else { "NO" },
+    )?;
     validate_connection_urls(config)?;
     let client_secret = load_client_secret(config)?;
     logger.kv(
@@ -1767,25 +1795,13 @@ async fn run_verify(
         client_secret_log_message(config, environment_secret_present()),
     )?;
     let client = DigiwebClient::new(config.clone())?;
-    authenticate(client.http(), config, &client_secret).await?;
-    let required_group_references = collect_required_references(&source.valid_plus);
-    let required_label_formats = label_format_requirements(&source.valid_plus)
-        .into_iter()
-        .filter(|label_format| label_format.server_reference_required)
-        .collect::<Vec<_>>();
-    logger.kv(
-        "Local source analysis status",
-        analysis_report.analysis_status.as_text(),
-    )?;
-    logger.kv(
-        "Local source validation",
-        if analysis_report.analysis_status == analysis::model::AnalysisStatus::Fail {
-            "FAILED"
-        } else {
-            "PASSED"
-        },
-    )?;
-    logger.kv("DIGIweb authentication", "PASSED")?;
+    let auth_result = authenticate(client.http(), config, &client_secret).await;
+    let authentication = if auth_result.is_ok() {
+        AuthenticationReadinessStatus::Passed
+    } else {
+        AuthenticationReadinessStatus::Failed
+    };
+    logger.kv("DIGIweb authentication", authentication.as_str())?;
     if let Some(sanitization) = &source.sanitization {
         logger.kv("Sanitization profile", &sanitization.profile.profile_name)?;
         logger.kv("Sanitization profile hash", &sanitization.profile_sha256)?;
@@ -1798,64 +1814,440 @@ async fn run_verify(
             &sanitization.after_invalid.to_string(),
         )?;
     }
-    logger.kv("DIGIweb department/group existence", "UNVERIFIED")?;
-    logger.kv("DIGIweb label format existence", "UNVERIFIED")?;
+    log_reference_readiness(logger, &reference_readiness)?;
     logger.kv("Write operation attempted", "NO")?;
-    if !required_group_references.is_empty() || !required_label_formats.is_empty() {
+    logger.kv("PLU write requests", "0")?;
+    let finished_at = chrono::Local::now();
+    let readiness_result = final_readiness_result(authentication, &reference_readiness);
+    let verify_report = build_verify_report(VerifyReportInput {
+        source: &source,
+        config,
+        authentication,
+        reference_readiness: &reference_readiness,
+        readiness_result,
+        excluded_plu_numbers: &excluded_plu_numbers,
+        started_at,
+        finished_at,
+    });
+    write_verify_reports(&verify_report)?;
+    logger.kv("Verify report", "verify-report.txt")?;
+    logger.kv("Verify JSON report", "verify-report.json")?;
+
+    if let Err(err) = auth_result {
+        logger.kv("IMPORT READINESS", readiness_result.as_str())?;
+        logger.flush()?;
+        return Err(err);
+    }
+
+    if readiness_result == ReadinessResult::NotReady {
         logger.line("VERIFY RESULT: NOT READY")?;
-        if !required_group_references.is_empty() {
-            logger.line("Unverified Departments/Groups:")?;
-            for reference in &required_group_references {
-                logger.line(format!(
-                    "Department {} / Group {} required by PLUs {:?}",
-                    reference.department_number,
-                    reference.group_number,
-                    reference.source_plu_numbers
-                ))?;
-            }
-        }
-        if !required_label_formats.is_empty() {
-            logger.line("Missing or unverified Label Formats:")?;
-            for label_format in &required_label_formats {
-                logger.line(format!(
-                    "Label Format {} required by PLUs {:?}",
-                    label_format.label_format, label_format.plu_numbers
-                ))?;
-            }
-        }
-        logger.line("Import readiness cannot be confirmed safely because supported DIGIweb reference lookup endpoints are not configured in this version.")?;
-        logger.kv("IMPORT READINESS", "NOT READY / UNVERIFIED REFERENCE")?;
+        logger.line("Import readiness cannot be confirmed safely until every required Department, Group, and effective Label Format is manually confirmed in [verification].")?;
+        logger.kv("IMPORT READINESS", "NOT_READY_UNVERIFIED_REFERENCE")?;
         logger.flush()?;
         println!("VERIFY RESULT: NOT READY");
-        if !required_label_formats.is_empty() {
-            println!();
-            println!("Missing or unverified Label Formats:");
-            for label_format in &required_label_formats {
-                println!(
-                    "Label Format {} required by PLUs: {}",
-                    label_format.label_format,
-                    format_limited_u64s(&label_format.plu_numbers, 8)
-                );
-            }
-        }
+        print_unverified_references(&reference_readiness);
         println!("Final status: NOT_READY_UNVERIFIED_REFERENCE");
         return Ok(1);
     }
-    logger.kv(
-        "IMPORT READINESS",
-        if source.valid_plus.is_empty() {
-            "NOT READY"
-        } else {
-            "READY"
-        },
-    )?;
+    logger.line(format!("VERIFY RESULT: {}", readiness_result.as_str()))?;
+    logger.kv("IMPORT READINESS", readiness_result.as_str())?;
     logger.flush()?;
-    let exit_code = if source.valid_plus.is_empty() { 2 } else { 0 };
-    println!(
-        "Final status: {}",
-        if exit_code == 0 { "READY" } else { "NOT_READY" }
+    println!("VERIFY RESULT: {}", readiness_result.as_str());
+    println!("Final status: {}", readiness_result.as_str());
+    Ok(0)
+}
+
+struct VerifyReportInput<'a> {
+    source: &'a SourceContext,
+    config: &'a AppConfig,
+    authentication: AuthenticationReadinessStatus,
+    reference_readiness: &'a ReferenceReadiness,
+    readiness_result: ReadinessResult,
+    excluded_plu_numbers: &'a [u64],
+    started_at: chrono::DateTime<chrono::Local>,
+    finished_at: chrono::DateTime<chrono::Local>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VerifyReport {
+    schema_version: u32,
+    application_version: String,
+    command: String,
+    generated_at: String,
+    started_at: String,
+    finished_at: String,
+    source_path: String,
+    source_sha256: String,
+    target_url: String,
+    store_number: u32,
+    authentication: String,
+    source_plu_count: usize,
+    eligible_plu_count: usize,
+    excluded_customer_action_count: usize,
+    excluded_customer_action_plus: Vec<u64>,
+    references: VerifyReferenceSection,
+    unverified_reference_count: usize,
+    stale_confirmations: Vec<digiweb::preflight::StaleConfirmation>,
+    readiness: String,
+    safety: VerifySafety,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VerifyReferenceSection {
+    departments: Vec<digiweb::preflight::DepartmentReadiness>,
+    groups: Vec<digiweb::preflight::GroupReadiness>,
+    label_formats: Vec<digiweb::preflight::LabelFormatReadiness>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VerifySafety {
+    write_operation_attempted: bool,
+    plu_write_requests: usize,
+    source_database_modified: bool,
+}
+
+fn build_verify_report(input: VerifyReportInput<'_>) -> VerifyReport {
+    VerifyReport {
+        schema_version: 1,
+        application_version: env!("CARGO_PKG_VERSION").to_string(),
+        command: "verify".to_string(),
+        generated_at: chrono::Local::now().to_rfc3339(),
+        started_at: input.started_at.to_rfc3339(),
+        finished_at: input.finished_at.to_rfc3339(),
+        source_path: FIXED_SOURCE_FILE.to_string(),
+        source_sha256: input.source.source_identity.sha256.clone(),
+        target_url: input.config.digiweb.base_url.clone(),
+        store_number: input.config.digiweb.store_number,
+        authentication: input.authentication.as_str().to_string(),
+        source_plu_count: input.source.dataset.plu_rows.len(),
+        eligible_plu_count: input.source.valid_plus.len(),
+        excluded_customer_action_count: input.excluded_plu_numbers.len(),
+        excluded_customer_action_plus: input.excluded_plu_numbers.to_vec(),
+        references: VerifyReferenceSection {
+            departments: input.reference_readiness.departments.clone(),
+            groups: input.reference_readiness.groups.clone(),
+            label_formats: input.reference_readiness.label_formats.clone(),
+        },
+        unverified_reference_count: input.reference_readiness.unverified_reference_count,
+        stale_confirmations: input.reference_readiness.stale_confirmations.clone(),
+        readiness: input.readiness_result.as_str().to_string(),
+        safety: VerifySafety {
+            write_operation_attempted: false,
+            plu_write_requests: 0,
+            source_database_modified: false,
+        },
+    }
+}
+
+fn write_verify_reports(report: &VerifyReport) -> Result<(), AppError> {
+    fs::write("verify-report.txt", render_verify_report_text(report))
+        .map_err(|err| AppError::Internal(format!("failed to write verify report: {err}")))?;
+    let json = serde_json::to_string_pretty(report)
+        .map_err(|err| AppError::Internal(format!("verify JSON serialization failed: {err}")))?;
+    fs::write("verify-report.json", json)
+        .map_err(|err| AppError::Internal(format!("failed to write verify JSON: {err}")))?;
+    Ok(())
+}
+
+fn render_verify_report_text(report: &VerifyReport) -> String {
+    let mut out = String::new();
+    push_line(&mut out, "VERIFY READINESS REPORT");
+    push_line(&mut out, "");
+    push_kv(&mut out, "Application version", &report.application_version);
+    push_kv(&mut out, "Command", &report.command);
+    push_kv(&mut out, "Source path", &report.source_path);
+    push_kv(&mut out, "Source SHA-256", &report.source_sha256);
+    push_kv(&mut out, "Target URL", &report.target_url);
+    push_kv(&mut out, "Store number", &report.store_number.to_string());
+    push_kv(&mut out, "Authentication", &report.authentication);
+    push_kv(
+        &mut out,
+        "Source PLUs",
+        &report.source_plu_count.to_string(),
     );
-    Ok(exit_code)
+    push_kv(
+        &mut out,
+        "Eligible PLUs",
+        &report.eligible_plu_count.to_string(),
+    );
+    push_kv(
+        &mut out,
+        "Customer-action-required / excluded",
+        &report.excluded_customer_action_count.to_string(),
+    );
+    push_kv(
+        &mut out,
+        "Excluded PLUs",
+        &join_u64s(&report.excluded_customer_action_plus),
+    );
+    push_line(&mut out, "");
+    push_line(&mut out, "DEPARTMENTS");
+    for department in &report.references.departments {
+        push_line(
+            &mut out,
+            format!(
+                "Department {} | Status: {} | Used by: {} PLUs",
+                department.number,
+                department.status.as_str(),
+                department.source_plu_numbers.len()
+            ),
+        );
+        push_line(
+            &mut out,
+            format!("PLUs: {}", join_u64s(&department.source_plu_numbers)),
+        );
+    }
+    push_line(&mut out, "");
+    push_line(&mut out, "GROUPS");
+    for group in &report.references.groups {
+        push_line(
+            &mut out,
+            format!(
+                "Department {} / Group {} | Status: {} | Used by: {} PLUs",
+                group.department,
+                group.number,
+                group.status.as_str(),
+                group.source_plu_numbers.len()
+            ),
+        );
+        push_line(
+            &mut out,
+            format!("PLUs: {}", join_u64s(&group.source_plu_numbers)),
+        );
+    }
+    push_line(&mut out, "");
+    push_line(&mut out, "EFFECTIVE LABEL FORMATS");
+    for label_format in &report.references.label_formats {
+        push_line(
+            &mut out,
+            format!(
+                "Label Format {} | Status: {} | Used by: {} PLUs",
+                label_format.number,
+                label_format.status.as_str(),
+                label_format.source_plu_numbers.len()
+            ),
+        );
+        push_line(
+            &mut out,
+            format!("PLUs: {}", join_u64s(&label_format.source_plu_numbers)),
+        );
+    }
+    if !report.stale_confirmations.is_empty() {
+        push_line(&mut out, "");
+        push_line(&mut out, "UNUSED / STALE CONFIRMATIONS");
+        for warning in &report.stale_confirmations {
+            push_line(&mut out, &warning.message);
+        }
+    }
+    push_line(&mut out, "");
+    push_kv(
+        &mut out,
+        "Unverified reference count",
+        &report.unverified_reference_count.to_string(),
+    );
+    push_kv(&mut out, "Readiness", &report.readiness);
+    push_line(&mut out, "");
+    push_line(&mut out, "SAFETY");
+    push_kv(
+        &mut out,
+        "Write operation attempted",
+        if report.safety.write_operation_attempted {
+            "YES"
+        } else {
+            "NO"
+        },
+    );
+    push_kv(
+        &mut out,
+        "PLU write requests",
+        &report.safety.plu_write_requests.to_string(),
+    );
+    push_kv(
+        &mut out,
+        "Source database modified",
+        if report.safety.source_database_modified {
+            "YES"
+        } else {
+            "NO"
+        },
+    );
+    push_kv(&mut out, "Started", &report.started_at);
+    push_kv(&mut out, "Finished", &report.finished_at);
+    out
+}
+
+fn log_reference_readiness(
+    logger: &mut AuditLogger,
+    readiness: &ReferenceReadiness,
+) -> Result<(), AppError> {
+    logger.kv(
+        "DIGIweb department/group existence",
+        reference_group_summary(readiness),
+    )?;
+    logger.kv(
+        "DIGIweb label format existence",
+        reference_label_summary(readiness),
+    )?;
+    logger.line("Required reference readiness:")?;
+    for department in &readiness.departments {
+        logger.line(format!(
+            "Department {}                  {} | Used by: {} PLUs | Examples: {}",
+            department.number,
+            department.status.as_str(),
+            department.source_plu_numbers.len(),
+            format_limited_u64s(&department.source_plu_numbers, 8)
+        ))?;
+    }
+    for group in &readiness.groups {
+        logger.line(format!(
+            "Department {} / Group {}      {} | Used by: {} PLUs | Examples: {}",
+            group.department,
+            group.number,
+            group.status.as_str(),
+            group.source_plu_numbers.len(),
+            format_limited_u64s(&group.source_plu_numbers, 8)
+        ))?;
+    }
+    for label_format in &readiness.label_formats {
+        logger.line(format!(
+            "Label Format {}                {} | Used by: {} PLUs | Examples: {}",
+            label_format.number,
+            label_format.status.as_str(),
+            label_format.source_plu_numbers.len(),
+            format_limited_u64s(&label_format.source_plu_numbers, 8)
+        ))?;
+    }
+    for warning in &readiness.stale_confirmations {
+        logger.warning(&warning.message)?;
+    }
+    Ok(())
+}
+
+fn reference_group_summary(readiness: &ReferenceReadiness) -> &'static str {
+    let unverified_departments = readiness
+        .departments
+        .iter()
+        .any(|reference| reference.status == ReferenceConfirmationStatus::Unverified);
+    let unverified_groups = readiness
+        .groups
+        .iter()
+        .any(|reference| reference.status == ReferenceConfirmationStatus::Unverified);
+    if unverified_departments || unverified_groups {
+        "UNVERIFIED"
+    } else {
+        "MANUALLY_CONFIRMED"
+    }
+}
+
+fn reference_label_summary(readiness: &ReferenceReadiness) -> &'static str {
+    if readiness
+        .label_formats
+        .iter()
+        .any(|reference| reference.status == ReferenceConfirmationStatus::Unverified)
+    {
+        "UNVERIFIED"
+    } else {
+        "MANUALLY_CONFIRMED"
+    }
+}
+
+fn final_readiness_result(
+    authentication: AuthenticationReadinessStatus,
+    references: &ReferenceReadiness,
+) -> ReadinessResult {
+    if authentication != AuthenticationReadinessStatus::Passed || !references.is_ready() {
+        ReadinessResult::NotReady
+    } else {
+        references.result
+    }
+}
+
+fn print_unverified_references(readiness: &ReferenceReadiness) {
+    println!();
+    println!("Unverified required references:");
+    for department in readiness
+        .departments
+        .iter()
+        .filter(|reference| reference.status == ReferenceConfirmationStatus::Unverified)
+    {
+        println!(
+            "- Department {} | Used by: {} PLUs | Examples: {}",
+            department.number,
+            department.source_plu_numbers.len(),
+            format_limited_u64s(&department.source_plu_numbers, 8)
+        );
+    }
+    for group in readiness
+        .groups
+        .iter()
+        .filter(|reference| reference.status == ReferenceConfirmationStatus::Unverified)
+    {
+        println!(
+            "- Department {} / Group {} | Used by: {} PLUs | Examples: {}",
+            group.department,
+            group.number,
+            group.source_plu_numbers.len(),
+            format_limited_u64s(&group.source_plu_numbers, 8)
+        );
+    }
+    for label_format in readiness
+        .label_formats
+        .iter()
+        .filter(|reference| reference.status == ReferenceConfirmationStatus::Unverified)
+    {
+        println!(
+            "- Label Format {} | Used by: {} PLUs | Examples: {}",
+            label_format.number,
+            label_format.source_plu_numbers.len(),
+            format_limited_u64s(&label_format.source_plu_numbers, 8)
+        );
+    }
+}
+
+fn excluded_plu_numbers(source: &SourceContext) -> Vec<u64> {
+    let valid = source
+        .valid_plus
+        .iter()
+        .map(|plu| plu.plu_number)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut excluded = source
+        .row_issues
+        .iter()
+        .filter_map(|issue| issue.plu_number)
+        .chain(
+            source
+                .validation_report
+                .issues
+                .iter()
+                .filter_map(|issue| issue.plu_number),
+        )
+        .filter(|plu| !valid.contains(plu))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    excluded.sort_unstable();
+    excluded
+}
+
+fn join_u64s(values: &[u64]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn push_line(out: &mut String, value: impl AsRef<str>) {
+    out.push_str(value.as_ref());
+    out.push('\n');
+}
+
+fn push_kv(out: &mut String, key: &str, value: &str) {
+    push_line(out, format!("{key}: {value}"));
 }
 
 fn validate_connection_urls(config: &AppConfig) -> Result<(), AppError> {
@@ -2021,5 +2413,122 @@ fn selling_date_reason_for_log(
         }
         sanitization::engine::SanitizedChangeReason::MalformedValue => "malformed numeric value",
         sanitization::engine::SanitizedChangeReason::EmptyDefaulted => "empty or unspecified value",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use digiweb::preflight::{
+        DepartmentReadiness, GroupReadiness, LabelFormatReadiness, StaleConfirmation,
+    };
+
+    fn report_with_many_plu_dependencies() -> VerifyReport {
+        let plus = (1..=12).collect::<Vec<_>>();
+        VerifyReport {
+            schema_version: 1,
+            application_version: "test".to_string(),
+            command: "verify".to_string(),
+            generated_at: "2026-08-11T00:00:00-04:00".to_string(),
+            started_at: "2026-08-11T00:00:00-04:00".to_string(),
+            finished_at: "2026-08-11T00:00:01-04:00".to_string(),
+            source_path: "plu.mdb".to_string(),
+            source_sha256: "abc".to_string(),
+            target_url: "https://example.invalid".to_string(),
+            store_number: 1,
+            authentication: "PASSED".to_string(),
+            source_plu_count: 596,
+            eligible_plu_count: 592,
+            excluded_customer_action_count: 4,
+            excluded_customer_action_plus: vec![21, 22, 700, 9317],
+            references: VerifyReferenceSection {
+                departments: vec![DepartmentReadiness {
+                    number: 2,
+                    status: ReferenceConfirmationStatus::ManuallyConfirmed,
+                    source_plu_numbers: plus.clone(),
+                }],
+                groups: vec![GroupReadiness {
+                    department: 2,
+                    number: 997,
+                    status: ReferenceConfirmationStatus::ManuallyConfirmed,
+                    source_plu_numbers: plus.clone(),
+                }],
+                label_formats: vec![LabelFormatReadiness {
+                    number: 6,
+                    status: ReferenceConfirmationStatus::ManuallyConfirmed,
+                    source_plu_numbers: plus,
+                }],
+            },
+            unverified_reference_count: 0,
+            stale_confirmations: vec![StaleConfirmation {
+                reference_type: "label_format".to_string(),
+                reference: "99".to_string(),
+                message: "Configured confirmation not required by this MDB: Label Format 99"
+                    .to_string(),
+            }],
+            readiness: "READY_WITH_SKIPS".to_string(),
+            safety: VerifySafety {
+                write_operation_attempted: false,
+                plu_write_requests: 0,
+                source_database_modified: false,
+            },
+        }
+    }
+
+    #[test]
+    fn verify_report_text_and_json_include_readiness_and_safety() {
+        let report = report_with_many_plu_dependencies();
+
+        let text = render_verify_report_text(&report);
+        let json = serde_json::to_string(&report).expect("json");
+
+        assert!(text.contains("Readiness: READY_WITH_SKIPS"));
+        assert!(text.contains("Customer-action-required / excluded: 4"));
+        assert!(text.contains("Write operation attempted: NO"));
+        assert!(text.contains("PLU write requests: 0"));
+        assert!(json.contains("\"readiness\":\"READY_WITH_SKIPS\""));
+        assert!(json.contains("\"write_operation_attempted\":false"));
+    }
+
+    #[test]
+    fn verify_report_text_keeps_full_dependency_lists() {
+        let report = report_with_many_plu_dependencies();
+        let text = render_verify_report_text(&report);
+
+        assert!(text.contains("PLUs: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12"));
+        assert!(text.contains("Configured confirmation not required by this MDB: Label Format 99"));
+    }
+
+    #[test]
+    fn bounded_dependency_examples_are_concise() {
+        let values = (1..=12).collect::<Vec<_>>();
+
+        assert_eq!(
+            format_limited_u64s(&values, 8),
+            "1, 2, 3, 4, 5, 6, 7, 8, ..."
+        );
+    }
+
+    #[test]
+    fn authentication_failure_blocks_readiness() {
+        let readiness = ReferenceReadiness {
+            departments: Vec::new(),
+            groups: Vec::new(),
+            label_formats: Vec::new(),
+            stale_confirmations: Vec::new(),
+            unverified_reference_count: 0,
+            result: ReadinessResult::Ready,
+        };
+
+        assert_eq!(
+            final_readiness_result(AuthenticationReadinessStatus::Failed, &readiness),
+            ReadinessResult::NotReady
+        );
+    }
+
+    #[test]
+    fn preflight_wording_does_not_claim_group_uuid_resolution() {
+        let misleading = ["Internal DIGIweb group UUID:", " resolved by DIGIweb"].concat();
+        assert!(!include_str!("main.rs").contains(&misleading));
     }
 }

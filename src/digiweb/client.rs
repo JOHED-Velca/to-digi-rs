@@ -2159,6 +2159,7 @@ mod tests {
             import: ImportConfig::default(),
             mapping: MappingConfig::default(),
             profiles: ProfileConfig::default(),
+            verification: crate::config::VerificationConfig::default(),
         }
     }
 
