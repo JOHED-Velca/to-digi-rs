@@ -30,6 +30,7 @@
 - Added `TO_DIGI_RS_*` environment overrides and client-secret file support
 - Improved visible console output for connection checks and command results
 - Embedded deployment assets in the binary so init does not require a cloned repository
+- Added release-image pinning for container `init`, RC package artifacts, and GHCR release-candidate publishing
 - Updated deployment packaging and LF shell-script normalization
 
 ## v0.8.0

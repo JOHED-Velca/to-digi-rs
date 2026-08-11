@@ -3,13 +3,13 @@ name: Publish Container
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
         description: "Version tag to publish, without the leading v"
         required: true
-        default: "0.8.0"
+        default: "0.9.0-rc.1"
 
 permissions:
   contents: read
@@ -19,6 +19,44 @@ env:
   IMAGE_NAME: ghcr.io/johed-velca/to-digi-rs
 
 jobs:
+  release-metadata:
+    name: Resolve Release Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      image: ${{ steps.resolve.outputs.image }}
+      is_rc: ${{ steps.resolve.outputs.is_rc }}
+    steps:
+      - name: Resolve and validate version
+        id: resolve
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            raw="${{ inputs.version }}"
+          else
+            raw="${GITHUB_REF_NAME}"
+          fi
+          case "$raw" in
+            v*) tag="$raw"; version="${raw#v}" ;;
+            *) tag="v$raw"; version="$raw" ;;
+          esac
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "Malformed release version: $version" >&2
+            exit 1
+          fi
+          image="${IMAGE_NAME}:$version"
+          is_rc=false
+          if [[ "$version" == *-rc.* ]]; then
+            is_rc=true
+          fi
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "image=$image"
+            echo "is_rc=$is_rc"
+          } >> "$GITHUB_OUTPUT"
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -43,25 +81,32 @@ jobs:
   package-deployment:
     name: Package Deployment Bundle
     runs-on: ubuntu-latest
-    needs: test
+    needs:
+      - test
+      - release-metadata
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Build deployment archive
+        env:
+          TO_DIGI_RS_VERSION: ${{ needs.release-metadata.outputs.version }}
+          TO_DIGI_RS_PACKAGE_IMAGE: ${{ needs.release-metadata.outputs.image }}
         run: bash scripts/package-deploy.sh
 
       - name: Upload deployment archive
         uses: actions/upload-artifact@v4
         with:
-          name: to-digi-rs-deploy-v0.8.0
-          path: target/release-bundles/to-digi-rs-deploy-v0.8.0.tar.gz
+          name: to-digi-rs-deploy-${{ needs.release-metadata.outputs.tag }}
+          path: target/release-bundles/to-digi-rs-deploy-${{ needs.release-metadata.outputs.tag }}.tar.gz
           if-no-files-found: error
 
   publish:
     name: Publish GHCR Image
     runs-on: ubuntu-latest
-    needs: test
+    needs:
+      - test
+      - release-metadata
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -76,27 +121,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve image version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64
           push: true
           provenance: true
+          build-args: |
+            TO_DIGI_RS_RELEASE_IMAGE=${{ needs.release-metadata.outputs.image }}
+            TO_DIGI_RS_GIT_REVISION=${{ github.sha }}
           tags: |
-            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}
-            ${{ env.IMAGE_NAME }}:v${{ steps.version.outputs.value }}
+            ${{ needs.release-metadata.outputs.image }}
+            ${{ env.IMAGE_NAME }}:${{ needs.release-metadata.outputs.tag }}
           labels: |
             org.opencontainers.image.title=to-digi-rs
             org.opencontainers.image.description=One-shot DIGIweb PLU importer
-            org.opencontainers.image.version=${{ steps.version.outputs.value }}
+            org.opencontainers.image.version=${{ needs.release-metadata.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}

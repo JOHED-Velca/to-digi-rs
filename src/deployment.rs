@@ -13,6 +13,10 @@ use crate::logging::AuditLogger;
 use crate::sanitization::load_profile_from_safe_path;
 use crate::source::{FIXED_SOURCE_FILE, VerifiedSourceFile};
 
+pub const DEVELOPMENT_DEFAULT_IMAGE: &str = "ghcr.io/johed-velca/to-digi-rs:0.9.0";
+
+const RELEASE_IMAGE: Option<&str> = option_env!("TO_DIGI_RS_RELEASE_IMAGE");
+const GIT_REVISION: Option<&str> = option_env!("TO_DIGI_RS_GIT_REVISION");
 const IMAGE_REPOSITORY: &str = match option_env!("TO_DIGI_RS_IMAGE_REPOSITORY") {
     Some(value) => value,
     None => "ghcr.io/johed-velca/to-digi-rs",
@@ -35,18 +39,45 @@ enum AssetKind {
 
 struct Asset {
     path: &'static str,
-    contents: &'static str,
+    contents: String,
     mode: u32,
     kind: AssetKind,
 }
 
 pub fn default_image_reference() -> String {
-    match IMAGE_DIGEST {
-        Some(digest) if !digest.trim().is_empty() => {
-            format!("{IMAGE_REPOSITORY}:{}@{digest}", env!("CARGO_PKG_VERSION"))
-        }
-        _ => format!("{IMAGE_REPOSITORY}:{}", env!("CARGO_PKG_VERSION")),
+    default_image_reference_from(
+        RELEASE_IMAGE,
+        IMAGE_REPOSITORY,
+        IMAGE_DIGEST,
+        env!("CARGO_PKG_VERSION"),
+    )
+}
+
+fn default_image_reference_from(
+    release_image: Option<&str>,
+    image_repository: &str,
+    image_digest: Option<&str>,
+    version: &str,
+) -> String {
+    if let Some(image) = release_image
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return image.to_string();
     }
+    match image_digest {
+        Some(digest) if !digest.trim().is_empty() => {
+            format!("{image_repository}:{version}@{digest}")
+        }
+        _ => format!("{image_repository}:{version}"),
+    }
+}
+
+pub fn compiled_git_revision() -> &'static str {
+    GIT_REVISION
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown")
 }
 
 pub fn run_init(refresh_generated_files: bool, logger: &mut AuditLogger) -> Result<i32, AppError> {
@@ -80,10 +111,14 @@ pub fn run_doctor(
     println!("Running to-digi-rs doctor...");
     println!("Application version: {}", env!("CARGO_PKG_VERSION"));
     println!("Selected image: {}", selected_image_from_env());
+    println!("Compiled release image: {}", default_image_reference());
+    println!("Git revision: {}", compiled_git_revision());
     println!("Outputs will be written to logs.txt");
     logger.line("DEPLOYMENT DOCTOR")?;
     logger.kv("Application version", env!("CARGO_PKG_VERSION"))?;
     logger.kv("Selected image", &selected_image_from_env())?;
+    logger.kv("Compiled release image", &default_image_reference())?;
+    logger.kv("Git revision", compiled_git_revision())?;
     logger.kv(
         "Inside container",
         if inside_container { "yes" } else { "no" },
@@ -183,53 +218,57 @@ fn deployment_assets() -> Vec<Asset> {
     vec![
         Asset {
             path: "to-digi",
-            contents: TO_DIGI_TEMPLATE,
+            contents: render_deployment_template(TO_DIGI_TEMPLATE),
             mode: 0o755,
             kind: AssetKind::Generated,
         },
         Asset {
             path: "import.sh",
-            contents: IMPORT_SH_TEMPLATE,
+            contents: IMPORT_SH_TEMPLATE.to_string(),
             mode: 0o755,
             kind: AssetKind::Generated,
         },
         Asset {
             path: "run.sh",
-            contents: RUN_SH_TEMPLATE,
+            contents: RUN_SH_TEMPLATE.to_string(),
             mode: 0o755,
             kind: AssetKind::Generated,
         },
         Asset {
             path: "compose.yaml",
-            contents: COMPOSE_TEMPLATE,
+            contents: render_deployment_template(COMPOSE_TEMPLATE),
             mode: 0o644,
             kind: AssetKind::Generated,
         },
         Asset {
             path: "config.example.toml",
-            contents: CONFIG_EXAMPLE_TEMPLATE,
+            contents: CONFIG_EXAMPLE_TEMPLATE.to_string(),
             mode: 0o644,
             kind: AssetKind::Generated,
         },
         Asset {
             path: "config.toml",
-            contents: CONFIG_EXAMPLE_TEMPLATE,
+            contents: CONFIG_EXAMPLE_TEMPLATE.to_string(),
             mode: 0o600,
             kind: AssetKind::CustomerConfig,
         },
         Asset {
             path: "profiles/example.toml",
-            contents: PROFILE_EXAMPLE_TEMPLATE,
+            contents: PROFILE_EXAMPLE_TEMPLATE.to_string(),
             mode: 0o644,
             kind: AssetKind::Generated,
         },
         Asset {
             path: "profiles/starsky.toml",
-            contents: PROFILE_STARSKY_TEMPLATE,
+            contents: PROFILE_STARSKY_TEMPLATE.to_string(),
             mode: 0o644,
             kind: AssetKind::Generated,
         },
     ]
+}
+
+fn render_deployment_template(template: &str) -> String {
+    template.replace(DEVELOPMENT_DEFAULT_IMAGE, &default_image_reference())
 }
 
 fn install_asset(
@@ -254,12 +293,12 @@ fn install_asset(
         }
         match asset.kind {
             AssetKind::Generated if refresh_generated_files => {
-                if file_contents_match(path, asset.contents)? {
+                if file_contents_match(path, &asset.contents)? {
                     println!("Unchanged: {}", asset.path);
                     logger.kv("Init preserved unchanged generated file", asset.path)?;
                 } else {
                     backup_existing(path)?;
-                    write_asset(path, asset.contents, asset.mode)?;
+                    write_asset(path, &asset.contents, asset.mode)?;
                     println!("Refreshed: {}", asset.path);
                     logger.kv("Init refreshed generated file", asset.path)?;
                 }
@@ -271,7 +310,7 @@ fn install_asset(
             }
         }
     } else {
-        write_asset(path, asset.contents, asset.mode)?;
+        write_asset(path, &asset.contents, asset.mode)?;
         println!("Created: {}", asset.path);
         logger.kv("Init created file", asset.path)?;
     }
@@ -447,6 +486,54 @@ mod tests {
     }
 
     #[test]
+    fn simulated_release_image_reference_is_accepted() {
+        assert_eq!(
+            default_image_reference_from(
+                Some("ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1"),
+                "ghcr.io/johed-velca/to-digi-rs",
+                None,
+                "0.9.0",
+            ),
+            "ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1"
+        );
+    }
+
+    #[test]
+    fn local_development_fallback_remains_usable() {
+        assert_eq!(
+            default_image_reference_from(None, "ghcr.io/johed-velca/to-digi-rs", None, "0.9.0"),
+            DEVELOPMENT_DEFAULT_IMAGE
+        );
+    }
+
+    #[test]
+    fn init_templates_pin_compiled_release_image() {
+        let launcher = render_deployment_template(TO_DIGI_TEMPLATE);
+        let compose = render_deployment_template(COMPOSE_TEMPLATE);
+
+        assert!(launcher.contains(&format!("DEFAULT_IMAGE=\"{}\"", default_image_reference())));
+        assert!(compose.contains(&format!(
+            "image: ${{TO_DIGI_RS_IMAGE:-{}}}",
+            default_image_reference()
+        )));
+    }
+
+    #[test]
+    fn selected_image_env_override_takes_precedence_for_display() {
+        let previous = std::env::var("TO_DIGI_RS_IMAGE").ok();
+        unsafe {
+            std::env::set_var("TO_DIGI_RS_IMAGE", "to-digi-rs:test-selected");
+        }
+        assert_eq!(selected_image_from_env(), "to-digi-rs:test-selected");
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("TO_DIGI_RS_IMAGE", value),
+                None => std::env::remove_var("TO_DIGI_RS_IMAGE"),
+            }
+        }
+    }
+
+    #[test]
     fn embedded_starsky_profile_matches_external_profile() {
         assert_eq!(
             PROFILE_STARSKY_TEMPLATE,
@@ -475,6 +562,14 @@ mod tests {
         assert_eq!(fs::read("plu.mdb").expect("plu"), b"customer");
 
         let config = fs::read_to_string("config.toml").expect("config");
+        let launcher = fs::read_to_string("to-digi").expect("launcher");
+        let compose = fs::read_to_string("compose.yaml").expect("compose");
+        assert!(launcher.contains(&format!("DEFAULT_IMAGE=\"{}\"", default_image_reference())));
+        assert!(compose.contains(&format!(
+            "image: ${{TO_DIGI_RS_IMAGE:-{}}}",
+            default_image_reference()
+        )));
+
         fs::write("config.toml", "customer-config").expect("custom");
         run_init(false, &mut logger).expect("repeat");
         assert_eq!(

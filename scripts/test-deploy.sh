@@ -83,6 +83,9 @@ if [ "$#" -ge 1 ] && [ "$1" = "run" ]; then
             printf 'analysis-ok\n' >analysis-report.txt
             printf '{"schema_version":1}\n' >analysis-report.json
             ;;
+        *" doctor --inside-container "*)
+            printf 'Selected image: %s\n' "${TO_DIGI_RS_IMAGE:-}"
+            ;;
         *" discover "*)
             printf 'discovery-ok\n' >discovery-report.txt
             printf '{"schema_version":1}\n' >discovery-report.json
@@ -301,7 +304,16 @@ test_doctor_checks_image_and_never_imports_data() {
     PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" doctor >"$output" 2>&1
     assert_contains "$doctor_log" "image inspect ghcr.io/johed-velca/to-digi-rs:0.9.0"
     assert_contains "$doctor_log" "doctor --inside-container"
+    assert_contains "$output" "Selected image: ghcr.io/johed-velca/to-digi-rs:0.9.0"
     assert_not_contains "$doctor_log" "import --limit"
+
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-doctor-selected.log" TO_DIGI_RS_IMAGE=to-digi-rs:dev-selected \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
+    "$deploy_dir/to-digi" doctor >"$output" 2>&1
+    assert_contains "$TEST_ROOT/fake-doctor-selected.log" "image inspect to-digi-rs:dev-selected"
+    assert_contains "$TEST_ROOT/fake-doctor-selected.log" "TO_DIGI_RS_IMAGE=to-digi-rs:dev-selected"
+    assert_contains "$output" "Using image: to-digi-rs:dev-selected"
+    assert_contains "$output" "Selected image: to-digi-rs:dev-selected"
 
     set +e
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-doctor-image.log" FAKE_DOCKER_IMAGE_INSPECT_EXIT=1 \
@@ -361,8 +373,9 @@ test_non_usage_exit_without_log_still_warns_as_missing_log() {
 
 test_package_archive_contains_expected_files_only() {
     local archive
-    archive="$(TO_DIGI_RS_VERSION=0.9.0 "$ROOT_DIR/scripts/package-deploy.sh")"
+    archive="$(TO_DIGI_RS_VERSION=0.9.0-rc.1 TO_DIGI_RS_PACKAGE_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1 "$ROOT_DIR/scripts/package-deploy.sh")"
     [ -f "$archive" ] || fail "archive was not created"
+    [ "$(basename "$archive")" = "to-digi-rs-deploy-v0.9.0-rc.1.tar.gz" ] || fail "unexpected archive name: $archive"
     local listing="$TEST_ROOT/archive-list.txt"
     tar -tzf "$archive" | sort >"$listing"
 
@@ -377,6 +390,26 @@ test_package_archive_contains_expected_files_only() {
     assert_not_contains "$listing" "to-digi-rs-deploy/plu.mdb"
     assert_not_contains "$listing" "payload-previews"
     assert_not_contains "$listing" "import-results.json"
+
+    local extract_dir="$TEST_ROOT/archive-extract"
+    mkdir -p "$extract_dir"
+    tar -xzf "$archive" -C "$extract_dir"
+    assert_contains "$extract_dir/to-digi-rs-deploy/to-digi" "DEFAULT_IMAGE=\"ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1\""
+    assert_contains "$extract_dir/to-digi-rs-deploy/compose.yaml" "image: \${TO_DIGI_RS_IMAGE:-ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1}"
+    [ ! -f "$extract_dir/to-digi-rs-deploy/config.toml" ] || fail "archive unexpectedly contains config.toml"
+    [ ! -f "$extract_dir/to-digi-rs-deploy/plu.mdb" ] || fail "archive unexpectedly contains plu.mdb"
+}
+
+test_publish_workflow_supports_release_candidates() {
+    local workflow="$ROOT_DIR/.github/workflows/publish-container.yml"
+    assert_contains "$workflow" "tags:"
+    assert_contains "$workflow" "- \"v*\""
+    assert_contains "$workflow" '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
+    assert_contains "$workflow" "TO_DIGI_RS_RELEASE_IMAGE=\${{ needs.release-metadata.outputs.image }}"
+    assert_contains "$workflow" "platforms: linux/amd64"
+    assert_contains "$workflow" "to-digi-rs-deploy-\${{ needs.release-metadata.outputs.tag }}.tar.gz"
+    assert_not_contains "$workflow" "to-digi-rs-deploy-v0.8.0"
+    assert_not_contains "$workflow" ":latest"
 }
 
 test_launcher_does_not_print_secrets() {
@@ -398,6 +431,7 @@ test_wrappers_forward_to_to_digi
 test_cli_parse_error_without_log_is_not_warned_as_missing_log
 test_non_usage_exit_without_log_still_warns_as_missing_log
 test_package_archive_contains_expected_files_only
+test_publish_workflow_supports_release_candidates
 test_launcher_does_not_print_secrets
 
 printf 'deployment script tests passed\n'

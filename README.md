@@ -23,17 +23,18 @@ The immutable `v0.8.0` release remains `27e77faa136439a2e42f9a6ff63b17ad4ff720ac
 ## First-Time Ubuntu/WSL Installation
 
 ```bash
-mkdir -p ~/digi
-cd ~/digi
+IMAGE="ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1"
 
-docker login ghcr.io
-docker pull ghcr.io/johed-velca/to-digi-rs:0.9.0
+mkdir -p ~/digi/to-digi-rs-deploy
+cd ~/digi/to-digi-rs-deploy
+
+docker pull "$IMAGE"
 
 docker run --rm \
   --user "$(id -u):$(id -g)" \
   --mount type=bind,src="$PWD",dst=/work \
   --workdir /work \
-  ghcr.io/johed-velca/to-digi-rs:0.9.0 \
+  "$IMAGE" \
   init
 ```
 
@@ -50,6 +51,10 @@ profiles/example.toml
 profiles/starsky.toml
 output/
 ```
+
+The generated launcher and Compose file are pinned to the exact image that created them, such as `ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1`. The customer does not need Git, Rust, source code, or a publishing token. `TO_DIGI_RS_IMAGE` remains available as an advanced manual override when an operator intentionally wants to run a different image.
+
+Release-candidate images such as `0.9.0-rc.1` are pilot builds, not final releases.
 
 Then place the customer database in the same directory using the exact filename `plu.mdb`, edit only the DIGIweb host/IP and client secret in `config.toml`, and run:
 

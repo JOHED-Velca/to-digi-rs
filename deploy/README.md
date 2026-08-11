@@ -7,19 +7,22 @@ This directory is the portable customer deployment template for `to-digi-rs` v0.
 New deployments no longer require cloning the repository or manually downloading scripts. Initialize an empty host directory from the Docker image:
 
 ```bash
-mkdir -p ~/digi
-cd ~/digi
+IMAGE="ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1"
 
-docker login ghcr.io
-docker pull ghcr.io/johed-velca/to-digi-rs:0.9.0
+mkdir -p ~/digi/to-digi-rs-deploy
+cd ~/digi/to-digi-rs-deploy
+
+docker pull "$IMAGE"
 
 docker run --rm \
   --user "$(id -u):$(id -g)" \
   --mount type=bind,src="$PWD",dst=/work \
   --workdir /work \
-  ghcr.io/johed-velca/to-digi-rs:0.9.0 \
+  "$IMAGE" \
   init
 ```
+
+The generated launcher and Compose file are pinned to the exact image that created them, such as `ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1`. Customers do not need Git, Rust, source code, or a publishing token. `TO_DIGI_RS_IMAGE` remains an advanced manual override. Release candidates are pilot builds and should not be treated as final releases.
 
 Then edit `config.toml`, place `plu.mdb` beside `to-digi`, and run:
 

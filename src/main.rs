@@ -267,7 +267,17 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
         }
         EffectiveCommand::Version => {
             println!("to-digi-rs {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "Compiled release image: {}",
+                deployment::default_image_reference()
+            );
+            println!("Git revision: {}", deployment::compiled_git_revision());
             logger.kv("Application version", env!("CARGO_PKG_VERSION"))?;
+            logger.kv(
+                "Compiled release image",
+                &deployment::default_image_reference(),
+            )?;
+            logger.kv("Git revision", deployment::compiled_git_revision())?;
             Ok(0)
         }
     }
