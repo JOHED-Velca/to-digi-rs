@@ -1832,8 +1832,9 @@ async fn run_verify(
             println!("Missing or unverified Label Formats:");
             for label_format in &required_label_formats {
                 println!(
-                    "Label Format {} required by PLUs: {:?}",
-                    label_format.label_format, label_format.plu_numbers
+                    "Label Format {} required by PLUs: {}",
+                    label_format.label_format,
+                    format_limited_u64s(&label_format.plu_numbers, 8)
                 );
             }
         }
@@ -1879,6 +1880,23 @@ fn environment_secret_present() -> bool {
             .ok()
             .filter(|value| !value.is_empty())
             .is_some()
+}
+
+fn format_limited_u64s(values: &[u64], limit: usize) -> String {
+    if values.is_empty() {
+        return "none".to_string();
+    }
+    let shown = values
+        .iter()
+        .take(limit)
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if values.len() > limit {
+        format!("{shown}, ...")
+    } else {
+        shown
+    }
 }
 
 fn manifest_path_from_environment(resume_manifest: Option<&Path>) -> Result<PathBuf, AppError> {

@@ -176,6 +176,15 @@ fn render_label_formats(report: &AnalysisReport, out: &mut String) {
                 label_format.label_format, label_format.plu_count
             ),
         );
+        if label_format.raw_zero_defaulted_count > 0 {
+            line(
+                out,
+                format!(
+                    "  {} source PLUs defaulted from Label Format 0",
+                    label_format.raw_zero_defaulted_count
+                ),
+            );
+        }
     }
 }
 
@@ -301,6 +310,15 @@ fn render_setup(report: &AnalysisReport, out: &mut String) {
                 ),
             );
             line(out, format!("   Used by {} PLUs", label_format.plu_count));
+            if label_format.raw_zero_defaulted_count > 0 {
+                line(
+                    out,
+                    format!(
+                        "   {} source PLUs defaulted from Label Format 0",
+                        label_format.raw_zero_defaulted_count
+                    ),
+                );
+            }
         }
         if report.label_formats.len() > DISPLAY_LIMIT {
             line(

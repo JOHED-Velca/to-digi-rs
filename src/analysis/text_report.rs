@@ -343,6 +343,19 @@ pub fn render_text_report(report: &AnalysisReport) -> String {
             &mut out,
             format!("Semantic status: {}", label_format.semantic_status),
         );
+        if label_format.raw_zero_defaulted_count > 0 {
+            line(
+                &mut out,
+                format!(
+                    "Source normalization: {} PLUs defaulted from raw Label Format 0",
+                    label_format.raw_zero_defaulted_count
+                ),
+            );
+        }
+        line(
+            &mut out,
+            format!("Raw value counts: {:?}", label_format.raw_value_counts),
+        );
         line(
             &mut out,
             format!("PLUs: {}", join_numbers(&label_format.plu_numbers)),

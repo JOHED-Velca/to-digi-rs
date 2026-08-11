@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::analysis::model::ReferenceTableSnapshot;
 use crate::error::AppError;
-use crate::models::plu::Plu;
+use crate::models::plu::{Plu, effective_label_format};
 use crate::source::mapping::{
     BARCODE_COLUMNS, BARCODE_FORMAT_COLUMNS, BEST_BEFORE_COLUMNS, BEST_BEFORE_FLAG_COLUMNS,
     DEPARTMENT_COLUMNS, EXPIRATION_COLUMNS, INGREDIENT_TEXT_COLUMNS, KEY_LABEL_COLUMNS,
@@ -158,6 +158,8 @@ pub struct RequiredLabelFormat {
     pub plu_numbers: Vec<u64>,
     pub server_reference_required: bool,
     pub semantic_status: String,
+    pub raw_zero_defaulted_count: usize,
+    pub raw_value_counts: BTreeMap<u32, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -291,11 +293,20 @@ pub fn render_discovery_console(report: &DiscoveryReport) -> String {
                     "  Label Format {} | PLUs: {} | Used by: {} | Server reference required: {} | {}",
                     label_format.label_format,
                     label_format.plu_count,
-                    join_numbers(&label_format.plu_numbers),
+                    join_examples(&label_format.plu_numbers, 8),
                     yes_no(label_format.server_reference_required),
                     label_format.semantic_status
                 ),
             );
+            if label_format.raw_zero_defaulted_count > 0 {
+                line(
+                    &mut out,
+                    format!(
+                        "    Source normalization: {} PLUs defaulted from raw Label Format 0",
+                        label_format.raw_zero_defaulted_count
+                    ),
+                );
+            }
         }
     }
     blank(&mut out);
@@ -379,6 +390,19 @@ fn render_discovery_text(report: &DiscoveryReport) -> String {
                     label_format.semantic_status,
                     join_numbers(&label_format.plu_numbers)
                 ),
+            );
+            if label_format.raw_zero_defaulted_count > 0 {
+                line(
+                    &mut out,
+                    format!(
+                        "    Raw Label Format 0 -> effective {}: {} PLUs",
+                        label_format.label_format, label_format.raw_zero_defaulted_count
+                    ),
+                );
+            }
+            line(
+                &mut out,
+                format!("    Raw value counts: {:?}", label_format.raw_value_counts),
             );
         }
     }
@@ -906,30 +930,32 @@ fn required_groups(plus: &[Plu]) -> BTreeSet<(u32, u32)> {
 }
 
 fn required_label_formats(plus: &[Plu]) -> Vec<RequiredLabelFormat> {
-    let mut by_format: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
+    let mut by_format: BTreeMap<u32, (BTreeSet<u64>, BTreeMap<u32, usize>)> = BTreeMap::new();
     for plu in plus {
-        if let Some(label_format) = plu.label_format {
-            by_format
-                .entry(label_format)
-                .or_default()
-                .insert(plu.plu_number);
+        if let (Some(raw_label_format), Some(effective)) =
+            (plu.label_format, effective_label_format(plu.label_format))
+        {
+            let entry = by_format.entry(effective).or_default();
+            entry.0.insert(plu.plu_number);
+            *entry.1.entry(raw_label_format).or_default() += 1;
         }
     }
     by_format
         .into_iter()
-        .map(|(label_format, plus)| {
+        .map(|(label_format, (plus, raw_value_counts))| {
             let plu_numbers = plus.into_iter().collect::<Vec<_>>();
             RequiredLabelFormat {
                 label_format,
                 plu_count: plu_numbers.len(),
                 plu_numbers,
-                server_reference_required: label_format > 0,
-                semantic_status: if label_format == 0 {
-                    "unresolved_zero_semantics_may_mean_default_or_no_explicit_label_format"
-                        .to_string()
+                server_reference_required: true,
+                semantic_status: if raw_value_counts.get(&0).copied().unwrap_or_default() > 0 {
+                    "effective_label_format_reference_includes_raw_zero_defaults".to_string()
                 } else {
                     "positive_label_format_reference".to_string()
                 },
+                raw_zero_defaulted_count: raw_value_counts.get(&0).copied().unwrap_or_default(),
+                raw_value_counts,
             }
         })
         .collect()
@@ -1087,6 +1113,24 @@ fn join_numbers(numbers: &[u64]) -> String {
             .map(|value| value.to_string())
             .collect::<Vec<_>>()
             .join(", ")
+    }
+}
+
+fn join_examples(numbers: &[u64], limit: usize) -> String {
+    if numbers.is_empty() {
+        "none".to_string()
+    } else {
+        let shown = numbers
+            .iter()
+            .take(limit)
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if numbers.len() > limit {
+            format!("{shown}, ...")
+        } else {
+            shown
+        }
     }
 }
 
@@ -1258,13 +1302,61 @@ mod tests {
 
         assert!(console.contains("Label Formats"));
         assert!(console.contains("Label Format 6"));
-        assert!(console.contains("Label Format 0"));
+        assert!(console.contains("Label Format 1"));
+        assert!(console.contains("Source normalization: 1 PLUs defaulted from raw Label Format 0"));
         assert!(!potential.contains("Label Format"));
         assert!(
             report
                 .required_label_formats
                 .iter()
-                .any(|format| format.label_format == 0 && !format.server_reference_required)
+                .any(|format| format.label_format == 1
+                    && format.server_reference_required
+                    && format.raw_zero_defaulted_count == 1)
+        );
+        assert!(
+            !report
+                .required_label_formats
+                .iter()
+                .any(|format| format.label_format == 0)
+        );
+    }
+
+    #[test]
+    fn discovery_console_bounds_dependent_plu_examples_but_text_keeps_full_list() {
+        let dataset = SourceDataset {
+            plu_rows: vec![row("1", "997", "0")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+        let plus = (1..=12).map(|plu| valid_plu(plu, 6)).collect::<Vec<_>>();
+        let now = Local::now();
+        let report = build_discovery_report(DiscoveryInput {
+            command: "discover",
+            source_path: "plu.mdb",
+            source_sha256: "abc",
+            started_at: now,
+            finished_at: now,
+            dataset: &dataset,
+            valid_plus: &plus,
+            all_normalized_plus: &plus,
+            row_issues: &[],
+            validation_report: &ValidationReport { issues: Vec::new() },
+            placeholder_ignored: 0,
+            reference_tables: &[],
+            timings: Vec::new(),
+        });
+
+        let console = render_discovery_console(&report);
+        let text = render_discovery_text(&report);
+
+        assert!(
+            console.contains("Label Format 6 | PLUs: 12 | Used by: 1, 2, 3, 4, 5, 6, 7, 8, ...")
+        );
+        assert!(!console.contains("1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12"));
+        assert!(text.contains("Used by: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12"));
+        assert_eq!(
+            report.required_label_formats[0].plu_numbers,
+            (1..=12).collect::<Vec<_>>()
         );
     }
 }

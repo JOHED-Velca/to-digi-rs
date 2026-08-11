@@ -17,7 +17,7 @@
 - Made `verify` fail closed when required departments, groups, or label formats cannot be confirmed through supported DIGIweb lookup endpoints
 - Improved duplicate barcode diagnostics so the first PLU remains canonical and later duplicates are skipped explicitly
 - Added label-format prerequisite reporting to analysis and discovery output
-- Marked Label Format 0 semantics as unresolved instead of assuming it is a required DIGIweb server object
+- Confirmed source Label Format 0 defaults to effective Label Format 1 while preserving raw provenance in diagnostics
 - Replaced ingredient/nutrition token-sniffing warnings with provenance-based mapping checks
 - Split dry-run selected-execution counts from source-wide validation findings
 - Added a legacy `dry_run_inspect_only` conflict guard for live imports

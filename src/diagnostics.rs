@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::DigiwebConfig;
 use crate::digiweb::payload::DigiwebPluPayload;
 use crate::error::AppError;
-use crate::models::plu::Plu;
+use crate::models::plu::{Plu, effective_label_format, label_format_normalization_description};
 use crate::recovery::sha256_json;
 use crate::source::SourceDataset;
 use crate::validation::issue::{Severity, ValidationIssue};
@@ -111,6 +111,8 @@ pub struct LabelFormatRequirement {
     pub plu_numbers: Vec<u64>,
     pub server_reference_required: bool,
     pub semantic_status: String,
+    pub raw_zero_defaulted_count: usize,
+    pub raw_value_counts: BTreeMap<u32, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +129,8 @@ pub struct PluDiagnosticDetail {
     pub barcode_type: Option<String>,
     pub barcode_reference_number: Option<String>,
     pub label_format: Option<u32>,
+    pub effective_label_format: Option<u32>,
+    pub label_format_normalization: String,
     pub label_format_server_reference_required: bool,
     pub label_format_semantic_status: String,
     pub best_before: Option<u32>,
@@ -556,7 +560,21 @@ pub fn render_diagnostics_console(report: &DiagnosticsReport) -> String {
                 ),
             );
             if let Some(label_format) = detail.label_format {
-                line(&mut out, format!("Label Format: {label_format}"));
+                line(&mut out, format!("Raw Label Format: {label_format}"));
+                line(
+                    &mut out,
+                    format!(
+                        "Effective Label Format: {}",
+                        detail
+                            .effective_label_format
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    ),
+                );
+                line(
+                    &mut out,
+                    format!("Normalization: {}", detail.label_format_normalization),
+                );
                 line(
                     &mut out,
                     format!(
@@ -779,6 +797,15 @@ pub fn render_diagnostics_text(report: &DiagnosticsReport) -> String {
             &mut out,
             format!("Semantic status: {}", format.semantic_status),
         );
+        if format.raw_zero_defaulted_count > 0 {
+            line(
+                &mut out,
+                format!(
+                    "Source normalization: {} PLUs defaulted from raw Label Format 0",
+                    format.raw_zero_defaulted_count
+                ),
+            );
+        }
         line(
             &mut out,
             format!("PLUs: {}", join_numbers(&format.plu_numbers)),
@@ -842,18 +869,19 @@ pub fn duplicate_barcode_groups(plus: &[Plu]) -> Vec<DuplicateBarcodeGroup> {
 }
 
 pub fn label_format_requirements(plus: &[Plu]) -> Vec<LabelFormatRequirement> {
-    let mut by_format: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
+    let mut by_format: BTreeMap<u32, (BTreeSet<u64>, BTreeMap<u32, usize>)> = BTreeMap::new();
     for plu in plus {
-        if let Some(label_format) = plu.label_format {
-            by_format
-                .entry(label_format)
-                .or_default()
-                .insert(plu.plu_number);
+        if let (Some(raw_label_format), Some(effective)) =
+            (plu.label_format, effective_label_format(plu.label_format))
+        {
+            let entry = by_format.entry(effective).or_default();
+            entry.0.insert(plu.plu_number);
+            *entry.1.entry(raw_label_format).or_default() += 1;
         }
     }
     by_format
         .into_iter()
-        .map(|(label_format, plus)| {
+        .map(|(label_format, (plus, raw_value_counts))| {
             let plu_numbers = plus.into_iter().collect::<Vec<_>>();
             LabelFormatRequirement {
                 label_format,
@@ -861,6 +889,8 @@ pub fn label_format_requirements(plus: &[Plu]) -> Vec<LabelFormatRequirement> {
                 plu_numbers,
                 server_reference_required: label_format_server_reference_required(label_format),
                 semantic_status: label_format_semantic_status(label_format).to_string(),
+                raw_zero_defaulted_count: raw_value_counts.get(&0).copied().unwrap_or_default(),
+                raw_value_counts,
             }
         })
         .collect()
@@ -871,8 +901,8 @@ fn label_format_server_reference_required(label_format: u32) -> bool {
 }
 
 fn label_format_semantic_status(label_format: u32) -> &'static str {
-    if label_format == 0 {
-        "unresolved_zero_semantics_may_mean_default_or_no_explicit_label_format"
+    if label_format == 1 {
+        "effective_label_format_reference_may_include_raw_zero_defaults"
     } else {
         "positive_label_format_reference"
     }
@@ -943,7 +973,7 @@ fn plu_details(
                     source_field: "Pludata.Main Group Code -> plugroupno".to_string(),
                 });
             }
-            if let Some(label_format) = plu.label_format {
+            if let Some(label_format) = effective_label_format(plu.label_format) {
                 required_references.push(RequiredReference {
                     reference_type: "label_format".to_string(),
                     reference_number: label_format,
@@ -968,11 +998,14 @@ fn plu_details(
                 barcode_type: plu.barcode_type.clone(),
                 barcode_reference_number: plu.barcode_ref_no.clone(),
                 label_format: plu.label_format,
-                label_format_server_reference_required: plu
-                    .label_format
+                effective_label_format: effective_label_format(plu.label_format),
+                label_format_normalization: label_format_normalization_description(
+                    plu.label_format,
+                )
+                .to_string(),
+                label_format_server_reference_required: effective_label_format(plu.label_format)
                     .is_some_and(label_format_server_reference_required),
-                label_format_semantic_status: plu
-                    .label_format
+                label_format_semantic_status: effective_label_format(plu.label_format)
                     .map(label_format_semantic_status)
                     .unwrap_or("absent")
                     .to_string(),
@@ -1641,19 +1674,38 @@ mod tests {
     }
 
     #[test]
-    fn label_format_zero_is_reported_as_unresolved_not_required_server_reference() {
+    fn label_format_zero_defaults_to_effective_one_required_reference() {
         let mut a = plu(18, "0200018");
         a.label_format = Some(0);
 
         let requirements = label_format_requirements(&[a]);
 
-        assert_eq!(requirements[0].label_format, 0);
-        assert!(!requirements[0].server_reference_required);
-        assert!(
-            requirements[0]
-                .semantic_status
-                .contains("unresolved_zero_semantics")
-        );
+        assert_eq!(requirements.len(), 1);
+        assert_eq!(requirements[0].label_format, 1);
+        assert!(requirements[0].server_reference_required);
+        assert_eq!(requirements[0].raw_zero_defaulted_count, 1);
+        assert_eq!(requirements[0].raw_value_counts.get(&0), Some(&1));
+        assert!(requirements[0].semantic_status.contains("effective"));
+    }
+
+    #[test]
+    fn multiple_raw_label_format_zero_plus_aggregate_under_effective_one() {
+        let mut a = plu(18, "0200018");
+        a.label_format = Some(0);
+        let mut b = plu(19, "0200019");
+        b.label_format = Some(0);
+        let mut c = plu(20, "0200020");
+        c.label_format = Some(1);
+
+        let requirements = label_format_requirements(&[a, b, c]);
+
+        assert_eq!(requirements.len(), 1);
+        assert_eq!(requirements[0].label_format, 1);
+        assert_eq!(requirements[0].plu_count, 3);
+        assert_eq!(requirements[0].plu_numbers, vec![18, 19, 20]);
+        assert_eq!(requirements[0].raw_zero_defaulted_count, 2);
+        assert_eq!(requirements[0].raw_value_counts.get(&0), Some(&2));
+        assert_eq!(requirements[0].raw_value_counts.get(&1), Some(&1));
     }
 
     #[test]
@@ -1685,11 +1737,37 @@ mod tests {
         assert!(text.contains("PLU 18 detail"));
         assert!(text.contains("Local validation status: valid"));
         assert!(text.contains("Disposition: WouldSubmit"));
-        assert!(text.contains("Label Format: 6"));
+        assert!(text.contains("Raw Label Format: 6"));
+        assert!(text.contains("Effective Label Format: 6"));
+        assert!(text.contains("Normalization: none"));
         assert!(text.contains("Label Format server reference required: YES"));
         assert!(text.contains("label_format 6"));
         assert!(text.contains("plulabelformat"));
         assert!(text.contains("Nutrition facts count: 1"));
+    }
+
+    #[test]
+    fn plu_specific_diagnostics_show_raw_and_effective_label_format_zero() {
+        let mut detail_plu = plu(721, "0200721");
+        detail_plu.label_format = Some(0);
+        let dataset = source_dataset(vec![("721", "0001", "PLU 721", "0200721")]);
+        let validation_report = validate_plus(&[detail_plu.clone()]);
+        let report = diagnostics_report(
+            &dataset,
+            &[detail_plu.clone()],
+            &[detail_plu],
+            &[],
+            &validation_report,
+        );
+        let filtered = filter_diagnostics(&report, false, Some(721), None);
+        let text = render_diagnostics_text(&filtered);
+
+        assert!(text.contains("Raw Label Format: 0"));
+        assert!(text.contains("Effective Label Format: 1"));
+        assert!(text.contains("Normalization: Label Format 0 defaults to 1"));
+        assert!(text.contains("Label Format server reference required: YES"));
+        assert!(text.contains("label_format 1"));
+        assert!(!text.contains("label_format 0"));
     }
 
     #[test]
@@ -1759,6 +1837,42 @@ mod tests {
             && record.disposition == DiagnosticDisposition::SkippedDuplicateBarcode));
         assert!(manifest.records.iter().any(|record| record.plu_number == 22
             && record.disposition == DiagnosticDisposition::SkippedDuplicateBarcode));
+    }
+
+    #[test]
+    fn dry_run_manifest_payload_hash_uses_effective_label_format_one() {
+        let mut selected = plu(721, "0200721");
+        selected.label_format = Some(0);
+        let validation_report = validate_plus(&[selected.clone()]);
+        let dataset = source_dataset(vec![("721", "0001", "PLU 721", "0200721")]);
+        let diagnostics = diagnostics_report(
+            &dataset,
+            &[selected.clone()],
+            &[selected.clone()],
+            &[],
+            &validation_report,
+        );
+
+        let manifest = build_dry_run_manifest(
+            "plu.mdb",
+            "abc123",
+            &dataset,
+            &[selected.clone()],
+            &[selected.clone()],
+            &diagnostics,
+            &DigiwebConfig::default(),
+            Some(1),
+        )
+        .expect("manifest");
+        let expected_payload =
+            DigiwebPluPayload::from_plu(&selected, &DigiwebConfig::default()).expect("payload");
+        let expected_hash = sha256_json(&expected_payload).expect("hash");
+
+        assert_eq!(expected_payload.plulabelformat, Some(1));
+        assert_eq!(
+            manifest.records[0].payload_sha256.as_deref(),
+            Some(expected_hash.as_str())
+        );
     }
 
     #[test]

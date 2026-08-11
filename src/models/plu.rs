@@ -2,6 +2,30 @@ use rust_decimal::Decimal;
 
 use super::nutrition::NutritionFact;
 
+pub const DEFAULT_LABEL_FORMAT_FOR_ZERO: u32 = 1;
+
+pub fn effective_label_format(raw_label_format: Option<u32>) -> Option<u32> {
+    raw_label_format.map(|value| {
+        if value == 0 {
+            DEFAULT_LABEL_FORMAT_FOR_ZERO
+        } else {
+            value
+        }
+    })
+}
+
+pub fn label_format_defaulted_from_zero(raw_label_format: Option<u32>) -> bool {
+    raw_label_format == Some(0)
+}
+
+pub fn label_format_normalization_description(raw_label_format: Option<u32>) -> &'static str {
+    if label_format_defaulted_from_zero(raw_label_format) {
+        "Label Format 0 defaults to 1"
+    } else {
+        "none"
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PriceMode {
     ByWeight,
@@ -59,4 +83,25 @@ pub struct Plu {
     pub ingredients: Option<String>,
     pub nutrition_facts: Vec<NutritionFact>,
     pub source_pluing_row_count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEFAULT_LABEL_FORMAT_FOR_ZERO, effective_label_format,
+        label_format_normalization_description,
+    };
+
+    #[test]
+    fn raw_label_format_zero_defaults_to_effective_one() {
+        assert_eq!(DEFAULT_LABEL_FORMAT_FOR_ZERO, 1);
+        assert_eq!(effective_label_format(Some(0)), Some(1));
+        assert_eq!(effective_label_format(Some(6)), Some(6));
+        assert_eq!(effective_label_format(None), None);
+        assert_eq!(
+            label_format_normalization_description(Some(0)),
+            "Label Format 0 defaults to 1"
+        );
+        assert_eq!(label_format_normalization_description(Some(6)), "none");
+    }
 }

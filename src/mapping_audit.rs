@@ -9,7 +9,7 @@ use crate::config::DigiwebConfig;
 use crate::digiweb::payload::DigiwebPluPayload;
 use crate::discovery::PhaseTiming;
 use crate::error::AppError;
-use crate::models::plu::Plu;
+use crate::models::plu::{Plu, effective_label_format};
 use crate::source::SourceDataset;
 use crate::source::mapping::{
     BARCODE_COLUMNS, BARCODE_FORMAT_COLUMNS, BEST_BEFORE_COLUMNS, BEST_BEFORE_FLAG_COLUMNS,
@@ -122,6 +122,8 @@ pub struct PayloadSample {
     pub populated_destinations: Vec<String>,
     pub ingredient_present: bool,
     pub nutrition_fact_count: usize,
+    pub raw_label_format: Option<u32>,
+    pub effective_label_format: Option<u32>,
 }
 
 pub fn default_sample_limit() -> usize {
@@ -326,6 +328,20 @@ fn render_mapping_text(report: &MappingAuditReport) -> String {
                 sample.nutrition_fact_count
             ),
         );
+        line(
+            &mut out,
+            format!(
+                "  Label Format raw/effective: {}/{}",
+                sample
+                    .raw_label_format
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                sample
+                    .effective_label_format
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            ),
+        );
     }
     blank(&mut out);
     line(&mut out, "PERFORMANCE");
@@ -437,7 +453,7 @@ fn destinations(
             "plulabelformat",
             "Pludata",
             PRINT_FORMAT_COLUMNS,
-            "optional print format code",
+            "parse Label Format; source 0 defaults to effective Label Format 1",
             dataset.plu_rows.len(),
             payloads,
             |p| p.plulabelformat.is_some(),
@@ -593,6 +609,9 @@ fn sample(plu: &Plu, payload: &DigiwebPluPayload) -> PayloadSample {
     if payload.pluingredients.is_some() {
         destinations.push("pluingredients".to_string());
     }
+    if payload.plulabelformat.is_some() {
+        destinations.push("plulabelformat".to_string());
+    }
     let nutrition_fact_count = payload
         .plunft
         .as_ref()
@@ -606,6 +625,8 @@ fn sample(plu: &Plu, payload: &DigiwebPluPayload) -> PayloadSample {
         populated_destinations: destinations,
         ingredient_present: payload.pluingredients.is_some(),
         nutrition_fact_count,
+        raw_label_format: plu.label_format,
+        effective_label_format: effective_label_format(plu.label_format),
     }
 }
 
@@ -824,6 +845,48 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("nutrition token"))
+        );
+    }
+
+    #[test]
+    fn plulabelformat_audit_reports_raw_and_effective_zero_default() {
+        let dataset = SourceDataset {
+            plu_rows: Vec::new(),
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+        let plu = plu();
+        let now = Local::now();
+        let report = build_mapping_audit_report(MappingAuditInput {
+            source_path: "plu.mdb",
+            source_sha256: "abc",
+            started_at: now,
+            finished_at: now,
+            dataset: &dataset,
+            valid_plus: &[plu],
+            config: &DigiwebConfig::default(),
+            sample_limit: 5,
+            target_plu: None,
+            timings: Vec::new(),
+        })
+        .expect("audit");
+
+        let destination = report
+            .destinations
+            .iter()
+            .find(|destination| destination.destination == "plulabelformat")
+            .expect("label destination");
+        assert!(
+            destination
+                .transformation
+                .contains("source 0 defaults to effective Label Format 1")
+        );
+        assert_eq!(report.samples[0].raw_label_format, Some(0));
+        assert_eq!(report.samples[0].effective_label_format, Some(1));
+        assert!(
+            report.samples[0]
+                .populated_destinations
+                .contains(&"plulabelformat".to_string())
         );
     }
 

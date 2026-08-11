@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::DigiwebConfig;
 use crate::error::AppError;
 use crate::models::nutrition::NutritionFact;
-use crate::models::plu::{Plu, PriceMode};
+use crate::models::plu::{Plu, PriceMode, effective_label_format};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DigiwebPluPayload {
@@ -185,7 +185,7 @@ impl DigiwebPluPayload {
             plusellingdateterm: plu.selling_date_term,
             pluusingdateprint: plu.expiration_days.map(|_| 1),
             pluusingdateterm: plu.expiration_days,
-            plulabelformat: plu.label_format,
+            plulabelformat: effective_label_format(plu.label_format),
             plutraceability: plu.traceability,
             pluadditionaldatas,
             pluimages: Some(DigiwebPluImagesPayload::default()),
@@ -374,6 +374,56 @@ mod tests {
         assert!(json.contains("\"plunft\":{\"image\":\"\",\"text1\":\"\""));
         assert!(!json.contains("\"row\""));
         assert!(!json.contains("null"));
+    }
+
+    #[test]
+    fn raw_label_format_zero_serializes_as_effective_label_format_one() {
+        let mut plu = Plu {
+            plu_number: 10,
+            store_number: 1,
+            department_number: Some(2),
+            group_number: Some(3),
+            source_department: Some("0002".to_string()),
+            source_group: Some("3".to_string()),
+            group_default_applied: false,
+            name: "Apples".to_string(),
+            barcode: Some("12345".to_string()),
+            barcode_type: Some("5".to_string()),
+            barcode_ref_no: Some("5".to_string()),
+            source_barcode: Some("12345".to_string()),
+            source_barcode_format: Some("05".to_string()),
+            source_flag_data: Some("0".to_string()),
+            price: Decimal::new(199, 2),
+            price_mode: PriceMode::ByEach,
+            price_calc_method: Some(0),
+            quantity: Some(2),
+            quantity_symbol: Some(1),
+            tare: Some(Decimal::ZERO),
+            discount_type: Some(0),
+            packing_date_print: Some(1),
+            packing_time_print: Some(1),
+            selling_date_print: Some(1),
+            selling_date_term: Some(5),
+            label_format: Some(0),
+            traceability: Some(0),
+            short_description: None,
+            key_label: None,
+            expiration_days: None,
+            ingredients: None,
+            nutrition_facts: Vec::new(),
+            source_pluing_row_count: 0,
+        };
+        let payload =
+            DigiwebPluPayload::from_plu(&plu, &DigiwebConfig::default()).expect("payload");
+        let json = serde_json::to_string(&payload).expect("json");
+        assert_eq!(payload.plulabelformat, Some(1));
+        assert!(json.contains("\"plulabelformat\":1"));
+        assert!(!json.contains("\"plulabelformat\":0"));
+
+        plu.label_format = Some(6);
+        let payload =
+            DigiwebPluPayload::from_plu(&plu, &DigiwebConfig::default()).expect("payload");
+        assert_eq!(payload.plulabelformat, Some(6));
     }
 
     #[test]

@@ -155,6 +155,8 @@ pub struct LabelFormatRequirement {
     pub source_field: String,
     pub server_reference_required: bool,
     pub semantic_status: String,
+    pub raw_zero_defaulted_count: usize,
+    pub raw_value_counts: std::collections::BTreeMap<u32, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

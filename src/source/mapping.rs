@@ -152,6 +152,8 @@ struct NormalizedBarcode {
 ///   raw `Barcode Format` is normalized through an integer-like conversion, blank format defaults to `5`,
 ///   `plubarcodetype` receives that normalized format, `plubarcoderefno` is `1` for blank/0/00 and otherwise the normalized format,
 ///   `plubarcodedata` is `Flag Data` left-padded to 2 digits plus `Barcode` left-padded to 6 digits for format 4 or 5 digits otherwise.
+/// - `Pludata`.`PRINT FORMAT CODE` is retained as the raw label-format value on `Plu`;
+///   effective DIGIweb `plulabelformat` is resolved through the shared PLU label-format helper, where raw `0` defaults to effective `1`.
 /// - `PluIng` ingredients are assembled from non-empty `Ing Name 1` through `Ing Name 99` values in numeric order.
 /// - `PluIng` nutrition values are text in the inspected MDB and may contain zero padding. They are parsed as written with no unit conversion or decimal scaling.
 /// - Unknown DIGIweb-specific field limits are enforced in validation with conservative defaults only where documented in code.
@@ -960,6 +962,23 @@ mod tests {
 
         assert_eq!(report.plus[0].selling_date_term, Some(0));
         assert_eq!(report.plus[0].expiration_days, Some(30));
+    }
+
+    #[test]
+    fn print_format_code_zero_is_preserved_as_raw_source_value() {
+        let mut row = pludata_row("721", "0001", "Apples");
+        row.values
+            .insert("PRINT FORMAT CODE".to_string(), "0".to_string());
+        let dataset = SourceDataset {
+            plu_rows: vec![row],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert_eq!(dataset.plu_rows[0].get("PRINT FORMAT CODE"), Some("0"));
+        assert_eq!(report.plus[0].label_format, Some(0));
     }
 
     #[test]

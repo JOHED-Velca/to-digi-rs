@@ -9,7 +9,7 @@ use crate::analysis::model::{
     PriceCategoryAnalysis, ReferenceMatchStatus, ReferenceTableSnapshot, SafetyConfirmation,
     SourceSummary, TableAnalysis, TableStatus,
 };
-use crate::models::plu::{Plu, PriceMode};
+use crate::models::plu::{Plu, PriceMode, effective_label_format};
 use crate::sanitization::SanitizationIntegration;
 use crate::source::{SourceDataset, SourceRow};
 use crate::validation::issue::{Severity, ValidationIssue};
@@ -140,31 +140,33 @@ pub fn collect_analysis(input: AnalysisInput<'_>) -> AnalysisReport {
 }
 
 fn label_format_requirements(plus: &[Plu]) -> Vec<LabelFormatRequirement> {
-    let mut by_format: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
+    let mut by_format: BTreeMap<u32, (BTreeSet<u64>, BTreeMap<u32, usize>)> = BTreeMap::new();
     for plu in plus {
-        if let Some(label_format) = plu.label_format {
-            by_format
-                .entry(label_format)
-                .or_default()
-                .insert(plu.plu_number);
+        if let (Some(raw_label_format), Some(effective)) =
+            (plu.label_format, effective_label_format(plu.label_format))
+        {
+            let entry = by_format.entry(effective).or_default();
+            entry.0.insert(plu.plu_number);
+            *entry.1.entry(raw_label_format).or_default() += 1;
         }
     }
     by_format
         .into_iter()
-        .map(|(label_format, plus)| {
+        .map(|(label_format, (plus, raw_value_counts))| {
             let plu_numbers = plus.into_iter().collect::<Vec<_>>();
             LabelFormatRequirement {
                 label_format,
                 plu_count: plu_numbers.len(),
                 plu_numbers,
                 source_field: "Pludata.Print Format Code -> plulabelformat".to_string(),
-                server_reference_required: label_format > 0,
-                semantic_status: if label_format == 0 {
-                    "unresolved_zero_semantics_may_mean_default_or_no_explicit_label_format"
-                        .to_string()
+                server_reference_required: true,
+                semantic_status: if raw_value_counts.get(&0).copied().unwrap_or_default() > 0 {
+                    "effective_label_format_reference_includes_raw_zero_defaults".to_string()
                 } else {
                     "positive_label_format_reference".to_string()
                 },
+                raw_zero_defaulted_count: raw_value_counts.get(&0).copied().unwrap_or_default(),
+                raw_value_counts,
             }
         })
         .collect()
@@ -1195,6 +1197,45 @@ mod tests {
         );
         assert_eq!(report.groups[0].department_number, 1);
         assert_eq!(report.groups[1].department_number, 2);
+    }
+
+    #[test]
+    fn raw_label_format_zero_requires_effective_label_format_one() {
+        let dataset = SourceDataset {
+            plu_rows: vec![row("1", "1", "0"), row("2", "1", "0"), row("3", "1", "0")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+        let mut a = valid_plu(1, "1", 997);
+        a.label_format = Some(0);
+        let mut b = valid_plu(2, "1", 997);
+        b.label_format = Some(0);
+        let mut c = valid_plu(3, "1", 997);
+        c.label_format = Some(6);
+
+        let report = report_for(&dataset, &[a, b, c], &[], &[]);
+
+        assert_eq!(
+            report
+                .label_formats
+                .iter()
+                .map(|format| (format.label_format, format.plu_count))
+                .collect::<Vec<_>>(),
+            vec![(1, 2), (6, 1)]
+        );
+        let effective_one = report
+            .label_formats
+            .iter()
+            .find(|format| format.label_format == 1)
+            .expect("effective label format 1");
+        assert_eq!(effective_one.raw_zero_defaulted_count, 2);
+        assert_eq!(effective_one.raw_value_counts.get(&0), Some(&2));
+        assert!(
+            !report
+                .label_formats
+                .iter()
+                .any(|format| format.label_format == 0)
+        );
     }
 
     #[test]
