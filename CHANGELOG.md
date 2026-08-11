@@ -23,6 +23,7 @@
 - Confirmed source Label Format 0 defaults to effective Label Format 1 while preserving raw provenance in diagnostics
 - Replaced ingredient/nutrition token-sniffing warnings with provenance-based mapping checks
 - Split dry-run selected-execution counts from source-wide validation findings
+- Added exact `--plu` selection for dry-run and import, including manifest selection metadata and selected payload previews
 - Added a legacy `dry_run_inspect_only` conflict guard for live imports
 - Added minimal generated configuration with documented defaults
 - Added relative token URL resolution against `base_url`

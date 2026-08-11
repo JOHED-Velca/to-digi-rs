@@ -70,11 +70,12 @@ The bundle never includes a real `plu.mdb`, customer credentials, logs, manifest
 ./to-digi map-audit [--sample N] [--plu PLU_NUMBER] [--timings]
 ./to-digi profile suggest --name bigway
 ./to-digi sanitize
-./to-digi dry-run [--limit N] [--test]
+./to-digi dry-run [--limit N | --test | --plu PLU_NUMBER]
 ./to-digi verify
 ./to-digi import
 ./to-digi import --dry-run
 ./to-digi import --limit 1
+./to-digi import --plu PLU_NUMBER
 ./to-digi import --continue-on-error
 ./to-digi resume output/run-YYYYMMDD-HHMMSS-import/import-results.json
 ./to-digi resume output/run-YYYYMMDD-HHMMSS-import/import-results.json --retry-failed
@@ -109,7 +110,7 @@ The launcher does not prune, stop, remove, or modify unrelated Docker resources.
 
 `discover`, `diagnose`, `dry-run`, `map-audit`, and `profile suggest` are offline-only diagnostics. They require `plu.mdb`, but not `config.toml` or credentials, and they do not authenticate, contact DIGIweb, submit PLUs, or modify the source MDB.
 
-`diagnose` writes exact invalid/skipped PLU details, duplicate effective barcode groups, and required label formats to `diagnostics-report.txt/json`. `diagnose --plu N` also shows local details for valid PLUs, including raw/effective Label Format, required references, ingredient/NFT counts, and payload destination summary. `dry-run` writes `dry-run-report.txt` and `dry-run-manifest.json`, may build payload previews, and always records zero API write requests.
+`diagnose` writes exact invalid/skipped PLU details, duplicate effective barcode groups, and required label formats to `diagnostics-report.txt/json`. `diagnose --plu N` also shows local details for valid PLUs, including raw/effective Label Format, required references, ingredient/NFT counts, and payload destination summary. `dry-run` writes `dry-run-report.txt` and `dry-run-manifest.json`, may build payload previews, and always records zero API write requests. `dry-run --plu N` and `import --plu N` select that exact normalized valid PLU only; they do not substitute another PLU when the target is missing, invalid, duplicated, or excluded.
 
 `verify` checks connectivity and import readiness, but it is fail-closed for DIGIweb prerequisites. If required departments, groups, or label formats cannot be confirmed through a supported lookup endpoint, it reports `NOT READY / UNVERIFIED REFERENCE` rather than claiming the customer is ready for import.
 

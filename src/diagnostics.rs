@@ -11,6 +11,7 @@ use crate::digiweb::payload::DigiwebPluPayload;
 use crate::error::AppError;
 use crate::models::plu::{Plu, effective_label_format, label_format_normalization_description};
 use crate::recovery::sha256_json;
+use crate::selection::{SelectionCriteria, SelectionFailure, SelectionMode, selection_error};
 use crate::source::SourceDataset;
 use crate::validation::issue::{Severity, ValidationIssue};
 use crate::validation::validator::ValidationReport;
@@ -260,6 +261,9 @@ pub struct DryRunSummary {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DryRunSelectionSummary {
+    pub selection_mode: SelectionMode,
+    pub requested_plu: Option<u64>,
+    pub selected_order: Vec<u64>,
     pub selected: usize,
     pub would_submit: usize,
     pub selected_invalid_skips: usize,
@@ -1064,12 +1068,13 @@ pub fn build_dry_run_manifest(
     valid_plus: &[Plu],
     diagnostics: &DiagnosticsReport,
     config: &DigiwebConfig,
-    limit: Option<usize>,
+    criteria: SelectionCriteria,
 ) -> Result<DryRunManifest, AppError> {
-    let selected = select_dry_run_plus(valid_plus, limit);
+    let selected = select_dry_run_plus(all_plus, valid_plus, diagnostics, criteria)
+        .map_err(|failure| selection_error(&failure))?;
     let selected_count = selected.len();
     let mut records = Vec::new();
-    for plu in selected {
+    for plu in &selected {
         match DigiwebPluPayload::from_plu(plu, config) {
             Ok(payload) => records.push(DryRunRecord {
                 plu_number: plu.plu_number,
@@ -1120,6 +1125,10 @@ pub fn build_dry_run_manifest(
         .iter()
         .map(|plu| plu.plu_number)
         .collect::<BTreeSet<_>>();
+    let selected_order = selected
+        .iter()
+        .map(|plu| plu.plu_number)
+        .collect::<Vec<_>>();
     let selection_would_submit = records
         .iter()
         .filter(|record| selected_numbers.contains(&record.plu_number))
@@ -1169,6 +1178,9 @@ pub fn build_dry_run_manifest(
         payload_build_failures: selection_payload_failures,
         api_write_requests: 0,
         selection: DryRunSelectionSummary {
+            selection_mode: criteria.mode(),
+            requested_plu: criteria.requested_plu,
+            selected_order,
             selected: selected_count,
             would_submit: selection_would_submit,
             selected_invalid_skips: selection_skipped_invalid,
@@ -1200,6 +1212,40 @@ pub fn build_dry_run_manifest(
     })
 }
 
+fn select_dry_run_plus<'a>(
+    all_plus: &'a [Plu],
+    valid_plus: &'a [Plu],
+    diagnostics: &DiagnosticsReport,
+    criteria: SelectionCriteria,
+) -> Result<Vec<&'a Plu>, SelectionFailure> {
+    if let Some(plu_number) = criteria.requested_plu {
+        if let Some(plu) = valid_plus.iter().find(|plu| plu.plu_number == plu_number) {
+            return Ok(vec![plu]);
+        }
+        let exists = all_plus.iter().any(|plu| plu.plu_number == plu_number)
+            || diagnostics
+                .problems
+                .iter()
+                .any(|problem| problem.plu_number == Some(plu_number));
+        if exists {
+            return Err(SelectionFailure::NotEligible {
+                plu_number,
+                reasons: diagnostics
+                    .problems
+                    .iter()
+                    .filter(|problem| problem.plu_number == Some(plu_number))
+                    .map(|problem| problem.reason.clone())
+                    .collect(),
+            });
+        }
+        return Err(SelectionFailure::NotFound { plu_number });
+    }
+    Ok(valid_plus
+        .iter()
+        .take(criteria.limit.unwrap_or(usize::MAX))
+        .collect())
+}
+
 pub fn write_dry_run_outputs(
     text_path: &Path,
     json_path: &Path,
@@ -1224,6 +1270,32 @@ pub fn render_dry_run_console(manifest: &DryRunManifest) -> String {
         format!("Source PLUs: {}", manifest.summary.total_source_plus),
     );
     line(&mut out, "DRY-RUN SELECTION");
+    line(
+        &mut out,
+        format!(
+            "Selection mode: {}",
+            manifest.summary.selection.selection_mode.as_str()
+        ),
+    );
+    if let Some(plu) = manifest.summary.selection.requested_plu {
+        line(&mut out, format!("Requested PLU: {plu}"));
+    }
+    if !manifest.summary.selection.selected_order.is_empty() {
+        line(
+            &mut out,
+            format!(
+                "Selected PLU order: {}",
+                manifest
+                    .summary
+                    .selection
+                    .selected_order
+                    .iter()
+                    .map(|plu| plu.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    }
     line(
         &mut out,
         format!("Selected: {}", manifest.summary.selection.selected),
@@ -1505,13 +1577,6 @@ fn parse_conflict_plu(message: &str) -> Option<u64> {
         .split_whitespace()
         .rev()
         .find_map(|part| part.parse::<u64>().ok())
-}
-
-fn select_dry_run_plus(plus: &[Plu], limit: Option<usize>) -> &[Plu] {
-    match limit {
-        Some(limit) => &plus[..plus.len().min(limit)],
-        None => plus,
-    }
 }
 
 fn disposition_sort(disposition: &DiagnosticDisposition) -> u8 {
@@ -1815,7 +1880,11 @@ mod tests {
             &valid_plus,
             &diagnostics,
             &DigiwebConfig::default(),
-            Some(1),
+            SelectionCriteria {
+                limit: Some(1),
+                requested_plu: None,
+                test_mode: true,
+            },
         )
         .expect("manifest");
 
@@ -1861,7 +1930,11 @@ mod tests {
             &[selected.clone()],
             &diagnostics,
             &DigiwebConfig::default(),
-            Some(1),
+            SelectionCriteria {
+                limit: Some(1),
+                requested_plu: None,
+                test_mode: true,
+            },
         )
         .expect("manifest");
         let expected_payload =
@@ -1872,6 +1945,60 @@ mod tests {
         assert_eq!(
             manifest.records[0].payload_sha256.as_deref(),
             Some(expected_hash.as_str())
+        );
+    }
+
+    #[test]
+    fn dry_run_manifest_records_exact_plu_selection() {
+        let mut plu_721 = plu(721, "0200721");
+        plu_721.label_format = Some(0);
+        let plus = vec![plu(18, "0200018"), plu_721.clone(), plu(1, "0200001")];
+        let validation_report = validate_plus(&plus);
+        let dataset = source_dataset(vec![
+            ("18", "0001", "PLU 18", "0200018"),
+            ("721", "0001", "PLU 721", "0200721"),
+            ("1", "0001", "PLU 1", "0200001"),
+        ]);
+        let diagnostics = diagnostics_report(&dataset, &plus, &plus, &[], &validation_report);
+
+        let manifest = build_dry_run_manifest(
+            "plu.mdb",
+            "abc123",
+            &dataset,
+            &plus,
+            &plus,
+            &diagnostics,
+            &DigiwebConfig::default(),
+            SelectionCriteria {
+                limit: None,
+                requested_plu: Some(721),
+                test_mode: false,
+            },
+        )
+        .expect("manifest");
+        let payload =
+            DigiwebPluPayload::from_plu(&plu_721, &DigiwebConfig::default()).expect("payload");
+        let json = serde_json::to_string(&payload).expect("json");
+        let payload_hash = sha256_json(&payload).expect("hash");
+
+        assert_eq!(
+            manifest.summary.selection.selection_mode,
+            SelectionMode::Plu
+        );
+        assert_eq!(manifest.summary.selection.requested_plu, Some(721));
+        assert_eq!(manifest.summary.selection.selected_order, vec![721]);
+        assert_eq!(manifest.summary.selection.selected, 1);
+        assert_eq!(manifest.summary.selection.would_submit, 1);
+        let selected_record = manifest
+            .records
+            .iter()
+            .find(|record| record.plu_number == 721)
+            .expect("selected record");
+        assert!(json.contains("\"plulabelformat\":1"));
+        assert!(!json.contains("\"plulabelformat\":0"));
+        assert_eq!(
+            selected_record.payload_sha256.as_deref(),
+            Some(payload_hash.as_str())
         );
     }
 
@@ -1917,7 +2044,11 @@ mod tests {
             &valid_plus,
             &diagnostics,
             &DigiwebConfig::default(),
-            Some(1),
+            SelectionCriteria {
+                limit: Some(1),
+                requested_plu: None,
+                test_mode: true,
+            },
         )
         .expect("manifest");
 

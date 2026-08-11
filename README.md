@@ -80,9 +80,9 @@ Then place the customer database in the same directory using the exact filename 
 ./to-digi map-audit [--sample N] [--plu PLU_NUMBER] [--timings]
 ./to-digi profile suggest --name bigway
 ./to-digi sanitize [--profile starsky|profiles/custom.toml]
-./to-digi dry-run [--limit N] [--test] [--profile starsky] [--sanitize-profile profiles/custom.toml]
+./to-digi dry-run [--limit N | --test | --plu PLU_NUMBER] [--profile starsky] [--sanitize-profile profiles/custom.toml]
 ./to-digi verify [--profile starsky] [--sanitize-profile profiles/custom.toml]
-./to-digi import [--limit N] [--test] [--dry-run] [--continue-on-error]
+./to-digi import [--limit N | --test | --plu PLU_NUMBER] [--dry-run] [--continue-on-error]
 ./to-digi import [--profile starsky] [--sanitize-profile profiles/custom.toml]
 ./to-digi resume output/run-YYYYMMDD-HHMMSS-import/import-results.json [--retry-failed]
 ./to-digi version
@@ -96,6 +96,7 @@ Then place the customer database in the same directory using the exact filename 
 - `diagnose` writes `diagnostics-report.txt/json` with exact invalid/skipped PLUs, row-level missing required values, duplicate effective barcodes, and required label formats.
 - `diagnose --plu N` also reports useful local details for valid PLUs, including raw/effective Label Format, required references, derived barcode, ingredient/NFT counts, and payload destination summary.
 - `dry-run` writes `dry-run-report.txt` and `dry-run-manifest.json`, builds selected payload previews when enabled, and records `api_write_requests = 0`.
+- `dry-run --plu N` and `import --plu N` select that exact normalized valid PLU. They do not fall back to another record when the requested PLU is missing, invalid, duplicated, or excluded. `--plu` is mutually exclusive with `--limit`, `--test`, and resume selection.
 - `map-audit` writes `mapping-report.txt/json` showing the current source-to-payload mappings, including ingredient versus nutrition separation and bounded payload metadata samples.
 - `profile suggest --name NAME` writes `profiles/NAME.draft.toml` and `profile-recommendations.txt` without overwriting an existing draft. Only deterministic safe findings become active rules; ambiguous findings stay as comments/recommendations.
 

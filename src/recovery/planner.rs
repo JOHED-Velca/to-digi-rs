@@ -121,6 +121,8 @@ mod tests {
             },
             ManifestOptions {
                 limit: None,
+                selection_mode: crate::selection::SelectionMode::All,
+                requested_plu: None,
                 continue_on_error: false,
                 test_alias_used: false,
             },

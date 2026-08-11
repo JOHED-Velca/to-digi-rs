@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 use crate::recovery::{MANIFEST_SCHEMA_VERSION, sanitize_manifest_error};
 use crate::sanitization::SanitizationManifestMetadata;
+use crate::selection::SelectionMode;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportManifest {
@@ -43,8 +44,16 @@ pub struct TargetIdentity {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManifestOptions {
     pub limit: Option<usize>,
+    #[serde(default = "default_selection_mode")]
+    pub selection_mode: SelectionMode,
+    #[serde(default)]
+    pub requested_plu: Option<u64>,
     pub continue_on_error: bool,
     pub test_alias_used: bool,
+}
+
+fn default_selection_mode() -> SelectionMode {
+    SelectionMode::All
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -579,6 +588,8 @@ mod tests {
             },
             ManifestOptions {
                 limit: None,
+                selection_mode: SelectionMode::All,
+                requested_plu: None,
                 continue_on_error: false,
                 test_alias_used: false,
             },

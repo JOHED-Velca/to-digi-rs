@@ -20,11 +20,13 @@ use crate::recovery::{
     validate_resume_compatibility,
 };
 use crate::sanitization::SanitizationIntegration;
+use crate::selection::{SelectionCriteria, SelectionMode, select_eligible_plus};
 use chrono::Local;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImportRunOptions {
     pub limit: Option<usize>,
+    pub requested_plu: Option<u64>,
     pub continue_after_record_failure: bool,
     pub test_mode: bool,
     pub retry_failed: bool,
@@ -43,57 +45,21 @@ pub async fn run_import(
 ) -> Result<ImportSummary, AppError> {
     config.token_url()?;
     config.plu_upsert_path()?;
-    let reference_readiness = evaluate_reference_readiness(plus, &config.verification, 0)?;
-    if !reference_readiness.is_ready() {
-        logger.line("IMPORT BLOCKED")?;
-        logger.line("Unverified required references:")?;
-        for department in reference_readiness
-            .departments
-            .iter()
-            .filter(|reference| reference.status == ReferenceConfirmationStatus::Unverified)
-        {
-            logger.line(format!(
-                "- Department {} | Used by: {} PLUs | Examples: {}",
-                department.number,
-                department.source_plu_numbers.len(),
-                format_limited_u64s(&department.source_plu_numbers, 8)
-            ))?;
-        }
-        for group in reference_readiness
-            .groups
-            .iter()
-            .filter(|reference| reference.status == ReferenceConfirmationStatus::Unverified)
-        {
-            logger.line(format!(
-                "- Department {} / Group {} | Used by: {} PLUs | Examples: {}",
-                group.department,
-                group.number,
-                group.source_plu_numbers.len(),
-                format_limited_u64s(&group.source_plu_numbers, 8)
-            ))?;
-        }
-        for label_format in reference_readiness
-            .label_formats
-            .iter()
-            .filter(|reference| reference.status == ReferenceConfirmationStatus::Unverified)
-        {
-            logger.line(format!(
-                "- Label Format {} | Used by: {} PLUs | Examples: {}",
-                label_format.number,
-                label_format.source_plu_numbers.len(),
-                format_limited_u64s(&label_format.source_plu_numbers, 8)
-            ))?;
-        }
-        logger.line("No PLUs were submitted.")?;
-        logger.kv("PLU write requests", "0")?;
-        logger.line("Run: ./to-digi verify")?;
-        print!(
-            "IMPORT BLOCKED\n\nUnverified required references: {}\n\nNo PLUs were submitted.\n\nRun:\n./to-digi verify\n\n",
-            reference_readiness.unverified_reference_count
-        );
-        return Err(AppError::ValidationPayload(
-            "import blocked by unverified required DIGIweb references".to_string(),
-        ));
+    let criteria = SelectionCriteria {
+        limit: options.limit,
+        requested_plu: options.requested_plu,
+        test_mode: options.test_mode,
+    };
+    if resume_manifest.is_none() {
+        let selected_for_readiness = select_eligible_plus(
+            plus,
+            plus,
+            &[],
+            &crate::validation::validator::ValidationReport::default(),
+            criteria,
+        )
+        .map_err(|failure| AppError::ValidationPayload(failure.message()))?;
+        enforce_reference_readiness(&selected_for_readiness, &config, logger)?;
     }
     let client = DigiwebClient::new(config.clone())?;
 
@@ -104,7 +70,7 @@ pub async fn run_import(
         logger.kv("Manifest", &path.display().to_string())?;
         load_manifest(path)?
     } else {
-        let selected = select_records_to_send(plus, options.limit);
+        let selected = select_records_to_send(plus, criteria);
         let payloads = build_payloads(&selected, &config)?;
         let records = selected
             .iter()
@@ -125,6 +91,8 @@ pub async fn run_import(
             target_identity.clone(),
             ManifestOptions {
                 limit: options.limit,
+                selection_mode: criteria.mode(),
+                requested_plu: criteria.requested_plu,
                 continue_on_error: options.continue_after_record_failure,
                 test_alias_used: options.test_mode,
             },
@@ -179,6 +147,9 @@ pub async fn run_import(
         &payloads,
         &config,
     )?;
+    if resume_manifest.is_some() {
+        enforce_reference_readiness(&selected_plus, &config, logger)?;
+    }
 
     if resume_manifest.is_some() {
         let restarted_transients_changed = manifest.mark_restarted_transients_ambiguous();
@@ -201,7 +172,7 @@ pub async fn run_import(
         logger.kv("Resume manifest controls PLU selection", "yes")?;
         logger.kv(
             "Legacy import-selection flags were ignored",
-            if options.limit.is_some() || options.test_mode {
+            if options.limit.is_some() || options.test_mode || options.requested_plu.is_some() {
                 "yes"
             } else {
                 "no"
@@ -231,6 +202,10 @@ pub async fn run_import(
     } else {
         if options.test_mode {
             logger.line("Test mode enabled: equivalent to --limit 1.")?;
+        }
+        if let Some(plu) = options.requested_plu {
+            logger.kv("Selection mode", SelectionMode::Plu.as_str())?;
+            logger.kv("Requested PLU", &plu.to_string())?;
         }
         if let Some(limit) = options.limit {
             logger.kv("Import limit", &limit.to_string())?;
@@ -407,6 +382,72 @@ pub async fn run_import(
         manifest.summary.not_attempted
     );
     Ok(summary_from_manifest(&manifest, plus.len()))
+}
+
+fn enforce_reference_readiness(
+    selected_plus: &[&Plu],
+    config: &AppConfig,
+    logger: &mut AuditLogger,
+) -> Result<(), AppError> {
+    let selected_for_readiness_owned = selected_plus
+        .iter()
+        .map(|plu| (*plu).clone())
+        .collect::<Vec<_>>();
+    let reference_readiness =
+        evaluate_reference_readiness(&selected_for_readiness_owned, &config.verification, 0)?;
+    if reference_readiness.is_ready() {
+        return Ok(());
+    }
+
+    logger.line("IMPORT BLOCKED")?;
+    logger.line("Unverified required references:")?;
+    for department in reference_readiness
+        .departments
+        .iter()
+        .filter(|reference| reference.status == ReferenceConfirmationStatus::Unverified)
+    {
+        logger.line(format!(
+            "- Department {} | Used by: {} PLUs | Examples: {}",
+            department.number,
+            department.source_plu_numbers.len(),
+            format_limited_u64s(&department.source_plu_numbers, 8)
+        ))?;
+    }
+    for group in reference_readiness
+        .groups
+        .iter()
+        .filter(|reference| reference.status == ReferenceConfirmationStatus::Unverified)
+    {
+        logger.line(format!(
+            "- Department {} / Group {} | Used by: {} PLUs | Examples: {}",
+            group.department,
+            group.number,
+            group.source_plu_numbers.len(),
+            format_limited_u64s(&group.source_plu_numbers, 8)
+        ))?;
+    }
+    for label_format in reference_readiness
+        .label_formats
+        .iter()
+        .filter(|reference| reference.status == ReferenceConfirmationStatus::Unverified)
+    {
+        logger.line(format!(
+            "- Label Format {} | Used by: {} PLUs | Examples: {}",
+            label_format.number,
+            label_format.source_plu_numbers.len(),
+            format_limited_u64s(&label_format.source_plu_numbers, 8)
+        ))?;
+    }
+    logger.line("No PLUs were submitted.")?;
+    logger.kv("PLU write requests", "0")?;
+    logger.line("Run: ./to-digi verify")?;
+    print!(
+        "IMPORT BLOCKED\n\nUnverified required references: {}\n\nNo PLUs were submitted.\n\nRun:\n./to-digi verify\n\n",
+        reference_readiness.unverified_reference_count
+    );
+    Err(AppError::ValidationPayload(
+        "import blocked by unverified required DIGIweb references".to_string(),
+    ))
 }
 
 fn format_limited_u64s(values: &[u64], limit: usize) -> String {
@@ -897,8 +938,16 @@ fn write_payload_preview_in_dir(
     Ok(fs::canonicalize(&path).unwrap_or(path))
 }
 
-pub fn select_records_to_send(plus: &[Plu], limit: Option<usize>) -> Vec<&Plu> {
-    plus.iter().take(limit.unwrap_or(usize::MAX)).collect()
+pub fn select_records_to_send(plus: &[Plu], criteria: SelectionCriteria) -> Vec<&Plu> {
+    if let Some(plu_number) = criteria.requested_plu {
+        plus.iter()
+            .filter(|plu| plu.plu_number == plu_number)
+            .collect()
+    } else {
+        plus.iter()
+            .take(criteria.limit.unwrap_or(usize::MAX))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -957,11 +1006,23 @@ mod tests {
         }
     }
 
+    fn criteria(
+        limit: Option<usize>,
+        requested_plu: Option<u64>,
+        test_mode: bool,
+    ) -> SelectionCriteria {
+        SelectionCriteria {
+            limit,
+            requested_plu,
+            test_mode,
+        }
+    }
+
     #[test]
     fn limit_one_limits_selection_to_one_record() {
         let records = vec![plu(1), plu(2), plu(3)];
 
-        let selected = select_records_to_send(&records, Some(1));
+        let selected = select_records_to_send(&records, criteria(Some(1), None, false));
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].plu_number, 1);
@@ -971,7 +1032,8 @@ mod tests {
     fn send_only_first_plu_selects_first_valid_normalized_plu() {
         let valid_after_row_skips = vec![plu(1), plu(2), plu(3)];
 
-        let selected = select_records_to_send(&valid_after_row_skips, Some(1));
+        let selected =
+            select_records_to_send(&valid_after_row_skips, criteria(Some(1), None, false));
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].plu_number, 1);
@@ -980,7 +1042,7 @@ mod tests {
     #[test]
     fn stop_after_first_selected_failure_does_not_double_count_unselected_plus() {
         let all_valid = vec![plu(1), plu(2), plu(3), plu(4)];
-        let selected = select_records_to_send(&all_valid, Some(1));
+        let selected = select_records_to_send(&all_valid, criteria(Some(1), None, false));
         let skipped_by_first_plu_mode = all_valid.len() - selected.len();
         let skipped_after_failure = skipped_after_stop(selected.len(), 0, 1, 0);
 
@@ -992,7 +1054,7 @@ mod tests {
     fn no_limit_selects_all_valid_plus() {
         let records = vec![plu(1), plu(4), plu(2), plu(3)];
 
-        let selected = select_records_to_send(&records, None);
+        let selected = select_records_to_send(&records, criteria(None, None, false));
 
         assert_eq!(
             selected
@@ -1007,7 +1069,7 @@ mod tests {
     fn limit_two_selects_first_two_valid_plus() {
         let records = vec![plu(1), plu(4), plu(2), plu(3)];
 
-        let selected = select_records_to_send(&records, Some(2));
+        let selected = select_records_to_send(&records, criteria(Some(2), None, false));
 
         assert_eq!(
             selected
@@ -1022,9 +1084,19 @@ mod tests {
     fn large_limit_selects_all_valid_plus() {
         let records = vec![plu(1), plu(4), plu(2), plu(3)];
 
-        let selected = select_records_to_send(&records, Some(10));
+        let selected = select_records_to_send(&records, criteria(Some(10), None, false));
 
         assert_eq!(selected.len(), 4);
+    }
+
+    #[test]
+    fn exact_plu_selection_selects_only_requested_plu() {
+        let records = vec![plu(18), plu(721), plu(1)];
+
+        let selected = select_records_to_send(&records, criteria(None, Some(721), false));
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].plu_number, 721);
     }
 
     #[test]
@@ -1118,6 +1190,7 @@ mod tests {
             None,
             ImportRunOptions {
                 limit: None,
+                requested_plu: None,
                 continue_after_record_failure: true,
                 test_mode: false,
                 retry_failed: false,
@@ -1173,6 +1246,7 @@ mod tests {
             None,
             ImportRunOptions {
                 limit: None,
+                requested_plu: None,
                 continue_after_record_failure: false,
                 test_mode: false,
                 retry_failed: false,
@@ -1187,6 +1261,125 @@ mod tests {
         assert!(matches!(err, AppError::ValidationPayload(_)));
         assert!(log.contains("IMPORT BLOCKED"));
         assert!(log.contains("No PLUs were submitted."));
+        assert!(log.contains("PLU write requests: 0"));
+        assert!(!manifest_path.exists());
+    }
+
+    #[tokio::test]
+    async fn targeted_import_manifest_records_requested_plu_selection() {
+        let server = TestServer::start(vec![
+            token_response("token-a"),
+            raw_response(
+                201,
+                "Created",
+                &[
+                    ("Content-Type", "application/json"),
+                    ("Location", "http://localhost/status/req-721"),
+                ],
+                r#"{"id":"req-721","status":"TODO","type":"Plu","method":"WRITE"}"#,
+            ),
+            raw_response(
+                200,
+                "OK",
+                &[("Content-Type", "application/json")],
+                r#"{"id":"req-721","status":"SUCCESS","type":"Plu","method":"WRITE"}"#,
+            ),
+        ])
+        .await;
+        let mut config = test_import_config(&server.base_url);
+        config.import.write_payload_preview = false;
+        config.verification.confirmed_label_formats = vec![1];
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = temp.path().join("import-results.json");
+        let log_path = temp.path().join("logs.txt");
+        let mut logger = AuditLogger::create(&log_path).expect("logger");
+        let mut target = plu(721);
+        target.label_format = Some(0);
+        let records = vec![plu(18), target];
+
+        let summary = run_import(
+            config,
+            &records,
+            SourceIdentity {
+                filename: "plu.mdb".to_string(),
+                size_bytes: 123,
+                sha256: "0".repeat(64),
+            },
+            TargetIdentity {
+                base_url: server.base_url.clone(),
+                store_number: 1,
+                client_id: "digi".to_string(),
+            },
+            &manifest_path,
+            None,
+            None,
+            ImportRunOptions {
+                limit: None,
+                requested_plu: Some(721),
+                continue_after_record_failure: false,
+                test_mode: false,
+                retry_failed: false,
+            },
+            &mut logger,
+        )
+        .await
+        .expect("import");
+
+        let manifest = load_manifest(&manifest_path).expect("manifest");
+        assert_eq!(summary.selected, 1);
+        assert_eq!(summary.records[0].plu_number, 721);
+        assert_eq!(manifest.options.selection_mode, SelectionMode::Plu);
+        assert_eq!(manifest.options.requested_plu, Some(721));
+        assert_eq!(manifest.selection.selected_order, vec![721]);
+        assert_eq!(manifest.selection.selected_count, 1);
+    }
+
+    #[tokio::test]
+    async fn targeted_import_unverified_effective_label_format_blocks_before_write() {
+        let mut config = AppConfig::default();
+        config.digiweb.client_secret = "client-secret".to_string();
+        config.import.write_payload_preview = false;
+        config.verification.confirmed_departments = vec![1];
+        config.verification.confirmed_groups = vec!["1:1".to_string()];
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = temp.path().join("import-results.json");
+        let log_path = temp.path().join("logs.txt");
+        let mut logger = AuditLogger::create(&log_path).expect("logger");
+        let mut target = plu(721);
+        target.label_format = Some(0);
+
+        let err = run_import(
+            config,
+            &[target],
+            SourceIdentity {
+                filename: "plu.mdb".to_string(),
+                size_bytes: 123,
+                sha256: "0".repeat(64),
+            },
+            TargetIdentity {
+                base_url: "https://example.invalid".to_string(),
+                store_number: 1,
+                client_id: "digi".to_string(),
+            },
+            &manifest_path,
+            None,
+            None,
+            ImportRunOptions {
+                limit: None,
+                requested_plu: Some(721),
+                continue_after_record_failure: false,
+                test_mode: false,
+                retry_failed: false,
+            },
+            &mut logger,
+        )
+        .await
+        .expect_err("blocked");
+        logger.flush().expect("flush");
+
+        let log = fs::read_to_string(log_path).expect("log");
+        assert!(matches!(err, AppError::ValidationPayload(_)));
+        assert!(log.contains("Label Format 1"));
         assert!(log.contains("PLU write requests: 0"));
         assert!(!manifest_path.exists());
     }

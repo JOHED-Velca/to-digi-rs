@@ -82,11 +82,14 @@ pub struct DiagnoseArgs {
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
 pub struct DryRunArgs {
     /// Select only the first N valid normalized PLUs
-    #[arg(long, value_parser = parse_positive_usize)]
+    #[arg(long, value_parser = parse_positive_usize, conflicts_with_all = ["test", "plu"])]
     pub limit: Option<usize>,
     /// Convenience alias for --limit 1
-    #[arg(long)]
+    #[arg(long, conflicts_with = "plu")]
     pub test: bool,
+    /// Select exactly one PLU number after normalization and validation
+    #[arg(long, value_parser = parse_positive_u64, conflicts_with_all = ["limit", "test"])]
+    pub plu: Option<u64>,
     /// Apply a fill-only sanitization profile before dry-run payload building
     #[arg(long, value_name = "PROFILE", conflicts_with = "profile")]
     pub sanitize_profile: Option<PathBuf>,
@@ -134,11 +137,14 @@ pub struct InitArgs {
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
 pub struct ImportArgs {
     /// Import only the first N valid normalized PLUs
-    #[arg(long, value_parser = parse_positive_usize, conflicts_with_all = ["test", "resume"])]
+    #[arg(long, value_parser = parse_positive_usize, conflicts_with_all = ["test", "resume", "plu"])]
     pub limit: Option<usize>,
     /// Convenience alias for --limit 1
-    #[arg(long, conflicts_with = "resume")]
+    #[arg(long, conflicts_with_all = ["resume", "plu"])]
     pub test: bool,
+    /// Import exactly one PLU number after normalization, validation, and readiness checks
+    #[arg(long, value_parser = parse_positive_u64, conflicts_with_all = ["limit", "test", "resume"])]
+    pub plu: Option<u64>,
     /// Alias for the offline dry-run command; no PLU writes are performed
     #[arg(long, conflicts_with = "resume")]
     pub dry_run: bool,
@@ -247,6 +253,17 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
     }
 }
 
+fn parse_positive_u64(value: &str) -> Result<u64, String> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|err| format!("invalid positive integer: {err}"))?;
+    if parsed == 0 {
+        Err("--plu must be greater than zero".to_string())
+    } else {
+        Ok(parsed)
+    }
+}
+
 fn parse_diagnostic_category(value: &str) -> Result<DiagnosticCategory, String> {
     DiagnosticCategory::parse(value)
 }
@@ -276,6 +293,7 @@ pub enum EffectiveCommand {
     },
     Import {
         limit: Option<usize>,
+        plu: Option<u64>,
         continue_on_error: bool,
         test_mode: bool,
         resume: Option<PathBuf>,
@@ -286,6 +304,7 @@ pub enum EffectiveCommand {
     },
     DryRun {
         limit: Option<usize>,
+        plu: Option<u64>,
         test_mode: bool,
         sanitize_profile: Option<ProfileSelection>,
     },
@@ -384,6 +403,7 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
         },
         Some(CliCommand::Import(args)) if args.dry_run => EffectiveCommand::DryRun {
             limit: if args.test { Some(1) } else { args.limit },
+            plu: args.plu,
             test_mode: args.test,
             sanitize_profile: resolve_explicit_profile(
                 args.sanitize_profile.clone(),
@@ -392,6 +412,7 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
         },
         Some(CliCommand::Import(args)) => EffectiveCommand::Import {
             limit: if args.test { Some(1) } else { args.limit },
+            plu: args.plu,
             continue_on_error: args.continue_on_error,
             test_mode: args.test,
             resume: args.resume.clone(),
@@ -407,6 +428,7 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
         },
         Some(CliCommand::DryRun(args)) => EffectiveCommand::DryRun {
             limit: if args.test { Some(1) } else { args.limit },
+            plu: args.plu,
             test_mode: args.test,
             sanitize_profile: resolve_explicit_profile(
                 args.sanitize_profile.clone(),
@@ -426,6 +448,7 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
         },
         Some(CliCommand::Resume(args)) => EffectiveCommand::Import {
             limit: None,
+            plu: None,
             continue_on_error: args.continue_on_error,
             test_mode: false,
             resume: Some(args.manifest.clone()),
@@ -521,6 +544,7 @@ fn legacy_effective_command(config: &AppConfig) -> EffectiveCommand {
             } else {
                 None
             },
+            plu: None,
             continue_on_error: config.import.continue_after_record_failure,
             test_mode: false,
             resume: None,
@@ -551,6 +575,7 @@ mod tests {
             command,
             EffectiveCommand::Import {
                 limit: None,
+                plu: None,
                 continue_on_error: false,
                 test_mode: false,
                 resume: None,
@@ -647,6 +672,7 @@ mod tests {
             effective_command(&cli, &config),
             EffectiveCommand::Import {
                 limit: Some(1),
+                plu: None,
                 continue_on_error: false,
                 test_mode: true,
                 resume: None,
@@ -657,6 +683,57 @@ mod tests {
             }
         );
         assert!(Cli::try_parse_from(["to-digi-rs", "import", "--test", "--limit", "1"]).is_err());
+        assert!(Cli::try_parse_from(["to-digi-rs", "import", "--test", "--plu", "721"]).is_err());
+        assert!(Cli::try_parse_from(["to-digi-rs", "dry-run", "--test", "--plu", "721"]).is_err());
+        assert!(
+            Cli::try_parse_from(["to-digi-rs", "dry-run", "--limit", "1", "--plu", "721"]).is_err()
+        );
+    }
+
+    #[test]
+    fn plu_selector_parses_and_conflicts_with_other_selectors() {
+        let config = AppConfig::default();
+        let cli = parse(&["to-digi-rs", "import", "--plu", "721"]);
+        assert_eq!(
+            effective_command(&cli, &config),
+            EffectiveCommand::Import {
+                limit: None,
+                plu: Some(721),
+                continue_on_error: false,
+                test_mode: false,
+                resume: None,
+                retry_failed: false,
+                legacy_used: false,
+                defaulted_from_no_command: false,
+                sanitize_profile: None,
+            }
+        );
+        let cli = parse(&["to-digi-rs", "dry-run", "--plu", "721"]);
+        assert_eq!(
+            effective_command(&cli, &config),
+            EffectiveCommand::DryRun {
+                limit: None,
+                plu: Some(721),
+                test_mode: false,
+                sanitize_profile: None,
+            }
+        );
+        assert!(Cli::try_parse_from(["to-digi-rs", "import", "--plu", "0"]).is_err());
+        assert!(
+            Cli::try_parse_from(["to-digi-rs", "import", "--plu", "721", "--limit", "1"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["to-digi-rs", "import", "--plu", "721", "--test"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "to-digi-rs",
+                "import",
+                "--resume",
+                "import-results.json",
+                "--plu",
+                "721"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -668,6 +745,7 @@ mod tests {
             effective_command(&cli, &config),
             EffectiveCommand::Import {
                 limit: None,
+                plu: None,
                 continue_on_error: false,
                 test_mode: false,
                 resume: Some(PathBuf::from("import-results.json")),
@@ -803,6 +881,7 @@ mod tests {
             effective_command(&parse(&["to-digi-rs"]), &config),
             EffectiveCommand::Import {
                 limit: Some(1),
+                plu: None,
                 continue_on_error: true,
                 test_mode: false,
                 resume: None,
@@ -825,6 +904,7 @@ mod tests {
             effective_command(&cli, &config),
             EffectiveCommand::Import {
                 limit: Some(2),
+                plu: None,
                 continue_on_error: false,
                 test_mode: false,
                 resume: None,
@@ -882,6 +962,7 @@ mod tests {
             EffectiveCommand::Import {
                 sanitize_profile: Some(_),
                 limit: Some(1),
+                plu: None,
                 ..
             }
         ));
@@ -973,6 +1054,7 @@ mod tests {
             ),
             EffectiveCommand::DryRun {
                 limit: Some(2),
+                plu: None,
                 test_mode: false,
                 sanitize_profile: None,
             }
@@ -984,6 +1066,7 @@ mod tests {
             ),
             EffectiveCommand::DryRun {
                 limit: Some(1),
+                plu: None,
                 test_mode: true,
                 sanitize_profile: None,
             }

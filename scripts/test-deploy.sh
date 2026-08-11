@@ -63,6 +63,14 @@ if [ "$#" -ge 1 ] && [ "$1" = "run" ]; then
             printf 'help-ok\n'
             exit 0
             ;;
+        *" import --plu 721 --test "*)
+            printf 'error: the argument --plu cannot be used with --test\n' >&2
+            exit 2
+            ;;
+        *" import --fake-startup-failure "*)
+            printf 'startup failed before logs\n' >&2
+            exit 2
+            ;;
     esac
     printf 'run-ok\n' >logs.txt
     if [ -n "${TO_DIGI_RS_IMPORT_MANIFEST_PATH:-}" ]; then
@@ -319,6 +327,38 @@ test_wrappers_forward_to_to_digi() {
     assert_contains "$output" "NOTICE: run.sh is a compatibility wrapper"
 }
 
+test_cli_parse_error_without_log_is_not_warned_as_missing_log() {
+    local deploy_dir="$TEST_ROOT/deploy-parse-error"
+    local output="$TEST_ROOT/output-parse-error.txt"
+    copy_deploy "$deploy_dir"
+
+    set +e
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-parse-error.log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    PATH="$TEST_ROOT/fake-bin:$PATH" "$deploy_dir/to-digi" import --plu 721 --test >"$output" 2>&1
+    local code=$?
+    set -e
+
+    [ "$code" -eq 2 ] || fail "parse error exit code was $code"
+    assert_contains "$output" "argument --plu"
+    assert_not_contains "$output" "Importer did not create logs.txt"
+}
+
+test_non_usage_exit_without_log_still_warns_as_missing_log() {
+    local deploy_dir="$TEST_ROOT/deploy-missing-log"
+    local output="$TEST_ROOT/output-missing-log.txt"
+    copy_deploy "$deploy_dir"
+
+    set +e
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-missing-log.log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    PATH="$TEST_ROOT/fake-bin:$PATH" "$deploy_dir/to-digi" import --fake-startup-failure >"$output" 2>&1
+    local code=$?
+    set -e
+
+    [ "$code" -eq 2 ] || fail "startup failure exit code was $code"
+    assert_contains "$output" "startup failed before logs"
+    assert_contains "$output" "Importer did not create logs.txt"
+}
+
 test_package_archive_contains_expected_files_only() {
     local archive
     archive="$(TO_DIGI_RS_VERSION=0.9.0 "$ROOT_DIR/scripts/package-deploy.sh")"
@@ -355,6 +395,8 @@ test_profile_and_resume_paths_are_translated
 test_offline_diagnostics_archive_reports_without_config
 test_doctor_checks_image_and_never_imports_data
 test_wrappers_forward_to_to_digi
+test_cli_parse_error_without_log_is_not_warned_as_missing_log
+test_non_usage_exit_without_log_still_warns_as_missing_log
 test_package_archive_contains_expected_files_only
 test_launcher_does_not_print_secrets
 

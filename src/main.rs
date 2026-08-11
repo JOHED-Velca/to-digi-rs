@@ -13,6 +13,7 @@ mod models;
 mod profile_suggestion;
 mod recovery;
 mod sanitization;
+mod selection;
 mod source;
 mod validation;
 
@@ -56,6 +57,7 @@ use sanitization::{
     SanitizationIntegration, SanitizationProfile, SanitizationReportInput, apply_profile,
     load_profile_from_safe_path, validate_profile_path, write_sanitization_reports,
 };
+use selection::{SelectionCriteria, select_eligible_plus, selection_error};
 use serde::Serialize;
 use source::SourceDataset;
 use source::mapping::{normalize_dataset, validate_source_schema};
@@ -203,6 +205,7 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
         } => run_init(refresh_generated_files, logger),
         EffectiveCommand::Import {
             limit,
+            plu,
             continue_on_error,
             test_mode,
             resume,
@@ -219,6 +222,7 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
             run_import_command(
                 &config,
                 limit,
+                plu,
                 continue_on_error,
                 test_mode,
                 resume.as_deref(),
@@ -230,9 +234,17 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
         }
         EffectiveCommand::DryRun {
             limit,
+            plu,
             test_mode,
             sanitize_profile,
-        } => run_dry_run(&config, logger, limit, test_mode, sanitize_profile.as_ref()),
+        } => run_dry_run(
+            &config,
+            logger,
+            limit,
+            plu,
+            test_mode,
+            sanitize_profile.as_ref(),
+        ),
         EffectiveCommand::Pull => {
             println!("Pull is handled by the generated ./to-digi launcher.");
             println!(
@@ -338,6 +350,7 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
         }
         EffectiveCommand::Import {
             limit,
+            plu,
             continue_on_error,
             test_mode,
             resume,
@@ -360,6 +373,9 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
                     .unwrap_or_else(|| "none".to_string())
             };
             logger.kv("Import limit", &import_limit)?;
+            if let Some(plu) = plu {
+                logger.kv("Requested PLU", &plu.to_string())?;
+            }
             if let Some(path) = resume {
                 logger.kv("Resume manifest", &path.display().to_string())?;
                 logger.kv(
@@ -381,6 +397,7 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
         }
         EffectiveCommand::DryRun {
             limit,
+            plu,
             test_mode,
             sanitize_profile,
         } => {
@@ -398,6 +415,9 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "none".to_string()),
             )?;
+            if let Some(plu) = plu {
+                logger.kv("Requested PLU", &plu.to_string())?;
+            }
             if let Some(profile) = sanitize_profile {
                 logger.kv("Sanitization profile", &profile.display())?;
             }
@@ -1155,7 +1175,8 @@ fn run_dry_run(
     config: &AppConfig,
     logger: &mut AuditLogger,
     limit: Option<usize>,
-    _test_mode: bool,
+    requested_plu: Option<u64>,
+    test_mode: bool,
     sanitize_profile_path: Option<&ProfileSelection>,
 ) -> Result<i32, AppError> {
     println!("DRY RUN");
@@ -1172,6 +1193,23 @@ fn run_dry_run(
     let profile = load_optional_sanitization_profile(sanitize_profile_path)?;
     let started = Instant::now();
     let source = read_source_context(config, logger, profile, true)?;
+    let selection = SelectionCriteria {
+        limit,
+        requested_plu,
+        test_mode,
+    };
+    let selected_plus = select_eligible_plus(
+        &source.plus,
+        &source.valid_plus,
+        &source.row_issues,
+        &source.validation_report,
+        selection,
+    )
+    .map_err(|failure| {
+        let message = failure.message();
+        let _ = logger.error(&message);
+        selection_error(&failure)
+    })?;
     let diagnostics = build_diagnostics_report(DiagnosticsInput {
         source_path: FIXED_SOURCE_FILE,
         source_sha256: &source.source_identity.sha256,
@@ -1195,9 +1233,9 @@ fn run_dry_run(
         &source.valid_plus,
         &diagnostics,
         &config.digiweb,
-        limit,
+        selection,
     )?;
-    write_dry_run_payload_previews(config, &source.valid_plus, limit)?;
+    write_dry_run_payload_previews(config, &selected_plus)?;
     write_dry_run_outputs(
         Path::new("dry-run-report.txt"),
         Path::new("dry-run-manifest.json"),
@@ -1218,13 +1256,7 @@ fn run_dry_run(
     logger.line("PLUs submitted: 0")?;
     log_duplicate_barcode_section(logger, &diagnostics.duplicate_barcode_groups)?;
     logger.final_import_summary(FinalImportLog {
-        status: if manifest.summary.payload_build_failures == 0
-            && manifest
-                .summary
-                .source_validation_findings
-                .source_invalid_plus
-                == 0
-        {
+        status: if dry_run_selected_success(&manifest) {
             "DRY_RUN_SUCCESS"
         } else {
             "DRY_RUN_COMPLETED_WITH_ISSUES"
@@ -1252,13 +1284,7 @@ fn run_dry_run(
         dry_run: true,
     })?;
     print!("{}", render_dry_run_console(&manifest));
-    let exit_code = if manifest.summary.payload_build_failures == 0
-        && manifest
-            .summary
-            .source_validation_findings
-            .source_invalid_plus
-            == 0
-    {
+    let exit_code = if dry_run_selected_success(&manifest) {
         0
     } else {
         1
@@ -1274,11 +1300,14 @@ fn run_dry_run(
     Ok(exit_code)
 }
 
-fn write_dry_run_payload_previews(
-    config: &AppConfig,
-    valid_plus: &[Plu],
-    limit: Option<usize>,
-) -> Result<(), AppError> {
+fn dry_run_selected_success(manifest: &diagnostics::DryRunManifest) -> bool {
+    manifest.summary.selection.selected_payload_failures == 0
+        && manifest.summary.selection.selected_invalid_skips == 0
+        && manifest.summary.selection.selected_duplicate_skips == 0
+        && manifest.summary.selection.would_submit == manifest.summary.selection.selected
+}
+
+fn write_dry_run_payload_previews(config: &AppConfig, selected: &[&Plu]) -> Result<(), AppError> {
     if !config.import.write_payload_preview {
         return Ok(());
     }
@@ -1291,10 +1320,6 @@ fn write_dry_run_payload_previews(
     std::fs::create_dir_all(preview_dir).map_err(|err| {
         AppError::Internal(format!("failed to create payload preview directory: {err}"))
     })?;
-    let selected = match limit {
-        Some(limit) => &valid_plus[..valid_plus.len().min(limit)],
-        None => valid_plus,
-    };
     for plu in selected {
         let payload = DigiwebPluPayload::from_plu(plu, &config.digiweb)?;
         let json = serde_json::to_string_pretty(&payload)
@@ -1595,6 +1620,7 @@ fn still_invalid_plu_numbers_from_issues(
 async fn run_import_command(
     config: &AppConfig,
     limit: Option<usize>,
+    requested_plu: Option<u64>,
     continue_on_error: bool,
     test_mode: bool,
     resume_manifest: Option<&Path>,
@@ -1606,6 +1632,25 @@ async fn run_import_command(
     println!("Outputs will be written under output/ when launched with ./to-digi.");
     let profile = profile_for_import_or_resume(resume_manifest, sanitize_profile_path)?;
     let source = read_source_context(config, logger, profile, true)?;
+    let selection = SelectionCriteria {
+        limit,
+        requested_plu,
+        test_mode,
+    };
+    if resume_manifest.is_none() {
+        select_eligible_plus(
+            &source.plus,
+            &source.valid_plus,
+            &source.row_issues,
+            &source.validation_report,
+            selection,
+        )
+        .map_err(|failure| {
+            let message = failure.message();
+            let _ = logger.error(&message);
+            selection_error(&failure)
+        })?;
+    }
     if source.valid_plus.is_empty() {
         logger.final_failure("validation", "no valid PLUs are available to send", true)?;
         return Ok(2);
@@ -1635,6 +1680,7 @@ async fn run_import_command(
         source.sanitization.clone(),
         ImportRunOptions {
             limit,
+            requested_plu,
             continue_after_record_failure: continue_on_error,
             test_mode,
             retry_failed,
