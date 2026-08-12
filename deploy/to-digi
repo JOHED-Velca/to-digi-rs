@@ -434,7 +434,7 @@ elif [ "${1:-}" = "sanitize" ] && has_arg_name "--sanitize-profile" "$@"; then
 elif [ "${1:-}" = "sanitize" ] && has_arg_name "--profile" "$@"; then
     profile_value="$(path_arg_value "--profile" "$@")" || fail "Missing value for --profile." 2
     case "$profile_value" in
-        starsky) ;;
+        bigway|starsky) ;;
         */*|*.toml)
             profile_host_path="$(resolve_safe_deploy_path "$profile_value" "sanitization profile")" || exit $?
             translate_path_arg "--profile" "$(container_path_for_host_path "$profile_host_path")" "$@"

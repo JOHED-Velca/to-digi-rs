@@ -18,6 +18,8 @@ pub struct SanitizationProfile {
     pub rules: Vec<SanitizationRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selling_date_term: Option<SellingDateTermRule>,
+    #[serde(default)]
+    pub nutrition_remap: Vec<NutritionRemapRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,6 +53,32 @@ pub struct SellingDateTermRule {
     pub maximum: u32,
     pub invalid_value: u32,
     pub empty_value: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NutritionRemapRule {
+    pub source_field: String,
+    pub nutrient: String,
+    pub value_role: NutritionValueRole,
+    #[serde(default)]
+    pub suppress_from_ingredients: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum NutritionValueRole {
+    Amount,
+    Percent,
+}
+
+impl NutritionValueRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Amount => "amount",
+            Self::Percent => "percent",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -229,12 +257,65 @@ impl SanitizationProfile {
         if let Some(rule) = &self.selling_date_term {
             validate_selling_date_term_rule(rule)?;
         }
+        validate_nutrition_remaps(&self.nutrition_remap)?;
         Ok(())
     }
 
     pub fn normalized_toml(&self) -> Result<String, AppError> {
         toml::to_string_pretty(self)
             .map_err(|err| AppError::Internal(format!("profile serialization failed: {err}")))
+    }
+}
+
+fn validate_nutrition_remaps(rules: &[NutritionRemapRule]) -> Result<(), AppError> {
+    let mut source_fields = HashSet::new();
+    let mut nutrient_roles = HashSet::new();
+    for rule in rules {
+        let source_field = rule.source_field.trim();
+        if source_field.is_empty() {
+            return Err(AppError::Config(
+                "nutrition_remap.source_field must not be empty".to_string(),
+            ));
+        }
+        validate_nutrition_source_field(source_field)?;
+        if !source_fields.insert(source_field.to_ascii_lowercase()) {
+            return Err(AppError::Config(format!(
+                "duplicate nutrition remap source field '{source_field}'"
+            )));
+        }
+        let nutrient = rule.nutrient.trim();
+        if nutrient.is_empty() {
+            return Err(AppError::Config(
+                "nutrition_remap.nutrient must not be empty".to_string(),
+            ));
+        }
+        let role = rule.value_role.as_str();
+        if !nutrient_roles.insert((nutrient.to_ascii_lowercase(), role)) {
+            return Err(AppError::Config(format!(
+                "duplicate nutrition remap for nutrient '{nutrient}' role '{role}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_nutrition_source_field(source_field: &str) -> Result<(), AppError> {
+    let Some(index) = source_field.strip_prefix("Ing Name ") else {
+        return Err(AppError::Config(format!(
+            "unsupported nutrition_remap.source_field '{source_field}'; expected Ing Name 1..99"
+        )));
+    };
+    let index = index.parse::<u8>().map_err(|err| {
+        AppError::Config(format!(
+            "unsupported nutrition_remap.source_field '{source_field}'; expected Ing Name 1..99: {err}"
+        ))
+    })?;
+    if (1..=99).contains(&index) {
+        Ok(())
+    } else {
+        Err(AppError::Config(format!(
+            "unsupported nutrition_remap.source_field '{source_field}'; expected Ing Name 1..99"
+        )))
     }
 }
 
@@ -332,6 +413,7 @@ mod tests {
                 normalization: None,
             }],
             selling_date_term: None,
+            nutrition_remap: Vec::new(),
         }
     }
 
@@ -355,6 +437,130 @@ value = "1"
         let profile: SanitizationProfile = toml::from_str(toml).expect("parse");
         profile.validate().expect("valid");
         assert!(profile.selling_date_term.is_none());
+        assert!(profile.nutrition_remap.is_empty());
+    }
+
+    #[test]
+    fn nutrition_remap_rules_parse_and_validate() {
+        let toml = r#"
+profile_version = 1
+profile_name = "bigway"
+
+[safety]
+fill_empty_only = true
+preserve_nonempty_values = true
+reject_invalid_results = true
+
+[[nutrition_remap]]
+source_field = "Ing Name 96"
+nutrient = "Iron"
+value_role = "amount"
+suppress_from_ingredients = true
+
+[[nutrition_remap]]
+source_field = "Ing Name 99"
+nutrient = "Potassium"
+value_role = "percent"
+suppress_from_ingredients = true
+"#;
+        let profile: SanitizationProfile = toml::from_str(toml).expect("parse");
+        profile.validate().expect("valid");
+
+        assert_eq!(profile.nutrition_remap.len(), 2);
+        assert_eq!(
+            profile.nutrition_remap[0].value_role,
+            NutritionValueRole::Amount
+        );
+    }
+
+    #[test]
+    fn duplicate_nutrition_source_fields_fail() {
+        let mut profile = base_profile();
+        profile.nutrition_remap = vec![
+            NutritionRemapRule {
+                source_field: "Ing Name 96".to_string(),
+                nutrient: "Iron".to_string(),
+                value_role: NutritionValueRole::Amount,
+                suppress_from_ingredients: true,
+            },
+            NutritionRemapRule {
+                source_field: " ing name 96 ".to_string(),
+                nutrient: "Sugar".to_string(),
+                value_role: NutritionValueRole::Amount,
+                suppress_from_ingredients: true,
+            },
+        ];
+
+        assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn empty_nutrition_nutrient_fails() {
+        let mut profile = base_profile();
+        profile.nutrition_remap = vec![NutritionRemapRule {
+            source_field: "Ing Name 96".to_string(),
+            nutrient: " ".to_string(),
+            value_role: NutritionValueRole::Amount,
+            suppress_from_ingredients: true,
+        }];
+
+        assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn conflicting_nutrition_nutrient_role_fails() {
+        let mut profile = base_profile();
+        profile.nutrition_remap = vec![
+            NutritionRemapRule {
+                source_field: "Ing Name 96".to_string(),
+                nutrient: "Potassium".to_string(),
+                value_role: NutritionValueRole::Percent,
+                suppress_from_ingredients: true,
+            },
+            NutritionRemapRule {
+                source_field: "Ing Name 97".to_string(),
+                nutrient: " potassium ".to_string(),
+                value_role: NutritionValueRole::Percent,
+                suppress_from_ingredients: true,
+            },
+        ];
+
+        assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn unsupported_nutrition_value_role_fails_toml_parse() {
+        let toml = r#"
+profile_version = 1
+profile_name = "bad"
+
+[safety]
+fill_empty_only = true
+preserve_nonempty_values = true
+reject_invalid_results = true
+
+[[nutrition_remap]]
+source_field = "Ing Name 96"
+nutrient = "Iron"
+value_role = "daily"
+"#;
+        assert!(toml::from_str::<SanitizationProfile>(toml).is_err());
+    }
+
+    #[test]
+    fn invalid_nutrition_source_field_fails_validation() {
+        let mut profile = base_profile();
+        profile.nutrition_remap = vec![NutritionRemapRule {
+            source_field: "Ing Name 100".to_string(),
+            nutrient: "Iron".to_string(),
+            value_role: NutritionValueRole::Amount,
+            suppress_from_ingredients: true,
+        }];
+
+        assert!(profile.validate().is_err());
+
+        profile.nutrition_remap[0].source_field = "Iron".to_string();
+        assert!(profile.validate().is_err());
     }
 
     #[test]

@@ -440,6 +440,7 @@ mod tests {
                 invalid_value: 0,
                 empty_value: 0,
             }),
+            nutrition_remap: Vec::new(),
         }
     }
 

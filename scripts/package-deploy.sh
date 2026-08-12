@@ -28,6 +28,7 @@ install -m 0755 "$ROOT_DIR/deploy/run.sh" "$BUNDLE_DIR/run.sh"
 install -m 0644 "$ROOT_DIR/deploy/config.example.toml" "$BUNDLE_DIR/config.example.toml"
 install -m 0644 "$ROOT_DIR/deploy/README.md" "$BUNDLE_DIR/README.md"
 install -m 0644 "$ROOT_DIR/profiles/example.toml" "$BUNDLE_DIR/profiles/example.toml"
+install -m 0644 "$ROOT_DIR/profiles/bigway.toml" "$BUNDLE_DIR/profiles/bigway.toml"
 install -m 0644 "$ROOT_DIR/profiles/starsky.toml" "$BUNDLE_DIR/profiles/starsky.toml"
 touch "$BUNDLE_DIR/output/.gitkeep"
 

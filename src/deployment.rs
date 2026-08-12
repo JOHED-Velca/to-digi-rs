@@ -29,6 +29,7 @@ const RUN_SH_TEMPLATE: &str = include_str!("../deploy/run.sh");
 const COMPOSE_TEMPLATE: &str = include_str!("../deploy/compose.yaml");
 const CONFIG_EXAMPLE_TEMPLATE: &str = include_str!("../deploy/config.example.toml");
 const PROFILE_EXAMPLE_TEMPLATE: &str = include_str!("../profiles/example.toml");
+const PROFILE_BIGWAY_TEMPLATE: &str = include_str!("../profiles/bigway.toml");
 const PROFILE_STARSKY_TEMPLATE: &str = include_str!("../profiles/starsky.toml");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,6 +260,12 @@ fn deployment_assets() -> Vec<Asset> {
             kind: AssetKind::Generated,
         },
         Asset {
+            path: "profiles/bigway.toml",
+            contents: PROFILE_BIGWAY_TEMPLATE.to_string(),
+            mode: 0o644,
+            kind: AssetKind::Generated,
+        },
+        Asset {
             path: "profiles/starsky.toml",
             contents: PROFILE_STARSKY_TEMPLATE.to_string(),
             mode: 0o644,
@@ -422,7 +429,7 @@ fn check_file_readable(path: &Path, label: &str, failures: &mut Vec<String>) {
 
 fn check_profile(selection: &ProfileSelection) -> Result<(), AppError> {
     match selection {
-        ProfileSelection::BuiltIn(name) if name == "starsky" => Ok(()),
+        ProfileSelection::BuiltIn(name) if name == "bigway" || name == "starsky" => Ok(()),
         ProfileSelection::BuiltIn(name) => Err(AppError::Config(format!(
             "unknown built-in sanitization profile '{name}'"
         ))),
@@ -542,6 +549,14 @@ mod tests {
     }
 
     #[test]
+    fn embedded_bigway_profile_matches_external_profile() {
+        assert_eq!(
+            PROFILE_BIGWAY_TEMPLATE,
+            include_str!("../profiles/bigway.toml")
+        );
+    }
+
+    #[test]
     fn init_creates_expected_files_and_preserves_customer_files() {
         let dir = tempdir().expect("tempdir");
         let previous = std::env::current_dir().expect("cwd");
@@ -557,6 +572,7 @@ mod tests {
         assert!(Path::new("config.example.toml").is_file());
         assert!(Path::new("config.toml").is_file());
         assert!(Path::new("profiles/example.toml").is_file());
+        assert!(Path::new("profiles/bigway.toml").is_file());
         assert!(Path::new("profiles/starsky.toml").is_file());
         assert!(Path::new("output").is_dir());
         assert_eq!(fs::read("plu.mdb").expect("plu"), b"customer");
@@ -569,6 +585,9 @@ mod tests {
             "image: ${{TO_DIGI_RS_IMAGE:-{}}}",
             default_image_reference()
         )));
+        assert!(config.contains("[profiles]"));
+        assert!(config.contains("default = \"\""));
+        assert!(!config.contains("default = \"starsky\""));
 
         fs::write("config.toml", "customer-config").expect("custom");
         run_init(false, &mut logger).expect("repeat");

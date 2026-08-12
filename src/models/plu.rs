@@ -1,6 +1,6 @@
 use rust_decimal::Decimal;
 
-use super::nutrition::NutritionFact;
+use super::nutrition::{NutritionFact, NutritionRemapDetail};
 
 pub const DEFAULT_LABEL_FORMAT_FOR_ZERO: u32 = 1;
 
@@ -83,6 +83,8 @@ pub struct Plu {
     pub expiration_days: Option<u32>,
     pub ingredients: Option<String>,
     pub nutrition_facts: Vec<NutritionFact>,
+    pub nutrition_profile: Option<String>,
+    pub nutrition_remaps: Vec<NutritionRemapDetail>,
     pub source_pluing_row_count: usize,
 }
 

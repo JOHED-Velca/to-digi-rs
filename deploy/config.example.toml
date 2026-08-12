@@ -13,10 +13,18 @@ store_number = 1
 # Set true only for customer systems that use self-signed certificates.
 allow_invalid_certificates = true
 
+[timeouts]
+# Shared cadence for polling accepted asynchronous requests.
+poll_interval_millis = 500
+
+[import]
+# Use 1 for the original strictly sequential submit-then-poll behavior.
+max_in_flight = 16
+
 [profiles]
-# Initialized Starsky deployments use the built-in Starsky profile by default.
-# Use `./to-digi analyze --raw` to inspect the source without any profile.
-default = "starsky"
+# Generic deployments do not apply a sanitization profile by default.
+# Set to "starsky", "bigway", or use --sanitize-profile for a customer-specific file.
+default = ""
 
 [verification]
 # Fill these only after an operator independently confirms the objects exist in DIGIweb.

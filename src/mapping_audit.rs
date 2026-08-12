@@ -754,6 +754,8 @@ mod tests {
                 amount: Some("10".to_string()),
                 unit: None,
             }],
+            nutrition_profile: None,
+            nutrition_remaps: Vec::new(),
             source_pluing_row_count: 1,
         }
     }

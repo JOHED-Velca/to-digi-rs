@@ -53,6 +53,7 @@ to-digi-rs-deploy/
 |-- config.toml
 |-- profiles/
 |   |-- example.toml
+|   |-- bigway.toml
 |   `-- starsky.toml
 `-- output/
 ```
@@ -150,8 +151,14 @@ client_secret = "CHANGE_ME"
 store_number = 1
 allow_invalid_certificates = true
 
+[timeouts]
+poll_interval_millis = 500
+
+[import]
+max_in_flight = 16
+
 [profiles]
-default = "starsky"
+default = ""
 
 [verification]
 confirmed_departments = []
@@ -160,6 +167,10 @@ confirmed_label_formats = []
 ```
 
 Existing full `v0.8.0` configs continue to parse. Defaults are supplied for client id, token path, PLU write path, request-status path, timeouts, mapping table names, and payload previews. `token_url` may be omitted, absolute, or a relative path resolved against `base_url`.
+
+`[import].max_in_flight` bounds concurrent accepted DIGIweb requests. Higher values can shorten large imports but increase server load; lower values are more conservative. `max_in_flight = 1` restores the original sequential submit-then-poll behavior.
+
+Live imports show one updating progress line on an interactive terminal. Non-interactive output emits periodic `PROGRESS ...` lines with selected, completed, success, failed, active, remaining, rate, elapsed, and ETA fields.
 
 Configuration precedence:
 
@@ -196,12 +207,12 @@ Recommended readiness workflow:
 
 ## Profiles
 
-Initialized Starsky deployments use the Starsky profile automatically through `[profiles].default = "starsky"`.
+Fresh deployments do not apply a sanitization profile automatically. Set `[profiles].default` to `"starsky"` or `"bigway"` only after choosing that customer profile.
 
 Profile precedence:
 
 1. `--sanitize-profile profiles/custom.toml`
-2. `--profile starsky`
+2. `--profile starsky` or `--profile bigway`
 3. `[profiles].default`
 4. No profile, where supported
 
@@ -212,6 +223,8 @@ Use raw analysis when needed:
 ```
 
 The built-in Starsky profile matches `profiles/starsky.toml`. It preserves Best Before values `1..999`, leaves `0` disabled/default, and converts empty, malformed, negative, or greater-than-999 values to `0`.
+
+The built-in Bigway profile matches `profiles/bigway.toml`. It remaps `Ing Name 96..99` into Iron, Sugar, and Potassium nutrition facts and suppresses those reused fields from ingredient text. `Ing Name 95` / Calcium is intentionally not mapped because the source semantics are ambiguous.
 
 ## Output
 

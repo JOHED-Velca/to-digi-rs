@@ -1,0 +1,32 @@
+profile_version = 1
+profile_name = "bigway"
+description = "Bigway DCA nutrition remapping. Calcium / Ing Name 95 is intentionally not mapped because its source semantics are ambiguous."
+
+[safety]
+fill_empty_only = true
+preserve_nonempty_values = true
+reject_invalid_results = true
+
+[[nutrition_remap]]
+source_field = "Ing Name 96"
+nutrient = "Iron"
+value_role = "amount"
+suppress_from_ingredients = true
+
+[[nutrition_remap]]
+source_field = "Ing Name 97"
+nutrient = "Sugar"
+value_role = "amount"
+suppress_from_ingredients = true
+
+[[nutrition_remap]]
+source_field = "Ing Name 98"
+nutrient = "Potassium"
+value_role = "amount"
+suppress_from_ingredients = true
+
+[[nutrition_remap]]
+source_field = "Ing Name 99"
+nutrient = "Potassium"
+value_role = "percent"
+suppress_from_ingredients = true

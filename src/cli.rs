@@ -227,7 +227,7 @@ pub enum ProfileSelection {
 
 impl ProfileSelection {
     pub fn from_cli_profile(value: &str) -> Self {
-        if value == "starsky" {
+        if matches!(value, "bigway" | "starsky") {
             Self::BuiltIn(value.to_string())
         } else {
             Self::External(PathBuf::from(value))
@@ -970,26 +970,28 @@ mod tests {
 
     #[test]
     fn built_in_profile_options_parse_for_operational_commands() {
-        assert!(matches!(
-            effective_command(
-                &parse(&["to-digi-rs", "analyze", "--profile", "starsky"]),
-                &AppConfig::default()
-            ),
-            EffectiveCommand::Analyze {
-                sanitize_profile: Some(ProfileSelection::BuiltIn(name)),
-                ..
-            } if name == "starsky"
-        ));
-        assert!(matches!(
-            effective_command(
-                &parse(&["to-digi-rs", "import", "--profile", "starsky"]),
-                &AppConfig::default()
-            ),
-            EffectiveCommand::Import {
-                sanitize_profile: Some(ProfileSelection::BuiltIn(name)),
-                ..
-            } if name == "starsky"
-        ));
+        for profile in ["starsky", "bigway"] {
+            assert!(matches!(
+                effective_command(
+                    &parse(&["to-digi-rs", "analyze", "--profile", profile]),
+                    &AppConfig::default()
+                ),
+                EffectiveCommand::Analyze {
+                    sanitize_profile: Some(ProfileSelection::BuiltIn(name)),
+                    ..
+                } if name == profile
+            ));
+            assert!(matches!(
+                effective_command(
+                    &parse(&["to-digi-rs", "import", "--profile", profile]),
+                    &AppConfig::default()
+                ),
+                EffectiveCommand::Import {
+                    sanitize_profile: Some(ProfileSelection::BuiltIn(name)),
+                    ..
+                } if name == profile
+            ));
+        }
     }
 
     #[test]

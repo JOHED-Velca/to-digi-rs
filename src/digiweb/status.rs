@@ -42,7 +42,19 @@ impl<'de> Deserialize<'de> for ProcessingStatus {
             "PROCESSING" | "PENDING" | "RUNNING" | "TODO" => Self::Processing,
             "SUBMITTED_STATUS_UNKNOWN" => Self::SubmittedStatusUnknown,
             "UNKNOWN_OR_TIMEOUT" => Self::UnknownOrTimeout,
-            _ => Self::Fail,
+            _ => Self::SubmittedStatusUnknown,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_remote_status_is_not_confirmed_failure() {
+        let status: ProcessingStatus = serde_json::from_str(r#""BOUNCING""#).expect("status");
+
+        assert_eq!(status, ProcessingStatus::SubmittedStatusUnknown);
     }
 }

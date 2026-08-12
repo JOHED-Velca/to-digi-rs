@@ -1195,6 +1195,8 @@ mod tests {
             key_label: None,
             ingredients: None,
             nutrition_facts: Vec::new(),
+            nutrition_profile: None,
+            nutrition_remaps: Vec::new(),
             source_pluing_row_count: 0,
         }
     }

@@ -402,6 +402,7 @@ mod tests {
                 normalization: None,
             }],
             selling_date_term: None,
+            nutrition_remap: Vec::new(),
         }
     }
 

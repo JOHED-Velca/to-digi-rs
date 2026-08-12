@@ -5,8 +5,9 @@ use rust_decimal::Decimal;
 
 use crate::config::MappingConfig;
 use crate::error::AppError;
-use crate::models::nutrition::NutritionFact;
+use crate::models::nutrition::{NutritionFact, NutritionRemapDetail};
 use crate::models::plu::{Plu, PriceMode};
+use crate::sanitization::profile::{NutritionValueRole, SanitizationProfile};
 use crate::source::schema::MdbSchema;
 use crate::source::{SourceDataset, SourceRow};
 use crate::validation::issue::ValidationIssue;
@@ -157,6 +158,8 @@ struct NormalizedBarcode {
 /// - DCA `TARE` follows the legacy importer's `FormattaTara` behavior: blank/0 maps to `0`, otherwise the source value is divided by 1000 before becoming DIGIweb `plutare`.
 ///   `Tare100` is intentionally not part of this calculation.
 /// - `PluIng` ingredients are assembled from non-empty `Ing Name 1` through `Ing Name 99` values in numeric order.
+/// - A customer profile may explicitly remap named `PluIng` fields into nutrition facts and suppress those fields from ingredient text.
+///   Generic imports do not apply any `Ing Name` nutrition remapping.
 /// - `PluIng` nutrition values are text in the inspected MDB and may contain zero padding. They are parsed as written with no unit conversion or decimal scaling.
 /// - Unknown DIGIweb-specific field limits are enforced in validation with conservative defaults only where documented in code.
 #[derive(Debug, Clone, Default)]
@@ -198,8 +201,26 @@ pub fn normalize_dataset(
     mapping: &MappingConfig,
     store_number: u32,
 ) -> Result<NormalizationReport, AppError> {
-    let ingredients = normalize_ingredients(&dataset.ingredient_rows)?;
-    let nutrition = normalize_nutrition(&dataset.nutrition_rows)?;
+    normalize_dataset_with_profile(dataset, mapping, store_number, None)
+}
+
+pub fn normalize_dataset_with_profile(
+    dataset: &SourceDataset,
+    mapping: &MappingConfig,
+    store_number: u32,
+    profile: Option<&SanitizationProfile>,
+) -> Result<NormalizationReport, AppError> {
+    let suppressed_fields = suppressed_ingredient_fields(profile);
+    let ingredients = normalize_ingredients(&dataset.ingredient_rows, &suppressed_fields)?;
+    let mut nutrition = normalize_nutrition(&dataset.nutrition_rows)?;
+    let (profile_nutrition, nutrition_remaps) =
+        profile_nutrition_from_pluing(&dataset.ingredient_rows, profile)?;
+    for (key, facts) in profile_nutrition {
+        let destination = nutrition.entry(key).or_default();
+        for fact in facts {
+            merge_nutrition_fact(destination, fact);
+        }
+    }
     let pluing_counts = pluing_counts_by_key(&dataset.ingredient_rows);
     let mut plus = Vec::with_capacity(dataset.plu_rows.len());
     let mut row_issues = Vec::new();
@@ -210,6 +231,8 @@ pub fn normalize_dataset(
             store_number,
             &ingredients,
             &nutrition,
+            profile,
+            &nutrition_remaps,
             &pluing_counts,
         ) {
             Ok(plu) => plus.push(plu),
@@ -252,6 +275,8 @@ fn normalize_plu(
     store_number: u32,
     ingredients: &HashMap<JoinKey, String>,
     nutrition: &HashMap<JoinKey, Vec<NutritionFact>>,
+    profile: Option<&SanitizationProfile>,
+    nutrition_remaps: &HashMap<JoinKey, Vec<NutritionRemapDetail>>,
     pluing_counts: &HashMap<JoinKey, usize>,
 ) -> Result<Plu, ValidationIssue> {
     let plu_number = parse_required_u64(row, PLU_NUMBER_COLUMNS, "PLU number").map_err(|err| {
@@ -387,6 +412,12 @@ fn normalize_plu(
         ingredients: key.and_then(|key| ingredients.get(&key).cloned()),
         nutrition_facts: key
             .and_then(|key| nutrition.get(&key).cloned())
+            .unwrap_or_default(),
+        nutrition_profile: key
+            .filter(|key| nutrition_remaps.contains_key(key))
+            .and_then(|_| profile.map(|profile| profile.profile_name.clone())),
+        nutrition_remaps: key
+            .and_then(|key| nutrition_remaps.get(&key).cloned())
             .unwrap_or_default(),
         source_pluing_row_count: key
             .and_then(|key| pluing_counts.get(&key).copied())
@@ -592,13 +623,16 @@ fn normalize_main_group(row: &SourceRow) -> Result<NormalizedGroup, AppError> {
     })
 }
 
-fn normalize_ingredients(rows: &[SourceRow]) -> Result<HashMap<JoinKey, String>, AppError> {
+fn normalize_ingredients(
+    rows: &[SourceRow],
+    suppressed_fields: &HashSet<String>,
+) -> Result<HashMap<JoinKey, String>, AppError> {
     let mut by_plu: HashMap<JoinKey, Vec<String>> = HashMap::new();
     for row in rows {
         let Some(key) = row_join_key(row) else {
             continue;
         };
-        let ordered_parts = ordered_ingredient_parts(row);
+        let ordered_parts = ordered_ingredient_parts(row, suppressed_fields);
         if ordered_parts.is_empty() {
             if let Some(text) = optional_text(row, INGREDIENT_TEXT_COLUMNS) {
                 by_plu.entry(key).or_default().push(text);
@@ -611,6 +645,15 @@ fn normalize_ingredients(rows: &[SourceRow]) -> Result<HashMap<JoinKey, String>,
         .into_iter()
         .map(|(plu, parts)| (plu, apply_dca_ingredient_markup(&parts.join(" "))))
         .collect())
+}
+
+fn suppressed_ingredient_fields(profile: Option<&SanitizationProfile>) -> HashSet<String> {
+    profile
+        .into_iter()
+        .flat_map(|profile| profile.nutrition_remap.iter())
+        .filter(|rule| rule.suppress_from_ingredients)
+        .map(|rule| rule.source_field.trim().to_ascii_lowercase())
+        .collect()
 }
 
 fn normalize_nutrition(
@@ -653,9 +696,16 @@ fn required_name(row: &SourceRow) -> Option<String> {
     optional_text(row, NAME_COLUMNS)
 }
 
-fn ordered_ingredient_parts(row: &SourceRow) -> Vec<String> {
+fn ordered_ingredient_parts(row: &SourceRow, suppressed_fields: &HashSet<String>) -> Vec<String> {
     (1..=99)
-        .filter_map(|index| row.get(&format!("Ing Name {index}")).map(str::trim))
+        .filter_map(|index| {
+            let column = format!("Ing Name {index}");
+            if suppressed_fields.contains(&column.to_ascii_lowercase()) {
+                None
+            } else {
+                row.get(&column).map(str::trim)
+            }
+        })
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
@@ -711,6 +761,85 @@ fn nutrition_from_pluing(row: &SourceRow) -> Result<Vec<NutritionFact>, AppError
         });
     }
     Ok(facts)
+}
+
+fn profile_nutrition_from_pluing(
+    rows: &[SourceRow],
+    profile: Option<&SanitizationProfile>,
+) -> Result<
+    (
+        HashMap<JoinKey, Vec<NutritionFact>>,
+        HashMap<JoinKey, Vec<NutritionRemapDetail>>,
+    ),
+    AppError,
+> {
+    let Some(profile) = profile else {
+        return Ok((HashMap::new(), HashMap::new()));
+    };
+    let mut facts_by_plu: HashMap<JoinKey, Vec<NutritionFact>> = HashMap::new();
+    let mut details_by_plu: HashMap<JoinKey, Vec<NutritionRemapDetail>> = HashMap::new();
+    for row in rows {
+        let Some(key) = row_join_key(row) else {
+            continue;
+        };
+        for rule in &profile.nutrition_remap {
+            let source_field = rule.source_field.trim();
+            let Some(value) = row.get(source_field).and_then(normalize_nutrition_value) else {
+                continue;
+            };
+            let nutrient = rule.nutrient.trim().to_string();
+            merge_nutrition_fact(
+                facts_by_plu.entry(key).or_default(),
+                nutrition_fact_for_role(&nutrient, rule.value_role, value.clone()),
+            );
+            details_by_plu
+                .entry(key)
+                .or_default()
+                .push(NutritionRemapDetail {
+                    source_field: source_field.to_string(),
+                    nutrient,
+                    value_role: rule.value_role.as_str().to_string(),
+                    effective_value: value,
+                    suppressed_from_ingredients: rule.suppress_from_ingredients,
+                });
+        }
+    }
+    Ok((facts_by_plu, details_by_plu))
+}
+
+fn nutrition_fact_for_role(
+    nutrient: &str,
+    value_role: NutritionValueRole,
+    value: String,
+) -> NutritionFact {
+    match value_role {
+        NutritionValueRole::Amount => NutritionFact {
+            name: nutrient.to_string(),
+            amount: Some(value),
+            unit: None,
+        },
+        NutritionValueRole::Percent => NutritionFact {
+            name: nutrient.to_string(),
+            amount: None,
+            unit: Some(value),
+        },
+    }
+}
+
+fn merge_nutrition_fact(facts: &mut Vec<NutritionFact>, incoming: NutritionFact) {
+    if let Some(existing) = facts
+        .iter_mut()
+        .find(|fact| fact.name.eq_ignore_ascii_case(&incoming.name))
+    {
+        if incoming.amount.is_some() {
+            existing.amount = incoming.amount;
+        }
+        if incoming.unit.is_some() {
+            existing.unit = incoming.unit;
+        }
+    } else {
+        facts.push(incoming);
+    }
 }
 
 fn normalize_nutrition_value(value: &str) -> Option<String> {
@@ -870,6 +999,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::sanitization::profile::{
+        NutritionRemapRule, NutritionValueRole, SanitizationProfile, SanitizationSafety,
+    };
     use crate::validation::validator::validate_plus;
 
     fn pludata_row(plucode: &str, department: &str, name_1: &str) -> SourceRow {
@@ -958,6 +1090,47 @@ mod tests {
                 ("Ing Name 1".to_string(), ingredient.to_string()),
                 ("Calories".to_string(), "008".to_string()),
             ]),
+        }
+    }
+
+    fn bigway_profile() -> SanitizationProfile {
+        SanitizationProfile {
+            profile_version: 1,
+            profile_name: "bigway".to_string(),
+            description: String::new(),
+            safety: SanitizationSafety {
+                fill_empty_only: true,
+                preserve_nonempty_values: true,
+                reject_invalid_results: true,
+            },
+            rules: Vec::new(),
+            selling_date_term: None,
+            nutrition_remap: vec![
+                NutritionRemapRule {
+                    source_field: "Ing Name 96".to_string(),
+                    nutrient: "Iron".to_string(),
+                    value_role: NutritionValueRole::Amount,
+                    suppress_from_ingredients: true,
+                },
+                NutritionRemapRule {
+                    source_field: "Ing Name 97".to_string(),
+                    nutrient: "Sugar".to_string(),
+                    value_role: NutritionValueRole::Amount,
+                    suppress_from_ingredients: true,
+                },
+                NutritionRemapRule {
+                    source_field: "Ing Name 98".to_string(),
+                    nutrient: "Potassium".to_string(),
+                    value_role: NutritionValueRole::Amount,
+                    suppress_from_ingredients: true,
+                },
+                NutritionRemapRule {
+                    source_field: "Ing Name 99".to_string(),
+                    nutrient: "Potassium".to_string(),
+                    value_role: NutritionValueRole::Percent,
+                    suppress_from_ingredients: true,
+                },
+            ],
         }
     }
 
@@ -1689,6 +1862,265 @@ mod tests {
                     && fact.amount.as_deref() == Some("690")
                     && fact.unit.as_deref() == Some("29"))
         );
+    }
+
+    #[test]
+    fn generic_profile_does_not_remap_ing_name_fields_to_nutrition() {
+        let mut pluing = pluing_row("1", "1", "Flour");
+        pluing
+            .values
+            .insert("Ing Name 95".to_string(), "56".to_string());
+        pluing
+            .values
+            .insert("Ing Name 96".to_string(), "12".to_string());
+        pluing
+            .values
+            .insert("Ing Name 97".to_string(), "34".to_string());
+        pluing
+            .values
+            .insert("Ing Name 98".to_string(), "78".to_string());
+        pluing
+            .values
+            .insert("Ing Name 99".to_string(), "90".to_string());
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("1", "1", "Bread")],
+            ingredient_rows: vec![pluing],
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let plu = &report.plus[0];
+
+        assert_eq!(plu.ingredients.as_deref(), Some("Flour 56 12 34 78 90"));
+        assert!(plu.nutrition_facts.is_empty());
+        assert!(plu.nutrition_remaps.is_empty());
+        assert!(plu.nutrition_profile.is_none());
+    }
+
+    #[test]
+    fn generic_explicit_nutrition_columns_remain_nutrition_facts() {
+        let mut nutrition = pluing_row("1", "1", "");
+        nutrition
+            .values
+            .insert("Sugar".to_string(), "11".to_string());
+        nutrition
+            .values
+            .insert("Iron".to_string(), "22".to_string());
+        nutrition
+            .values
+            .insert("Calcium".to_string(), "33".to_string());
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("1", "1", "Bread")],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: vec![nutrition],
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let plu = &report.plus[0];
+
+        assert!(
+            plu.nutrition_facts
+                .iter()
+                .any(|fact| fact.name == "sugar" && fact.amount.as_deref() == Some("11"))
+        );
+        assert!(
+            plu.nutrition_facts
+                .iter()
+                .any(|fact| fact.name == "iron" && fact.amount.as_deref() == Some("22"))
+        );
+        assert!(
+            plu.nutrition_facts
+                .iter()
+                .any(|fact| fact.name == "calcium" && fact.amount.as_deref() == Some("33"))
+        );
+    }
+
+    #[test]
+    fn bigway_profile_remaps_and_suppresses_customer_nutrition_fields() {
+        let mut pluing = pluing_row("1", "1", "Flour");
+        pluing
+            .values
+            .insert("Ing Name 95".to_string(), "Maybe calcium".to_string());
+        pluing
+            .values
+            .insert("Ing Name 96".to_string(), "0008".to_string());
+        pluing
+            .values
+            .insert("Ing Name 97".to_string(), "0012".to_string());
+        pluing
+            .values
+            .insert("Ing Name 98".to_string(), "345".to_string());
+        pluing
+            .values
+            .insert("Ing Name 99".to_string(), "009".to_string());
+        let profile = bigway_profile();
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("1", "1", "Bread")],
+            ingredient_rows: vec![pluing],
+            nutrition_rows: Vec::new(),
+        };
+
+        let report =
+            normalize_dataset_with_profile(&dataset, &MappingConfig::default(), 1, Some(&profile))
+                .expect("normalize");
+        let plu = &report.plus[0];
+
+        assert_eq!(plu.ingredients.as_deref(), Some("Flour Maybe calcium"));
+        assert_eq!(plu.nutrition_profile.as_deref(), Some("bigway"));
+        assert_eq!(plu.nutrition_remaps.len(), 4);
+        assert!(plu.nutrition_facts.iter().any(|fact| {
+            fact.name == "Iron" && fact.amount.as_deref() == Some("8") && fact.unit.is_none()
+        }));
+        assert!(plu.nutrition_facts.iter().any(|fact| {
+            fact.name == "Sugar" && fact.amount.as_deref() == Some("12") && fact.unit.is_none()
+        }));
+        assert!(plu.nutrition_facts.iter().any(|fact| {
+            fact.name == "Potassium"
+                && fact.amount.as_deref() == Some("345")
+                && fact.unit.as_deref() == Some("9")
+        }));
+        assert_eq!(
+            plu.nutrition_facts
+                .iter()
+                .filter(|fact| fact.name.eq_ignore_ascii_case("potassium"))
+                .count(),
+            1
+        );
+        assert!(
+            !plu.nutrition_facts
+                .iter()
+                .any(|fact| fact.name.eq_ignore_ascii_case("calcium"))
+        );
+    }
+
+    #[test]
+    fn bigway_profile_merges_with_explicit_nutrition_without_duplicate_rows() {
+        let mut pluing = pluing_row("1", "1", "Flour");
+        pluing.values.insert(
+            "Ing Name 95".to_string(),
+            "Calcium percent text".to_string(),
+        );
+        pluing
+            .values
+            .insert("Ing Name 96".to_string(), "8".to_string());
+        pluing
+            .values
+            .insert("Ing Name 97".to_string(), "12".to_string());
+        pluing
+            .values
+            .insert("Ing Name 98".to_string(), "345".to_string());
+        pluing
+            .values
+            .insert("Ing Name 99".to_string(), "9".to_string());
+        let mut explicit = pluing_row("1", "1", "");
+        explicit.values.insert("Iron".to_string(), "99".to_string());
+        explicit
+            .values
+            .insert("Sugar".to_string(), "88".to_string());
+        explicit
+            .values
+            .insert("Potassium".to_string(), "777".to_string());
+        explicit
+            .values
+            .insert("Calcium".to_string(), "33".to_string());
+        let profile = bigway_profile();
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("1", "1", "Bread")],
+            ingredient_rows: vec![pluing],
+            nutrition_rows: vec![explicit],
+        };
+
+        let report =
+            normalize_dataset_with_profile(&dataset, &MappingConfig::default(), 1, Some(&profile))
+                .expect("normalize");
+        let plu = &report.plus[0];
+
+        for nutrient in ["iron", "sugar", "potassium", "calcium"] {
+            assert_eq!(
+                plu.nutrition_facts
+                    .iter()
+                    .filter(|fact| fact.name.eq_ignore_ascii_case(nutrient))
+                    .count(),
+                1,
+                "{nutrient}"
+            );
+        }
+        assert!(plu.nutrition_facts.iter().any(|fact| {
+            fact.name.eq_ignore_ascii_case("iron") && fact.amount.as_deref() == Some("8")
+        }));
+        assert!(plu.nutrition_facts.iter().any(|fact| {
+            fact.name.eq_ignore_ascii_case("sugar") && fact.amount.as_deref() == Some("12")
+        }));
+        assert!(plu.nutrition_facts.iter().any(|fact| {
+            fact.name.eq_ignore_ascii_case("potassium")
+                && fact.amount.as_deref() == Some("345")
+                && fact.unit.as_deref() == Some("9")
+        }));
+        assert!(plu.nutrition_facts.iter().any(|fact| {
+            fact.name.eq_ignore_ascii_case("calcium") && fact.amount.as_deref() == Some("33")
+        }));
+        assert_eq!(
+            plu.ingredients.as_deref(),
+            Some("Flour Calcium percent text")
+        );
+    }
+
+    #[test]
+    fn bigway_payload_uses_data1_for_amount_and_data2_for_percent() {
+        let mut pluing = pluing_row("1", "1", "Flour");
+        pluing
+            .values
+            .insert("Ing Name 98".to_string(), "345".to_string());
+        pluing
+            .values
+            .insert("Ing Name 99".to_string(), "9".to_string());
+        let profile = bigway_profile();
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("1", "1", "Bread")],
+            ingredient_rows: vec![pluing],
+            nutrition_rows: Vec::new(),
+        };
+
+        let report =
+            normalize_dataset_with_profile(&dataset, &MappingConfig::default(), 1, Some(&profile))
+                .expect("normalize");
+        let payload = crate::digiweb::payload::DigiwebPluPayload::from_plu(
+            &report.plus[0],
+            &crate::config::DigiwebConfig::default(),
+        )
+        .expect("payload");
+        let potassium = payload
+            .plunft
+            .expect("nft")
+            .data
+            .into_iter()
+            .find(|fact| fact.name == "Potassium")
+            .expect("potassium");
+
+        assert_eq!(potassium.data1.as_deref(), Some("345"));
+        assert_eq!(potassium.data2.as_deref(), Some("9"));
+    }
+
+    #[test]
+    fn bigway_orphan_nutrition_remaps_are_not_attached() {
+        let mut orphan = pluing_row("9", "1", "Unmatched");
+        orphan
+            .values
+            .insert("Ing Name 96".to_string(), "25".to_string());
+        let profile = bigway_profile();
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("1", "1", "Bread")],
+            ingredient_rows: vec![orphan],
+            nutrition_rows: Vec::new(),
+        };
+
+        let report =
+            normalize_dataset_with_profile(&dataset, &MappingConfig::default(), 1, Some(&profile))
+                .expect("normalize");
+
+        assert!(report.plus[0].nutrition_facts.is_empty());
+        assert!(report.plus[0].nutrition_remaps.is_empty());
+        assert_eq!(report.orphan_pluing_rows, 1);
     }
 
     #[test]

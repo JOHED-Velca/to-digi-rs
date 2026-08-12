@@ -419,6 +419,7 @@ impl DigiwebClient {
             .await
     }
 
+    #[allow(dead_code)]
     pub async fn poll_request_status_with_auth_session(
         &self,
         auth: &mut AuthSession,
@@ -435,6 +436,26 @@ impl DigiwebClient {
         let path = template.replace("{request_id}", request_id);
         let url = self.join_base_path(&path)?;
         self.poll_url_with_auth_session(auth, &url, request_id, logger, None)
+            .await
+    }
+
+    pub async fn poll_request_status_once_with_auth_session(
+        &self,
+        auth: &mut AuthSession,
+        request_id: &str,
+        logger: &mut AuditLogger,
+        progress_label: Option<&str>,
+    ) -> Result<DigiwebStatusResponse, AppError> {
+        let template = self.config.digiweb.request_status_path_template.trim();
+        if template.is_empty() {
+            return Err(AppError::Config(
+                "digiweb.request_status_path_template is required for PROCESSING responses"
+                    .to_string(),
+            ));
+        }
+        let path = template.replace("{request_id}", request_id);
+        let url = self.join_base_path(&path)?;
+        self.poll_url_once_with_auth_session(auth, &url, request_id, logger, progress_label)
             .await
     }
 
@@ -545,6 +566,7 @@ impl DigiwebClient {
         }
     }
 
+    #[allow(dead_code)]
     async fn poll_url_with_auth_session(
         &self,
         auth: &mut AuthSession,
@@ -645,6 +667,89 @@ impl DigiwebClient {
             ))
             .await;
         }
+    }
+
+    async fn poll_url_once_with_auth_session(
+        &self,
+        auth: &mut AuthSession,
+        url: &str,
+        status_reference: &str,
+        logger: &mut AuditLogger,
+        progress_label: Option<&str>,
+    ) -> Result<DigiwebStatusResponse, AppError> {
+        for attempt in 1..=MAX_AUTHENTICATED_REQUEST_ATTEMPTS {
+            let bearer = auth.bearer_value_for_request(logger).await?;
+            let response = self
+                .http
+                .get(url)
+                .header("Authorization", bearer)
+                .send()
+                .await
+                .map_err(|err| AppError::Network(err.to_string()))?;
+            let captured = capture_response(
+                "Asynchronous request-status response",
+                "GET",
+                url,
+                true,
+                false,
+                response,
+                logger,
+            )
+            .await?;
+            if let Some(label) = progress_label {
+                logger.line(format!("{label} Polling request {status_reference}"))?;
+                logger.line(format!("{label} HTTP {}", format_status(captured.status)))?;
+            }
+
+            if captured.status == StatusCode::UNAUTHORIZED {
+                if attempt == MAX_AUTHENTICATED_REQUEST_ATTEMPTS {
+                    return Err(AppError::Auth(format!(
+                        "status request {status_reference} returned repeated HTTP 401 Unauthorized after {attempt} authenticated attempt(s)"
+                    )));
+                }
+                auth.refresh_after_unauthorized(logger, "polling an existing request")
+                    .await?;
+                logger.line("Retrying status lookup for the same request ID.")?;
+                continue;
+            }
+
+            if !captured.status.is_success() {
+                logger.kv(
+                    "Detailed non-success status response body",
+                    &sanitize_response_body(&captured.body),
+                )?;
+                return Err(http_error(
+                    &format!("status request {status_reference}"),
+                    &captured,
+                ));
+            }
+            let status_response = match interpret_status_response(&captured) {
+                Ok(status_response) => status_response,
+                Err(err) => {
+                    logger.kv(
+                        "Detailed undecodable status response body",
+                        &sanitize_response_body(&captured.body),
+                    )?;
+                    return Err(err);
+                }
+            };
+            if let Some(label) = progress_label {
+                let status_for_log = status_text_for_log(&captured)
+                    .unwrap_or_else(|| status_response.status.as_str().to_string());
+                logger.line(format!("{label} DIGIweb status: {}", status_for_log))?;
+            }
+            if status_response.status == ProcessingStatus::Fail {
+                logger.kv(
+                    "Detailed failed status response body",
+                    &sanitize_response_body(&captured.body),
+                )?;
+            }
+            return Ok(status_response);
+        }
+
+        Err(AppError::Auth(
+            "status polling authentication retry loop ended unexpectedly".to_string(),
+        ))
     }
 
     fn has_configured_status_path(&self) -> bool {
@@ -2154,6 +2259,7 @@ mod tests {
             timeouts: TimeoutConfig {
                 request_seconds: 5,
                 poll_interval_seconds,
+                poll_interval_millis: 1,
                 poll_timeout_seconds,
             },
             import: ImportConfig::default(),
@@ -2200,6 +2306,8 @@ mod tests {
                 expiration_days: None,
                 ingredients: None,
                 nutrition_facts: Vec::new(),
+                nutrition_profile: None,
+                nutrition_remaps: Vec::new(),
                 source_pluing_row_count: 0,
             },
             &config,

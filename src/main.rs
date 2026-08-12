@@ -60,7 +60,7 @@ use sanitization::{
 use selection::{SelectionCriteria, select_eligible_plus, selection_error};
 use serde::Serialize;
 use source::SourceDataset;
-use source::mapping::{normalize_dataset, validate_source_schema};
+use source::mapping::{normalize_dataset, normalize_dataset_with_profile, validate_source_schema};
 use source::mdb_tools::MdbTools;
 use source::schema::MdbSchema;
 use source::{FIXED_SOURCE_FILE, VerifiedSourceFile};
@@ -569,10 +569,11 @@ fn read_source_context(
                     }
                 }
             }
-            let normalization_report = normalize_dataset(
+            let normalization_report = normalize_dataset_with_profile(
                 &sanitized.dataset,
                 &config.mapping,
                 config.digiweb.store_number,
+                Some(&profile),
             )?;
             let validation_report = validate_plus(&normalization_report.plus);
             let valid_plus = valid_plu_candidates(&normalization_report.plus, &validation_report);
@@ -1493,6 +1494,7 @@ fn load_sanitization_profile(
 
 fn load_builtin_profile(name: &str) -> Result<SanitizationProfile, AppError> {
     let contents = match name {
+        "bigway" => include_str!("../profiles/bigway.toml"),
         "starsky" => include_str!("../profiles/starsky.toml"),
         other => {
             return Err(AppError::Config(format!(

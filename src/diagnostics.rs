@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::DigiwebConfig;
 use crate::digiweb::payload::DigiwebPluPayload;
 use crate::error::AppError;
+use crate::models::nutrition::{NutritionFact, NutritionRemapDetail};
 use crate::models::plu::{Plu, effective_label_format, label_format_normalization_description};
 use crate::recovery::sha256_json;
 use crate::selection::{SelectionCriteria, SelectionFailure, SelectionMode, selection_error};
@@ -143,6 +144,9 @@ pub struct PluDiagnosticDetail {
     pub ingredients_present: bool,
     pub ingredient_source_row_count: usize,
     pub nutrition_fact_count: usize,
+    pub nutrition_profile: Option<String>,
+    pub nutrition_remaps: Vec<NutritionRemapDetail>,
+    pub nutrition_facts: Vec<NutritionFact>,
     pub required_references: Vec<RequiredReference>,
     pub payload_destinations: Vec<String>,
     pub duplicate_context: Option<DuplicateBarcodeContext>,
@@ -652,6 +656,39 @@ pub fn render_diagnostics_console(report: &DiagnosticsReport) -> String {
                 &mut out,
                 format!("Nutrition facts count: {}", detail.nutrition_fact_count),
             );
+            if let Some(profile) = &detail.nutrition_profile {
+                line(&mut out, format!("Nutrition profile: {profile}"));
+            }
+            if !detail.nutrition_remaps.is_empty() {
+                line(&mut out, "Nutrition profile remaps:");
+                for remap in &detail.nutrition_remaps {
+                    line(
+                        &mut out,
+                        format!(
+                            "- {} -> {} {} = {} | suppress ingredient: {}",
+                            remap.source_field,
+                            remap.nutrient,
+                            remap.value_role,
+                            remap.effective_value,
+                            yes_no(remap.suppressed_from_ingredients)
+                        ),
+                    );
+                }
+            }
+            if !detail.nutrition_facts.is_empty() {
+                line(&mut out, "Effective nutrition facts:");
+                for fact in &detail.nutrition_facts {
+                    line(
+                        &mut out,
+                        format!(
+                            "- {} amount={} percent={}",
+                            fact.name,
+                            fact.amount.as_deref().unwrap_or("none"),
+                            fact.unit.as_deref().unwrap_or("none")
+                        ),
+                    );
+                }
+            }
             if !detail.required_references.is_empty() {
                 line(&mut out, "Required DIGIweb references:");
                 for reference in &detail.required_references {
@@ -1036,6 +1073,9 @@ fn plu_details(
                     .is_some_and(|value| !value.is_empty()),
                 ingredient_source_row_count: plu.source_pluing_row_count,
                 nutrition_fact_count: plu.nutrition_facts.len(),
+                nutrition_profile: plu.nutrition_profile.clone(),
+                nutrition_remaps: plu.nutrition_remaps.clone(),
+                nutrition_facts: plu.nutrition_facts.clone(),
                 required_references,
                 payload_destinations: payload_destinations_for_plu(plu),
                 duplicate_context,
@@ -1671,6 +1711,8 @@ mod tests {
             expiration_days: None,
             ingredients: None,
             nutrition_facts: Vec::new(),
+            nutrition_profile: None,
+            nutrition_remaps: Vec::new(),
             source_pluing_row_count: 0,
         }
     }
@@ -1873,6 +1915,46 @@ mod tests {
         );
         assert!(text.contains("Raw Tare: 14"));
         assert!(text.contains("Effective DIGIweb Tare: 0.014"));
+    }
+
+    #[test]
+    fn plu_specific_diagnostics_show_profile_nutrition_remaps_and_effective_facts() {
+        let mut detail_plu = plu(18, "0200018");
+        detail_plu.nutrition_profile = Some("bigway".to_string());
+        detail_plu
+            .nutrition_remaps
+            .push(crate::models::nutrition::NutritionRemapDetail {
+                source_field: "Ing Name 96".to_string(),
+                nutrient: "Iron".to_string(),
+                value_role: "amount".to_string(),
+                effective_value: "12".to_string(),
+                suppressed_from_ingredients: true,
+            });
+        detail_plu
+            .nutrition_facts
+            .push(crate::models::nutrition::NutritionFact {
+                name: "Iron".to_string(),
+                amount: Some("12".to_string()),
+                unit: None,
+            });
+        let dataset = source_dataset(vec![("18", "0001", "PLU 18", "0200018")]);
+        let validation_report = validate_plus(&[detail_plu.clone()]);
+        let report = diagnostics_report(
+            &dataset,
+            &[detail_plu.clone()],
+            &[detail_plu],
+            &[],
+            &validation_report,
+        );
+
+        let filtered = filter_diagnostics(&report, false, Some(18), None);
+        let text = render_diagnostics_text(&filtered);
+
+        assert!(text.contains("Nutrition profile: bigway"));
+        assert!(text.contains("Ing Name 96 -> Iron amount = 12"));
+        assert!(text.contains("suppress ingredient: YES"));
+        assert!(text.contains("Effective nutrition facts:"));
+        assert!(text.contains("Iron amount=12 percent=none"));
     }
 
     #[test]

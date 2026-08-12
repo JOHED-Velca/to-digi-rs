@@ -45,6 +45,7 @@ pub struct DigiwebConfig {
 pub struct TimeoutConfig {
     pub request_seconds: u64,
     pub poll_interval_seconds: u64,
+    pub poll_interval_millis: u64,
     pub poll_timeout_seconds: u64,
 }
 
@@ -55,6 +56,7 @@ pub struct ImportConfig {
     pub send_only_first_plu: bool,
     pub dry_run_inspect_only: bool,
     pub write_payload_preview: bool,
+    pub max_in_flight: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,6 +117,7 @@ impl Default for TimeoutConfig {
         Self {
             request_seconds: 30,
             poll_interval_seconds: 2,
+            poll_interval_millis: 500,
             poll_timeout_seconds: 120,
         }
     }
@@ -127,6 +130,7 @@ impl Default for ImportConfig {
             send_only_first_plu: false,
             dry_run_inspect_only: false,
             write_payload_preview: true,
+            max_in_flight: 16,
         }
     }
 }
@@ -192,6 +196,16 @@ impl AppConfig {
         if self.timeouts.poll_interval_seconds == 0 || self.timeouts.poll_timeout_seconds == 0 {
             return Err(AppError::Config(
                 "poll interval and timeout must be greater than zero".to_string(),
+            ));
+        }
+        if self.timeouts.poll_interval_millis == 0 {
+            return Err(AppError::Config(
+                "timeouts.poll_interval_millis must be greater than zero".to_string(),
+            ));
+        }
+        if !(1..=64).contains(&self.import.max_in_flight) {
+            return Err(AppError::Config(
+                "import.max_in_flight must be in range 1..64".to_string(),
             ));
         }
         validate_optional_numeric_override(
@@ -414,6 +428,38 @@ mod tests {
         assert!(config.verification.confirmed_departments.is_empty());
         assert!(config.verification.confirmed_groups.is_empty());
         assert!(config.verification.confirmed_label_formats.is_empty());
+    }
+
+    #[test]
+    fn bounded_import_defaults_are_visible() {
+        let config = AppConfig::default();
+
+        assert_eq!(config.import.max_in_flight, 16);
+        assert_eq!(config.timeouts.poll_interval_millis, 500);
+    }
+
+    #[test]
+    fn max_in_flight_must_stay_in_safe_range() {
+        let mut config = AppConfig::default();
+        config.import.max_in_flight = 0;
+        assert!(config.validate_startup().is_err());
+
+        config.import.max_in_flight = 65;
+        assert!(config.validate_startup().is_err());
+
+        config.import.max_in_flight = 1;
+        assert!(config.validate_startup().is_ok());
+
+        config.import.max_in_flight = 64;
+        assert!(config.validate_startup().is_ok());
+    }
+
+    #[test]
+    fn poll_interval_millis_must_be_nonzero() {
+        let mut config = AppConfig::default();
+        config.timeouts.poll_interval_millis = 0;
+
+        assert!(config.validate_startup().is_err());
     }
 
     #[test]

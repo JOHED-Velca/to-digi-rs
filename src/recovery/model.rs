@@ -23,6 +23,8 @@ pub struct ImportManifest {
     pub selection: ManifestSelection,
     pub summary: ManifestSummary,
     #[serde(default)]
+    pub metrics: ImportMetrics,
+    #[serde(default)]
     pub sanitization: SanitizationManifestMetadata,
     pub records: Vec<PluManifestRecord>,
 }
@@ -74,6 +76,18 @@ pub struct ManifestSummary {
     pub failed: usize,
     pub unknown_status: usize,
     pub ambiguous_submission: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportMetrics {
+    pub elapsed_ms: u128,
+    pub average_plus_per_second: String,
+    pub max_in_flight_observed: usize,
+    pub total_submissions: usize,
+    pub total_polls: usize,
+    pub authentication_refresh_count: u32,
+    pub average_submission_latency_ms: Option<u128>,
+    pub average_processing_latency_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -153,8 +167,10 @@ impl RecordStatus {
             (self, next),
             (NotAttempted, SubmissionStarted)
                 | (SubmissionStarted, RequestAccepted)
+                | (SubmissionStarted, Success)
                 | (SubmissionStarted, AmbiguousSubmission)
                 | (SubmissionStarted, Failed)
+                | (SubmissionStarted, UnknownStatus)
                 | (RequestAccepted, Processing)
                 | (RequestAccepted, Success)
                 | (RequestAccepted, Failed)
@@ -263,6 +279,7 @@ impl ImportManifest {
                 selected_order,
             },
             summary: ManifestSummary::default(),
+            metrics: ImportMetrics::default(),
             sanitization: SanitizationManifestMetadata::default(),
             records,
         };

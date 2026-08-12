@@ -48,6 +48,7 @@ compose.yaml
 config.example.toml
 config.toml
 profiles/example.toml
+profiles/bigway.toml
 profiles/starsky.toml
 output/
 ```
@@ -79,16 +80,16 @@ Then place the customer database in the same directory using the exact filename 
 ./to-digi pull
 ./to-digi doctor [--pull]
 ./to-digi test-connection
-./to-digi analyze [--raw] [--profile starsky] [--sanitize-profile profiles/custom.toml]
+./to-digi analyze [--raw] [--profile starsky|bigway] [--sanitize-profile profiles/custom.toml]
 ./to-digi discover [--timings]
 ./to-digi diagnose [--invalid-only] [--plu PLU_NUMBER] [--category CATEGORY]
 ./to-digi map-audit [--sample N] [--plu PLU_NUMBER] [--timings]
 ./to-digi profile suggest --name bigway
-./to-digi sanitize [--profile starsky|profiles/custom.toml]
-./to-digi dry-run [--limit N | --test | --plu PLU_NUMBER] [--profile starsky] [--sanitize-profile profiles/custom.toml]
-./to-digi verify [--profile starsky] [--sanitize-profile profiles/custom.toml]
+./to-digi sanitize [--profile starsky|bigway|profiles/custom.toml]
+./to-digi dry-run [--limit N | --test | --plu PLU_NUMBER] [--profile starsky|bigway] [--sanitize-profile profiles/custom.toml]
+./to-digi verify [--profile starsky|bigway] [--sanitize-profile profiles/custom.toml]
 ./to-digi import [--limit N | --test | --plu PLU_NUMBER] [--dry-run] [--continue-on-error]
-./to-digi import [--profile starsky] [--sanitize-profile profiles/custom.toml]
+./to-digi import [--profile starsky|bigway] [--sanitize-profile profiles/custom.toml]
 ./to-digi resume output/run-YYYYMMDD-HHMMSS-import/import-results.json [--retry-failed]
 ./to-digi version
 ```
@@ -131,11 +132,11 @@ Run the live test import only after dry-run output is clean enough for the custo
 
 ## Profiles
 
-Initialized Starsky deployments set:
+Fresh deployments do not apply a sanitization profile by default:
 
 ```toml
 [profiles]
-default = "starsky"
+default = ""
 
 [verification]
 confirmed_departments = []
@@ -146,13 +147,15 @@ confirmed_label_formats = []
 Profile precedence is deterministic:
 
 1. Explicit external profile, such as `--sanitize-profile profiles/custom.toml`
-2. Explicit built-in profile, such as `--profile starsky`
+2. Explicit built-in profile, such as `--profile starsky` or `--profile bigway`
 3. Deployment default profile from `[profiles].default`
 4. No profile, only where that meaning is supported
 
-Use `./to-digi analyze --raw` when you need an unsanitized source analysis. The built-in Starsky profile and `profiles/starsky.toml` are kept equivalent.
+Use `./to-digi analyze --raw` when you need an unsanitized source analysis. The built-in Starsky and Bigway profiles match their files in `profiles/`.
 
 Starsky rules fill empty Department with `1`, empty Barcode with the normalized PLU code, empty Barcode Format with `05`, and empty Print Format Code with `00`. They also treat Best Before `0` as disabled/default, preserve `1..999`, and replace empty, malformed, negative, or greater-than-999 Best Before values with `0`. These rules affect DIGIweb `plusellingdateterm`; use-by fields keep their separate source mappings.
+
+Bigway remaps `PluIng` fields `Ing Name 96..99` into nutrition facts for Iron, Sugar, and Potassium, and suppresses those reused fields from ingredient text. `Ing Name 95` / Calcium is intentionally not mapped because the source semantics are ambiguous.
 
 Source Label Format `0` is a confirmed default and resolves in memory to effective Label Format `1`. The raw source value remains visible in diagnostics and reports, but DIGIweb payloads and prerequisite checks use the effective `plulabelformat` value. Positive Label Formats remain unchanged and are treated as required server-side references.
 
@@ -167,11 +170,21 @@ client_secret = "CHANGE_ME"
 store_number = 1
 allow_invalid_certificates = true
 
+[timeouts]
+poll_interval_millis = 500
+
+[import]
+max_in_flight = 16
+
 [profiles]
-default = "starsky"
+default = ""
 ```
 
 Existing full `v0.8.0` configuration files remain compatible. Defaults are supplied for client id, token path, PLU write path, status path, timeouts, table names, store number, and payload-preview behavior. `token_url` may be an absolute URL or a relative path resolved against `base_url`; when omitted, the standard Keycloak token path is derived from `base_url`.
+
+`[import].max_in_flight` controls how many submitted DIGIweb requests may be active at once. Higher values can improve full-import speed but put more load on DIGIweb; lower values are more conservative. Set `max_in_flight = 1` to reproduce the original sequential submit-then-poll behavior.
+
+During live imports, interactive terminals show one updating progress line. Non-interactive runs, including `tee` and CI, print periodic `PROGRESS ...` lines and a final progress line with selected/completed counts, success/failure counts, active requests, remaining records, rate, elapsed time, and ETA when calculable.
 
 Environment overrides take precedence over config values:
 

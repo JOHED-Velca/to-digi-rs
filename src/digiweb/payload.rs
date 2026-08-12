@@ -335,6 +335,8 @@ mod tests {
             expiration_days: None,
             ingredients: None,
             nutrition_facts: Vec::new(),
+            nutrition_profile: None,
+            nutrition_remaps: Vec::new(),
             source_pluing_row_count: 0,
         }
     }
@@ -379,6 +381,8 @@ mod tests {
                 amount: Some("1.0".to_string()),
                 unit: Some("g".to_string()),
             }],
+            nutrition_profile: None,
+            nutrition_remaps: Vec::new(),
             source_pluing_row_count: 1,
         };
         let config = DigiwebConfig::default();
@@ -472,6 +476,8 @@ mod tests {
             expiration_days: None,
             ingredients: None,
             nutrition_facts: Vec::new(),
+            nutrition_profile: None,
+            nutrition_remaps: Vec::new(),
             source_pluing_row_count: 0,
         };
         let payload =
@@ -527,6 +533,8 @@ mod tests {
                 amount: Some("690".to_string()),
                 unit: Some("29".to_string()),
             }],
+            nutrition_profile: None,
+            nutrition_remaps: Vec::new(),
             source_pluing_row_count: 1,
         };
         let config = DigiwebConfig {
@@ -588,6 +596,8 @@ mod tests {
             expiration_days: Some(0),
             ingredients: None,
             nutrition_facts: Vec::new(),
+            nutrition_profile: None,
+            nutrition_remaps: Vec::new(),
             source_pluing_row_count: 0,
         };
         let config = DigiwebConfig::default();
@@ -634,6 +644,8 @@ mod tests {
             expiration_days: Some(0),
             ingredients: None,
             nutrition_facts: Vec::new(),
+            nutrition_profile: None,
+            nutrition_remaps: Vec::new(),
             source_pluing_row_count: 0,
         };
 
