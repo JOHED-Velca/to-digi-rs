@@ -1182,6 +1182,7 @@ mod tests {
             quantity: Some(0),
             quantity_symbol: Some(0),
             tare: Some(Decimal::ZERO),
+            source_tare: None,
             discount_type: Some(0),
             packing_date_print: Some(0),
             packing_time_print: Some(0),

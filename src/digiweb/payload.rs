@@ -300,6 +300,45 @@ mod tests {
 
     use super::*;
 
+    fn plu_with_tare(tare: Decimal) -> Plu {
+        Plu {
+            plu_number: 9807,
+            store_number: 1,
+            department_number: Some(2),
+            group_number: Some(997),
+            source_department: Some("0002".to_string()),
+            source_group: Some("997".to_string()),
+            group_default_applied: false,
+            name: "Legacy Tare PLU".to_string(),
+            barcode: Some("029807".to_string()),
+            barcode_type: Some("5".to_string()),
+            barcode_ref_no: Some("5".to_string()),
+            source_barcode: Some("9807".to_string()),
+            source_barcode_format: Some("05".to_string()),
+            source_flag_data: Some("02".to_string()),
+            price: Decimal::new(199, 2),
+            price_mode: PriceMode::ByEach,
+            price_calc_method: Some(0),
+            quantity: Some(0),
+            quantity_symbol: Some(0),
+            tare: Some(tare),
+            source_tare: Some((tare * Decimal::new(1000, 0)).to_string()),
+            discount_type: Some(0),
+            packing_date_print: Some(0),
+            packing_time_print: Some(0),
+            selling_date_print: Some(0),
+            selling_date_term: Some(0),
+            label_format: Some(1),
+            traceability: Some(0),
+            short_description: None,
+            key_label: None,
+            expiration_days: None,
+            ingredients: None,
+            nutrition_facts: Vec::new(),
+            source_pluing_row_count: 0,
+        }
+    }
+
     #[test]
     fn payload_serializes_with_digiweb_field_names_and_no_nulls() {
         let plu = Plu {
@@ -323,6 +362,7 @@ mod tests {
             quantity: Some(2),
             quantity_symbol: Some(1),
             tare: Some(Decimal::ZERO),
+            source_tare: None,
             discount_type: Some(0),
             packing_date_print: Some(1),
             packing_time_print: Some(1),
@@ -377,6 +417,26 @@ mod tests {
     }
 
     #[test]
+    fn payload_serializes_already_normalized_legacy_tare() {
+        let config = DigiwebConfig::default();
+
+        let json = serde_json::to_string(
+            &DigiwebPluPayload::from_plu(&plu_with_tare(Decimal::new(14, 3)), &config)
+                .expect("payload"),
+        )
+        .expect("json");
+        assert!(json.contains("\"plutare\":0.014"));
+        assert!(!json.contains("\"plutare\":14"));
+
+        let json = serde_json::to_string(
+            &DigiwebPluPayload::from_plu(&plu_with_tare(Decimal::new(9999, 3)), &config)
+                .expect("payload"),
+        )
+        .expect("json");
+        assert!(json.contains("\"plutare\":9.999"));
+    }
+
+    #[test]
     fn raw_label_format_zero_serializes_as_effective_label_format_one() {
         let mut plu = Plu {
             plu_number: 10,
@@ -399,6 +459,7 @@ mod tests {
             quantity: Some(2),
             quantity_symbol: Some(1),
             tare: Some(Decimal::ZERO),
+            source_tare: None,
             discount_type: Some(0),
             packing_date_print: Some(1),
             packing_time_print: Some(1),
@@ -449,6 +510,7 @@ mod tests {
             quantity: Some(0),
             quantity_symbol: Some(0),
             tare: Some(Decimal::ZERO),
+            source_tare: None,
             discount_type: Some(0),
             packing_date_print: Some(0),
             packing_time_print: Some(0),
@@ -513,6 +575,7 @@ mod tests {
             quantity: Some(0),
             quantity_symbol: Some(0),
             tare: Some(Decimal::ZERO),
+            source_tare: None,
             discount_type: Some(0),
             packing_date_print: Some(0),
             packing_time_print: Some(0),
@@ -558,6 +621,7 @@ mod tests {
             quantity: Some(0),
             quantity_symbol: Some(0),
             tare: Some(Decimal::ZERO),
+            source_tare: None,
             discount_type: Some(0),
             packing_date_print: Some(0),
             packing_time_print: Some(0),

@@ -13,6 +13,7 @@ const MAX_KEY_LABEL_LEN: usize = 24;
 const MAX_INGREDIENTS_LEN: usize = 5000;
 const MAX_EXPIRATION_DAYS: u32 = 999;
 const MAX_SELLING_DATE_TERM: u32 = 999;
+const MAX_DIGIWEB_TARE_ABS_EXCLUSIVE: Decimal = Decimal::from_parts(10, 0, 0, false, 0);
 
 #[derive(Debug, Clone, Default)]
 pub struct ValidationReport {
@@ -178,6 +179,21 @@ pub fn validate_plus(plus: &[Plu]) -> ValidationReport {
                 ));
             }
         }
+        if let Some(tare) = plu.tare {
+            if tare < Decimal::ZERO {
+                issues.push(ValidationIssue::error(
+                    Some(plu.plu_number),
+                    "tare",
+                    "DIGIweb plutare must not be negative",
+                ));
+            } else if tare >= MAX_DIGIWEB_TARE_ABS_EXCLUSIVE {
+                issues.push(ValidationIssue::error(
+                    Some(plu.plu_number),
+                    "tare",
+                    "DIGIweb plutare must fit numeric(4,3): absolute value must be less than 10",
+                ));
+            }
+        }
         if let Some(short_description) = &plu.short_description {
             if short_description.chars().count() > MAX_SHORT_DESCRIPTION_LEN {
                 issues.push(ValidationIssue::warning(
@@ -310,6 +326,7 @@ mod tests {
             quantity: None,
             quantity_symbol: None,
             tare: None,
+            source_tare: None,
             discount_type: None,
             packing_date_print: None,
             packing_time_print: None,
@@ -371,6 +388,46 @@ mod tests {
                 && issue.field == "selling_date_term"
                 && issue.severity == Severity::Error
         }));
+    }
+
+    #[test]
+    fn tare_validation_uses_effective_digiweb_numeric_boundary() {
+        for value in [
+            Decimal::ZERO,
+            Decimal::new(1, 3),
+            Decimal::new(14, 3),
+            Decimal::new(9999, 3),
+        ] {
+            let mut plu = valid_plu(9807);
+            plu.tare = Some(value);
+
+            assert!(
+                !validate_plus(&[plu])
+                    .issues
+                    .iter()
+                    .any(|issue| issue.field == "tare"),
+                "value {value}"
+            );
+        }
+
+        let mut too_large = valid_plu(9808);
+        too_large.tare = Some(Decimal::new(10000, 3));
+        let report = validate_plus(&[too_large]);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.field == "tare" && issue.severity == Severity::Error)
+        );
+
+        let mut negative = valid_plu(9809);
+        negative.tare = Some(Decimal::new(-1, 3));
+        let report = validate_plus(&[negative]);
+        assert!(
+            report.issues.iter().any(
+                |issue| issue.field == "tare" && issue.message.contains("must not be negative")
+            )
+        );
     }
 
     #[test]

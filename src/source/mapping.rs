@@ -154,6 +154,8 @@ struct NormalizedBarcode {
 ///   `plubarcodedata` is `Flag Data` left-padded to 2 digits plus `Barcode` left-padded to 6 digits for format 4 or 5 digits otherwise.
 /// - `Pludata`.`PRINT FORMAT CODE` is retained as the raw label-format value on `Plu`;
 ///   effective DIGIweb `plulabelformat` is resolved through the shared PLU label-format helper, where raw `0` defaults to effective `1`.
+/// - DCA `TARE` follows the legacy importer's `FormattaTara` behavior: blank/0 maps to `0`, otherwise the source value is divided by 1000 before becoming DIGIweb `plutare`.
+///   `Tare100` is intentionally not part of this calculation.
 /// - `PluIng` ingredients are assembled from non-empty `Ing Name 1` through `Ing Name 99` values in numeric order.
 /// - `PluIng` nutrition values are text in the inspected MDB and may contain zero padding. They are parsed as written with no unit conversion or decimal scaling.
 /// - Unknown DIGIweb-specific field limits are enforced in validation with conservative defaults only where documented in code.
@@ -309,6 +311,16 @@ fn normalize_plu(
             format!("invalid barcode fields: {err}"),
         )
     })?;
+    let source_tare = optional_raw_text(row, TARE_COLUMNS);
+    let tare = normalize_legacy_dca_tare(row).map_err(|err| {
+        row_issue(
+            row,
+            Some(plu_number),
+            "tare",
+            format!("invalid tare: {err}"),
+        )
+    })?;
+
     Ok(Plu {
         plu_number,
         store_number,
@@ -329,14 +341,8 @@ fn normalize_plu(
         price_calc_method: normalized_price_mode.price_calc_method,
         quantity: normalized_price_mode.quantity,
         quantity_symbol: normalized_price_mode.quantity_symbol,
-        tare: parse_optional_decimal_default_zero(row, TARE_COLUMNS, "TARE").map_err(|err| {
-            row_issue(
-                row,
-                Some(plu_number),
-                "tare",
-                format!("invalid tare: {err}"),
-            )
-        })?,
+        tare,
+        source_tare,
         discount_type: Some(
             parse_optional_u32_default_zero(row, DISCOUNT_COLUMNS, "DISCOUNT").map_err(|err| {
                 row_issue(
@@ -792,15 +798,18 @@ fn parse_optional_u32_default_zero(
     }
 }
 
-fn parse_optional_decimal_default_zero(
-    row: &SourceRow,
-    candidates: &[&str],
-    field: &str,
-) -> Result<Option<Decimal>, AppError> {
-    match optional_text(row, candidates) {
-        Some(value) => parse_decimal_value(&value, field).map(Some),
-        None => Ok(Some(Decimal::ZERO)),
+fn normalize_legacy_dca_tare(row: &SourceRow) -> Result<Option<Decimal>, AppError> {
+    let Some(value) = optional_text(row, TARE_COLUMNS) else {
+        return Ok(Some(Decimal::ZERO));
+    };
+    let parsed = parse_decimal_value(&value, "TARE")?;
+    if parsed == Decimal::ZERO {
+        return Ok(Some(Decimal::ZERO));
     }
+    // Legacy DCA compatibility: VB `FormattaTara` divides non-zero source TARE
+    // by 1000 before assigning DIGIweb `plutare`. `Tare100` is stored separately
+    // by the old importer and is not used for this field.
+    Ok(Some(parsed / Decimal::new(1000, 0)))
 }
 
 fn flag_to_print_value(row: &SourceRow, candidates: &[&str]) -> u8 {
@@ -896,6 +905,25 @@ mod tests {
         row
     }
 
+    fn pludata_row_with_tare(plucode: &str, tare: &str) -> SourceRow {
+        let mut row = pludata_row(plucode, "0001", "Apples");
+        row.values.insert("TARE".to_string(), tare.to_string());
+        row
+    }
+
+    fn normalize_single_plu(row: SourceRow) -> NormalizationReport {
+        normalize_dataset(
+            &SourceDataset {
+                plu_rows: vec![row],
+                ingredient_rows: Vec::new(),
+                nutrition_rows: Vec::new(),
+            },
+            &MappingConfig::default(),
+            1,
+        )
+        .expect("normalize")
+    }
+
     fn dca_pludata_row(
         plucode: &str,
         category: &str,
@@ -945,6 +973,79 @@ mod tests {
 
         assert_eq!(report.plus[0].selling_date_term, Some(6851));
         assert_eq!(report.plus[0].expiration_days, None);
+    }
+
+    #[test]
+    fn legacy_dca_tare_is_normalized_by_thousand() {
+        let cases = [
+            ("1", None, Decimal::ZERO),
+            ("2", Some(""), Decimal::ZERO),
+            ("3", Some("0"), Decimal::ZERO),
+            ("4", Some("1"), Decimal::new(1, 3)),
+            ("5", Some("10"), Decimal::new(10, 3)),
+            ("6", Some("14"), Decimal::new(14, 3)),
+            ("7", Some("40"), Decimal::new(40, 3)),
+            ("8", Some("50"), Decimal::new(50, 3)),
+            ("9", Some("90"), Decimal::new(90, 3)),
+            ("10", Some("9999"), Decimal::new(9999, 3)),
+        ];
+
+        for (plucode, source_tare, expected) in cases {
+            let row = match source_tare {
+                Some(value) => pludata_row_with_tare(plucode, value),
+                None => pludata_row(plucode, "0001", "Apples"),
+            };
+            let report = normalize_single_plu(row);
+            assert_eq!(report.plus.len(), 1, "PLU {plucode}");
+            assert_eq!(report.plus[0].tare, Some(expected), "PLU {plucode}");
+        }
+    }
+
+    #[test]
+    fn legacy_dca_tare_ignores_tare100() {
+        for tare100 in ["0", "99"] {
+            let mut row = pludata_row_with_tare("14", "14");
+            row.values
+                .insert("Tare100".to_string(), tare100.to_string());
+
+            let report = normalize_single_plu(row);
+
+            assert_eq!(report.plus[0].tare, Some(Decimal::new(14, 3)));
+            assert_eq!(report.plus[0].source_tare.as_deref(), Some("14"));
+        }
+    }
+
+    #[test]
+    fn malformed_tare_creates_row_issue() {
+        let report = normalize_single_plu(pludata_row_with_tare("9807", "not-a-number"));
+
+        assert!(report.plus.is_empty());
+        assert!(report.row_issues.iter().any(|issue| {
+            issue.plu_number == Some(9807)
+                && issue.field == "tare"
+                && issue.message.contains("invalid tare")
+        }));
+    }
+
+    #[test]
+    fn normalized_tare_boundary_uses_effective_digiweb_value() {
+        let report = normalize_single_plu(pludata_row_with_tare("9999", "9999"));
+        assert_eq!(report.plus[0].tare, Some(Decimal::new(9999, 3)));
+        assert!(
+            !validate_plus(&report.plus)
+                .issues
+                .iter()
+                .any(|issue| issue.field == "tare")
+        );
+
+        let report = normalize_single_plu(pludata_row_with_tare("10000", "10000"));
+        assert_eq!(report.plus[0].tare, Some(Decimal::new(10000, 3)));
+        assert!(
+            validate_plus(&report.plus)
+                .issues
+                .iter()
+                .any(|issue| issue.field == "tare")
+        );
     }
 
     #[test]

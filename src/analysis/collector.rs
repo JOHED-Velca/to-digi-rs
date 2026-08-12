@@ -1093,6 +1093,7 @@ mod tests {
             quantity: Some(0),
             quantity_symbol: Some(0),
             tare: None,
+            source_tare: None,
             discount_type: None,
             packing_date_print: None,
             packing_time_print: None,

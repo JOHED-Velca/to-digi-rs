@@ -138,7 +138,8 @@ pub struct PluDiagnosticDetail {
     pub use_by: Option<u32>,
     pub quantity: Option<u32>,
     pub quantity_symbol: Option<u32>,
-    pub tare: Option<String>,
+    pub raw_tare: Option<String>,
+    pub effective_tare: Option<String>,
     pub ingredients_present: bool,
     pub ingredient_source_row_count: usize,
     pub nutrition_fact_count: usize,
@@ -617,7 +618,7 @@ pub fn render_diagnostics_console(report: &DiagnosticsReport) -> String {
             line(
                 &mut out,
                 format!(
-                    "Quantity/tare: {}/{}/{}",
+                    "Quantity/symbol: {}/{}",
                     detail
                         .quantity
                         .map(|value| value.to_string())
@@ -626,7 +627,17 @@ pub fn render_diagnostics_console(report: &DiagnosticsReport) -> String {
                         .quantity_symbol
                         .map(|value| value.to_string())
                         .unwrap_or_else(|| "none".to_string()),
-                    detail.tare.as_deref().unwrap_or("none")
+                ),
+            );
+            line(
+                &mut out,
+                format!("Raw Tare: {}", detail.raw_tare.as_deref().unwrap_or("none")),
+            );
+            line(
+                &mut out,
+                format!(
+                    "Effective DIGIweb Tare: {}",
+                    detail.effective_tare.as_deref().unwrap_or("none")
                 ),
             );
             line(
@@ -1017,7 +1028,8 @@ fn plu_details(
                 use_by: plu.expiration_days,
                 quantity: plu.quantity,
                 quantity_symbol: plu.quantity_symbol,
-                tare: plu.tare.map(|value| value.to_string()),
+                raw_tare: plu.source_tare.clone(),
+                effective_tare: plu.tare.map(|value| value.to_string()),
                 ingredients_present: plu
                     .ingredients
                     .as_ref()
@@ -1646,6 +1658,7 @@ mod tests {
             quantity: Some(0),
             quantity_symbol: Some(0),
             tare: Some(Decimal::ZERO),
+            source_tare: None,
             discount_type: Some(0),
             packing_date_print: Some(0),
             packing_time_print: Some(0),
@@ -1836,6 +1849,33 @@ mod tests {
     }
 
     #[test]
+    fn plu_specific_diagnostics_show_raw_and_effective_tare() {
+        let mut detail_plu = plu(9807, "029807");
+        detail_plu.source_tare = Some("14".to_string());
+        detail_plu.tare = Some(Decimal::new(14, 3));
+        let dataset = source_dataset(vec![("9807", "0001", "PLU 9807", "9807")]);
+        let validation_report = validate_plus(&[detail_plu.clone()]);
+        let report = diagnostics_report(
+            &dataset,
+            &[detail_plu.clone()],
+            &[detail_plu],
+            &[],
+            &validation_report,
+        );
+        let filtered = filter_diagnostics(&report, false, Some(9807), None);
+        let text = render_diagnostics_text(&filtered);
+
+        assert_eq!(filtered.plu_details.len(), 1);
+        assert_eq!(filtered.plu_details[0].raw_tare.as_deref(), Some("14"));
+        assert_eq!(
+            filtered.plu_details[0].effective_tare.as_deref(),
+            Some("0.014")
+        );
+        assert!(text.contains("Raw Tare: 14"));
+        assert!(text.contains("Effective DIGIweb Tare: 0.014"));
+    }
+
+    #[test]
     fn missing_product_name_is_row_level_customer_action_without_default() {
         let dataset = source_dataset(vec![("0", "0001", "", "")]);
         let row_issues = vec![ValidationIssue::error(
@@ -1999,6 +2039,56 @@ mod tests {
         assert_eq!(
             selected_record.payload_sha256.as_deref(),
             Some(payload_hash.as_str())
+        );
+    }
+
+    #[test]
+    fn dry_run_manifest_uses_normalized_legacy_tare_payload() {
+        let mut plu_9807 = plu(9807, "029807");
+        plu_9807.source_tare = Some("14".to_string());
+        plu_9807.tare = Some(Decimal::new(14, 3));
+        let plus = vec![plu_9807.clone()];
+        let validation_report = validate_plus(&plus);
+        let dataset = source_dataset(vec![("9807", "0001", "PLU 9807", "9807")]);
+        let diagnostics = diagnostics_report(&dataset, &plus, &plus, &[], &validation_report);
+
+        let manifest = build_dry_run_manifest(
+            "plu.mdb",
+            "abc123",
+            &dataset,
+            &plus,
+            &plus,
+            &diagnostics,
+            &DigiwebConfig::default(),
+            SelectionCriteria {
+                limit: None,
+                requested_plu: Some(9807),
+                test_mode: false,
+            },
+        )
+        .expect("manifest");
+        let normalized_payload =
+            DigiwebPluPayload::from_plu(&plu_9807, &DigiwebConfig::default()).expect("payload");
+        let normalized_hash = sha256_json(&normalized_payload).expect("hash");
+        let mut old_wrong_plu = plu_9807;
+        old_wrong_plu.tare = Some(Decimal::new(14, 0));
+        let old_wrong_payload =
+            DigiwebPluPayload::from_plu(&old_wrong_plu, &DigiwebConfig::default())
+                .expect("payload");
+        let old_wrong_hash = sha256_json(&old_wrong_payload).expect("hash");
+
+        let selected_record = manifest
+            .records
+            .iter()
+            .find(|record| record.plu_number == 9807)
+            .expect("selected record");
+        assert_eq!(
+            selected_record.payload_sha256.as_deref(),
+            Some(normalized_hash.as_str())
+        );
+        assert_ne!(
+            selected_record.payload_sha256.as_deref(),
+            Some(old_wrong_hash.as_str())
         );
     }
 

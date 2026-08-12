@@ -70,6 +70,7 @@ pub struct Plu {
     pub quantity: Option<u32>,
     pub quantity_symbol: Option<u32>,
     pub tare: Option<Decimal>,
+    pub source_tare: Option<String>,
     pub discount_type: Option<u32>,
     pub packing_date_print: Option<u8>,
     pub packing_time_print: Option<u8>,
