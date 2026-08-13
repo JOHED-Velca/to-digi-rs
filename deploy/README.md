@@ -180,7 +180,7 @@ Existing full `v0.8.0` configs continue to parse. Defaults are supplied for clie
 
 `[import].max_in_flight` bounds concurrent accepted DIGIweb requests. Higher values can shorten large imports but increase server load; lower values are more conservative. `max_in_flight = 1` restores the original sequential submit-then-poll behavior.
 
-Live imports show one updating progress bar on an interactive terminal:
+Live imports show one updating progress bar on an interactive terminal. The `./to-digi` launcher conditionally passes Docker a pseudo-TTY only when host stdout is a TTY, so direct SSH terminal runs redraw one line while redirected or piped runs stay line-oriented:
 
 ```text
 Importing [██████████████████░░░░░░░░░░] 73.7% 2541/3447 | ok 2541 | fail 0 | active 6 | 11.5/s | 03:41 | ETA 01:18
@@ -243,9 +243,10 @@ The built-in Starsky profile matches `profiles/starsky.toml`. It preserves Best 
 The built-in Bigway profile matches `profiles/bigway.toml`. It remaps customer-specific nutrition fields and suppresses those reused fields from ingredient text:
 
 ```text
-Calcium     -> Calcium amount
-Ing Name 95 -> Calcium percent
-Ing Name 96 -> Iron amount
+Ing Name 95 -> Calcium amount
+Calcium     -> Calcium percent
+Iron        -> Iron amount
+Ing Name 96 -> Iron percent
 Ing Name 97 -> Sugar amount
 Ing Name 98 -> Potassium amount
 Ing Name 99 -> Potassium percent

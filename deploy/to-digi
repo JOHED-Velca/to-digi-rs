@@ -51,6 +51,20 @@ require_command() {
     command -v "$1" >/dev/null 2>&1 || fail "Required command not found: $1" 2
 }
 
+test_tty_override_enabled() {
+    [ "${TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS:-}" = "1" ]
+}
+
+host_stdout_is_tty() {
+    [ -t 1 ] && return 0
+    test_tty_override_enabled && [ "${TO_DIGI_RS_TEST_STDOUT_TTY:-}" = "1" ]
+}
+
+host_stdin_is_tty() {
+    [ -t 0 ] && return 0
+    test_tty_override_enabled && [ "${TO_DIGI_RS_TEST_STDIN_TTY:-}" = "1" ]
+}
+
 command_label() {
     if has_arg_name "--help" "$@" || has_arg_name "-h" "$@"; then
         printf 'info\n'
@@ -464,8 +478,17 @@ printf 'Using image: %s\n' "$TO_DIGI_RS_IMAGE"
 printf 'Deployment directory: %s\n' "$SCRIPT_DIR"
 printf 'Command: %s\n' "$COMMAND_LABEL"
 
+DOCKER_TTY_ARGS=()
+if host_stdin_is_tty; then
+    DOCKER_TTY_ARGS+=(--interactive)
+fi
+if host_stdout_is_tty; then
+    DOCKER_TTY_ARGS+=(--tty)
+fi
+
 DOCKER_ARGS=(
     run --rm
+    "${DOCKER_TTY_ARGS[@]}"
     --user "$(id -u):$(id -g)"
     --mount "type=bind,src=$SCRIPT_DIR,dst=/work"
     --workdir /work
@@ -480,6 +503,8 @@ DOCKER_ARGS=(
     --env "TO_DIGI_RS_ALLOW_INVALID_CERTIFICATES=${TO_DIGI_RS_ALLOW_INVALID_CERTIFICATES:-}"
     --env "TO_DIGI_RS_DEFAULT_PROFILE=${TO_DIGI_RS_DEFAULT_PROFILE:-}"
     --env "TO_DIGI_RS_IMPORT_MANIFEST_PATH=${TO_DIGI_RS_IMPORT_MANIFEST_PATH:-}"
+    --env "TO_DIGI_RS_ASCII_PROGRESS=${TO_DIGI_RS_ASCII_PROGRESS:-}"
+    --env "COLUMNS=${COLUMNS:-}"
     "$TO_DIGI_RS_IMAGE"
 )
 

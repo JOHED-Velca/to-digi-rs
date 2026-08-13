@@ -300,21 +300,24 @@ fn validate_nutrition_remaps(rules: &[NutritionRemapRule]) -> Result<(), AppErro
 }
 
 fn validate_nutrition_source_field(source_field: &str) -> Result<(), AppError> {
+    if matches!(source_field, "Calcium" | "Iron") {
+        return Ok(());
+    }
     let Some(index) = source_field.strip_prefix("Ing Name ") else {
         return Err(AppError::Config(format!(
-            "unsupported nutrition_remap.source_field '{source_field}'; expected Ing Name 1..99"
+            "unsupported nutrition_remap.source_field '{source_field}'; expected Ing Name 1..99, Calcium, or Iron"
         )));
     };
     let index = index.parse::<u8>().map_err(|err| {
         AppError::Config(format!(
-            "unsupported nutrition_remap.source_field '{source_field}'; expected Ing Name 1..99: {err}"
+            "unsupported nutrition_remap.source_field '{source_field}'; expected Ing Name 1..99, Calcium, or Iron: {err}"
         ))
     })?;
     if (1..=99).contains(&index) {
         Ok(())
     } else {
         Err(AppError::Config(format!(
-            "unsupported nutrition_remap.source_field '{source_field}'; expected Ing Name 1..99"
+            "unsupported nutrition_remap.source_field '{source_field}'; expected Ing Name 1..99, Calcium, or Iron"
         )))
     }
 }
@@ -452,10 +455,22 @@ preserve_nonempty_values = true
 reject_invalid_results = true
 
 [[nutrition_remap]]
-source_field = "Ing Name 96"
-nutrient = "Iron"
+source_field = "Calcium"
+nutrient = "Calcium"
+value_role = "percent"
+suppress_from_ingredients = false
+
+[[nutrition_remap]]
+source_field = "Ing Name 95"
+nutrient = "Calcium"
 value_role = "amount"
 suppress_from_ingredients = true
+
+[[nutrition_remap]]
+source_field = "Iron"
+nutrient = "Iron"
+value_role = "amount"
+suppress_from_ingredients = false
 
 [[nutrition_remap]]
 source_field = "Ing Name 99"
@@ -466,10 +481,10 @@ suppress_from_ingredients = true
         let profile: SanitizationProfile = toml::from_str(toml).expect("parse");
         profile.validate().expect("valid");
 
-        assert_eq!(profile.nutrition_remap.len(), 2);
+        assert_eq!(profile.nutrition_remap.len(), 4);
         assert_eq!(
             profile.nutrition_remap[0].value_role,
-            NutritionValueRole::Amount
+            NutritionValueRole::Percent
         );
     }
 
@@ -559,7 +574,7 @@ value_role = "daily"
 
         assert!(profile.validate().is_err());
 
-        profile.nutrition_remap[0].source_field = "Iron".to_string();
+        profile.nutrition_remap[0].source_field = "Sugar".to_string();
         assert!(profile.validate().is_err());
     }
 

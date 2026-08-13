@@ -1109,13 +1109,25 @@ mod tests {
                 NutritionRemapRule {
                     source_field: "Ing Name 95".to_string(),
                     nutrient: "Calcium".to_string(),
-                    value_role: NutritionValueRole::Percent,
+                    value_role: NutritionValueRole::Amount,
                     suppress_from_ingredients: true,
+                },
+                NutritionRemapRule {
+                    source_field: "Calcium".to_string(),
+                    nutrient: "Calcium".to_string(),
+                    value_role: NutritionValueRole::Percent,
+                    suppress_from_ingredients: false,
+                },
+                NutritionRemapRule {
+                    source_field: "Iron".to_string(),
+                    nutrient: "Iron".to_string(),
+                    value_role: NutritionValueRole::Amount,
+                    suppress_from_ingredients: false,
                 },
                 NutritionRemapRule {
                     source_field: "Ing Name 96".to_string(),
                     nutrient: "Iron".to_string(),
-                    value_role: NutritionValueRole::Amount,
+                    value_role: NutritionValueRole::Percent,
                     suppress_from_ingredients: true,
                 },
                 NutritionRemapRule {
@@ -1942,15 +1954,19 @@ mod tests {
     }
 
     #[test]
-    fn generic_mode_keeps_ing_name_95_as_ingredient_and_calcium_column_as_amount() {
+    fn generic_mode_keeps_ing_name_95_and_96_as_ingredients_and_explicit_nutrition_generic() {
         let mut pluing = pluing_row("1", "1", "Flour");
         pluing
             .values
             .insert("Ing Name 95".to_string(), "10".to_string());
+        pluing
+            .values
+            .insert("Ing Name 96".to_string(), "5".to_string());
         let mut explicit = pluing_row("1", "1", "");
         explicit
             .values
             .insert("Calcium".to_string(), "1".to_string());
+        explicit.values.insert("Iron".to_string(), "2".to_string());
         let dataset = SourceDataset {
             plu_rows: vec![pludata_row("1", "1", "Bread")],
             ingredient_rows: vec![pluing],
@@ -1964,10 +1980,17 @@ mod tests {
             .iter()
             .find(|fact| fact.name.eq_ignore_ascii_case("calcium"))
             .expect("calcium");
+        let iron = plu
+            .nutrition_facts
+            .iter()
+            .find(|fact| fact.name.eq_ignore_ascii_case("iron"))
+            .expect("iron");
 
-        assert_eq!(plu.ingredients.as_deref(), Some("Flour 10"));
+        assert_eq!(plu.ingredients.as_deref(), Some("Flour 10 5"));
         assert_eq!(calcium.amount.as_deref(), Some("1"));
         assert_eq!(calcium.unit, None);
+        assert_eq!(iron.amount.as_deref(), Some("2"));
+        assert_eq!(iron.unit, None);
     }
 
     #[test]
@@ -1975,10 +1998,14 @@ mod tests {
         let mut pluing = pluing_row("1", "1", "Flour");
         pluing
             .values
-            .insert("Ing Name 95".to_string(), "0010".to_string());
+            .insert("Ing Name 95".to_string(), "0550".to_string());
         pluing
             .values
-            .insert("Ing Name 96".to_string(), "0008".to_string());
+            .insert("Calcium".to_string(), "0042".to_string());
+        pluing.values.insert("Iron".to_string(), "0031".to_string());
+        pluing
+            .values
+            .insert("Ing Name 96".to_string(), "5.5".to_string());
         pluing
             .values
             .insert("Ing Name 97".to_string(), "0012".to_string());
@@ -2002,12 +2029,16 @@ mod tests {
 
         assert_eq!(plu.ingredients.as_deref(), Some("Flour"));
         assert_eq!(plu.nutrition_profile.as_deref(), Some("bigway"));
-        assert_eq!(plu.nutrition_remaps.len(), 5);
+        assert_eq!(plu.nutrition_remaps.len(), 7);
         assert!(plu.nutrition_facts.iter().any(|fact| {
-            fact.name == "Calcium" && fact.amount.is_none() && fact.unit.as_deref() == Some("10")
+            fact.name == "Calcium"
+                && fact.amount.as_deref() == Some("550")
+                && fact.unit.as_deref() == Some("42")
         }));
         assert!(plu.nutrition_facts.iter().any(|fact| {
-            fact.name == "Iron" && fact.amount.as_deref() == Some("8") && fact.unit.is_none()
+            fact.name == "Iron"
+                && fact.amount.as_deref() == Some("31")
+                && fact.unit.as_deref() == Some("5.5")
         }));
         assert!(plu.nutrition_facts.iter().any(|fact| {
             fact.name == "Sugar" && fact.amount.as_deref() == Some("12") && fact.unit.is_none()
@@ -2031,6 +2062,13 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(
+            plu.nutrition_facts
+                .iter()
+                .filter(|fact| fact.name.eq_ignore_ascii_case("iron"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -2038,10 +2076,14 @@ mod tests {
         let mut pluing = pluing_row("1", "1", "Flour");
         pluing
             .values
-            .insert("Ing Name 95".to_string(), "0017".to_string());
+            .insert("Ing Name 95".to_string(), "0550".to_string());
         pluing
             .values
-            .insert("Ing Name 96".to_string(), "8".to_string());
+            .insert("Calcium".to_string(), "0042".to_string());
+        pluing.values.insert("Iron".to_string(), "0031".to_string());
+        pluing
+            .values
+            .insert("Ing Name 96".to_string(), "5.5".to_string());
         pluing
             .values
             .insert("Ing Name 97".to_string(), "12".to_string());
@@ -2085,7 +2127,9 @@ mod tests {
             );
         }
         assert!(plu.nutrition_facts.iter().any(|fact| {
-            fact.name.eq_ignore_ascii_case("iron") && fact.amount.as_deref() == Some("8")
+            fact.name.eq_ignore_ascii_case("iron")
+                && fact.amount.as_deref() == Some("31")
+                && fact.unit.as_deref() == Some("5.5")
         }));
         assert!(plu.nutrition_facts.iter().any(|fact| {
             fact.name.eq_ignore_ascii_case("sugar") && fact.amount.as_deref() == Some("12")
@@ -2097,8 +2141,8 @@ mod tests {
         }));
         assert!(plu.nutrition_facts.iter().any(|fact| {
             fact.name.eq_ignore_ascii_case("calcium")
-                && fact.amount.as_deref() == Some("33")
-                && fact.unit.as_deref() == Some("17")
+                && fact.amount.as_deref() == Some("550")
+                && fact.unit.as_deref() == Some("42")
         }));
         assert_eq!(plu.ingredients.as_deref(), Some("Flour"));
     }
@@ -2108,16 +2152,15 @@ mod tests {
         let mut pluing = pluing_row("1", "1", "Flour");
         pluing
             .values
-            .insert("Ing Name 95".to_string(), "10".to_string());
-        let mut explicit = pluing_row("1", "1", "");
-        explicit
+            .insert("Ing Name 95".to_string(), "0550".to_string());
+        pluing
             .values
-            .insert("Calcium".to_string(), "1".to_string());
+            .insert("Calcium".to_string(), "0042".to_string());
         let profile = bigway_profile();
         let dataset = SourceDataset {
             plu_rows: vec![pludata_row("1", "1", "Bread")],
             ingredient_rows: vec![pluing],
-            nutrition_rows: vec![explicit],
+            nutrition_rows: Vec::new(),
         };
 
         let report =
@@ -2137,23 +2180,25 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(calcium_rows.len(), 1);
-        assert_eq!(calcium_rows[0].data1.as_deref(), Some("1"));
-        assert_eq!(calcium_rows[0].data2.as_deref(), Some("10"));
+        assert_eq!(calcium_rows[0].data1.as_deref(), Some("550"));
+        assert_eq!(calcium_rows[0].data2.as_deref(), Some("42"));
         assert_eq!(report.plus[0].ingredients.as_deref(), Some("Flour"));
     }
 
     #[test]
     fn bigway_calcium_blank_roles_are_omitted_independently() {
-        let mut percent_only = pluing_row("1", "1", "Flour");
-        percent_only
-            .values
-            .insert("Ing Name 95".to_string(), "0017".to_string());
-        let mut amount_only = pluing_row("2", "1", "Flour");
+        let mut amount_only = pluing_row("1", "1", "Flour");
         amount_only
             .values
+            .insert("Ing Name 95".to_string(), "0017".to_string());
+        amount_only
+            .values
+            .insert("Calcium".to_string(), "   ".to_string());
+        let mut percent_only = pluing_row("2", "1", "Flour");
+        percent_only
+            .values
             .insert("Ing Name 95".to_string(), "   ".to_string());
-        let mut explicit_amount_only = pluing_row("2", "1", "");
-        explicit_amount_only
+        percent_only
             .values
             .insert("Calcium".to_string(), "17".to_string());
         let profile = bigway_profile();
@@ -2162,28 +2207,110 @@ mod tests {
                 pludata_row("1", "1", "Bread"),
                 pludata_row("2", "1", "Milk"),
             ],
-            ingredient_rows: vec![percent_only, amount_only],
-            nutrition_rows: vec![explicit_amount_only],
+            ingredient_rows: vec![amount_only, percent_only],
+            nutrition_rows: Vec::new(),
         };
 
         let report =
             normalize_dataset_with_profile(&dataset, &MappingConfig::default(), 1, Some(&profile))
                 .expect("normalize");
-        let percent_only_calcium = report.plus[0]
-            .nutrition_facts
-            .iter()
-            .find(|fact| fact.name.eq_ignore_ascii_case("calcium"))
-            .expect("percent-only calcium");
-        let amount_only_calcium = report.plus[1]
+        let amount_only_calcium = report.plus[0]
             .nutrition_facts
             .iter()
             .find(|fact| fact.name.eq_ignore_ascii_case("calcium"))
             .expect("amount-only calcium");
+        let percent_only_calcium = report.plus[1]
+            .nutrition_facts
+            .iter()
+            .find(|fact| fact.name.eq_ignore_ascii_case("calcium"))
+            .expect("percent-only calcium");
 
-        assert_eq!(percent_only_calcium.amount, None);
-        assert_eq!(percent_only_calcium.unit.as_deref(), Some("17"));
         assert_eq!(amount_only_calcium.amount.as_deref(), Some("17"));
         assert_eq!(amount_only_calcium.unit, None);
+        assert_eq!(percent_only_calcium.amount, None);
+        assert_eq!(percent_only_calcium.unit.as_deref(), Some("17"));
+    }
+
+    #[test]
+    fn bigway_iron_amount_and_percent_serialize_as_one_nft_row() {
+        let mut pluing = pluing_row("1", "1", "Flour");
+        pluing.values.insert("Iron".to_string(), "0031".to_string());
+        pluing
+            .values
+            .insert("Ing Name 96".to_string(), "5.5".to_string());
+        let profile = bigway_profile();
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("1", "1", "Bread")],
+            ingredient_rows: vec![pluing],
+            nutrition_rows: Vec::new(),
+        };
+
+        let report =
+            normalize_dataset_with_profile(&dataset, &MappingConfig::default(), 1, Some(&profile))
+                .expect("normalize");
+        let payload = crate::digiweb::payload::DigiwebPluPayload::from_plu(
+            &report.plus[0],
+            &crate::config::DigiwebConfig::default(),
+        )
+        .expect("payload");
+        let iron_rows = payload
+            .plunft
+            .expect("nft")
+            .data
+            .into_iter()
+            .filter(|fact| fact.name.eq_ignore_ascii_case("iron"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(iron_rows.len(), 1);
+        assert_eq!(iron_rows[0].data1.as_deref(), Some("31"));
+        assert_eq!(iron_rows[0].data2.as_deref(), Some("5.5"));
+        assert_eq!(report.plus[0].ingredients.as_deref(), Some("Flour"));
+    }
+
+    #[test]
+    fn bigway_iron_blank_roles_are_omitted_independently() {
+        let mut amount_only = pluing_row("1", "1", "Flour");
+        amount_only
+            .values
+            .insert("Iron".to_string(), "0031".to_string());
+        amount_only
+            .values
+            .insert("Ing Name 96".to_string(), "   ".to_string());
+        let mut percent_only = pluing_row("2", "1", "Flour");
+        percent_only
+            .values
+            .insert("Iron".to_string(), "   ".to_string());
+        percent_only
+            .values
+            .insert("Ing Name 96".to_string(), "5.5".to_string());
+        let profile = bigway_profile();
+        let dataset = SourceDataset {
+            plu_rows: vec![
+                pludata_row("1", "1", "Bread"),
+                pludata_row("2", "1", "Milk"),
+            ],
+            ingredient_rows: vec![amount_only, percent_only],
+            nutrition_rows: Vec::new(),
+        };
+
+        let report =
+            normalize_dataset_with_profile(&dataset, &MappingConfig::default(), 1, Some(&profile))
+                .expect("normalize");
+        let amount_only_iron = report.plus[0]
+            .nutrition_facts
+            .iter()
+            .find(|fact| fact.name.eq_ignore_ascii_case("iron"))
+            .expect("amount-only iron");
+        let percent_only_iron = report.plus[1]
+            .nutrition_facts
+            .iter()
+            .find(|fact| fact.name.eq_ignore_ascii_case("iron"))
+            .expect("percent-only iron");
+
+        assert_eq!(amount_only_iron.amount.as_deref(), Some("31"));
+        assert_eq!(amount_only_iron.unit, None);
+        assert_eq!(percent_only_iron.amount, None);
+        assert_eq!(percent_only_iron.unit.as_deref(), Some("5.5"));
     }
 
     #[test]

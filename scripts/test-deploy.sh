@@ -372,6 +372,53 @@ test_non_usage_exit_without_log_still_warns_as_missing_log() {
     assert_contains "$output" "Importer did not create logs.txt"
 }
 
+test_launcher_allocates_tty_only_for_interactive_stdout() {
+    local deploy_dir="$TEST_ROOT/deploy-tty"
+    local output="$TEST_ROOT/output-tty.txt"
+    local fake_dir="$TEST_ROOT/fake-bin"
+    copy_deploy "$deploy_dir"
+    mkdir -p "$fake_dir"
+    make_fake_docker "$fake_dir/docker"
+
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-tty-interactive.log" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" version >"$output" 2>&1
+    assert_contains "$TEST_ROOT/fake-tty-interactive.log" "--tty"
+
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-tty-redirected.log" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" version >"$output" 2>&1
+    assert_not_contains "$TEST_ROOT/fake-tty-redirected.log" "--tty"
+
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-tty-piped.log" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" version | cat >"$output"
+    assert_not_contains "$TEST_ROOT/fake-tty-piped.log" "--tty"
+}
+
+test_launcher_allocates_interactive_stdin_independently() {
+    local deploy_dir="$TEST_ROOT/deploy-stdin"
+    local output="$TEST_ROOT/output-stdin.txt"
+    local fake_dir="$TEST_ROOT/fake-bin"
+    copy_deploy "$deploy_dir"
+    mkdir -p "$fake_dir"
+    make_fake_docker "$fake_dir/docker"
+
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-interactive.log" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDIN_TTY=1 \
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" confirm all --profile bigway >"$output" 2>&1
+    assert_contains "$TEST_ROOT/fake-stdin-interactive.log" "--interactive"
+    assert_not_contains "$TEST_ROOT/fake-stdin-interactive.log" "--tty"
+
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-yes.log" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" confirm all --profile bigway --yes \
+        </dev/null >"$output" 2>&1
+    assert_contains "$TEST_ROOT/fake-stdin-yes.log" "confirm all --profile bigway --yes"
+    assert_not_contains "$TEST_ROOT/fake-stdin-yes.log" "--interactive"
+    assert_not_contains "$TEST_ROOT/fake-stdin-yes.log" "--tty"
+}
+
 test_package_archive_contains_expected_files_only() {
     local archive
     archive="$(TO_DIGI_RS_VERSION=0.9.0-rc.1 TO_DIGI_RS_PACKAGE_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1 "$ROOT_DIR/scripts/package-deploy.sh")"
@@ -432,6 +479,8 @@ test_doctor_checks_image_and_never_imports_data
 test_wrappers_forward_to_to_digi
 test_cli_parse_error_without_log_is_not_warned_as_missing_log
 test_non_usage_exit_without_log_still_warns_as_missing_log
+test_launcher_allocates_tty_only_for_interactive_stdout
+test_launcher_allocates_interactive_stdin_independently
 test_package_archive_contains_expected_files_only
 test_publish_workflow_supports_release_candidates
 test_launcher_does_not_print_secrets

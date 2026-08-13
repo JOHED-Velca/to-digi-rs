@@ -1010,6 +1010,15 @@ fn render_interactive_progress_with_options(
         filled_char.repeat(filled),
         empty_char.repeat(bar_width - filled)
     );
+    if terminal_width < 64 {
+        return format!(
+            "Importing [{bar}] {:.0}% {}/{} | {:.1}/s",
+            snapshot.percent(),
+            snapshot.completed,
+            snapshot.selected,
+            snapshot.rate_per_second(),
+        );
+    }
     let unknown_segment = if snapshot.unknown > 0 {
         format!(" | ? {}", snapshot.unknown)
     } else {
@@ -2017,6 +2026,39 @@ mod tests {
         assert!(line.contains("[#########---]"));
         assert!(line.contains("| ? 2"));
         assert!(line.contains("75.0% 3/4"));
+    }
+
+    #[test]
+    fn noninteractive_progress_has_no_redraw_control_sequences() {
+        let manifest = progress_manifest(&[RecordStatus::Success, RecordStatus::NotAttempted]);
+        let snapshot = progress_snapshot(&manifest, 1, Duration::from_secs(2));
+
+        let line = render_noninteractive_progress(&snapshot);
+
+        assert!(line.starts_with("PROGRESS "));
+        assert!(!line.contains('\r'));
+        assert!(!line.contains('\n'));
+        assert!(!line.contains('\x1b'));
+    }
+
+    #[test]
+    fn narrow_interactive_progress_uses_compact_single_line() {
+        let manifest = progress_manifest(&[
+            RecordStatus::Success,
+            RecordStatus::Success,
+            RecordStatus::NotAttempted,
+            RecordStatus::NotAttempted,
+        ]);
+        let snapshot = progress_snapshot(&manifest, 2, Duration::from_secs(4));
+
+        let line = render_interactive_progress_with_options(&snapshot, 50, false);
+
+        assert!(line.starts_with("Importing ["));
+        assert!(line.contains("50% 2/4"));
+        assert!(line.contains("0.5/s"));
+        assert!(!line.contains('\n'));
+        assert!(!line.contains('\x1b'));
+        assert!(line.len() <= 50);
     }
 
     #[test]

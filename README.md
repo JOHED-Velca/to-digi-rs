@@ -181,9 +181,10 @@ Starsky rules fill empty Department with `1`, empty Barcode with the normalized 
 Bigway remaps customer-specific `PluIng` fields into nutrition facts and suppresses those reused fields from ingredient text:
 
 ```text
-Calcium     -> Calcium amount
-Ing Name 95 -> Calcium percent
-Ing Name 96 -> Iron amount
+Ing Name 95 -> Calcium amount
+Calcium     -> Calcium percent
+Iron        -> Iron amount
+Ing Name 96 -> Iron percent
 Ing Name 97 -> Sugar amount
 Ing Name 98 -> Potassium amount
 Ing Name 99 -> Potassium percent
@@ -218,7 +219,7 @@ Existing full `v0.8.0` configuration files remain compatible. Defaults are suppl
 
 `[import].max_in_flight` controls how many submitted DIGIweb requests may be active at once. Higher values can improve full-import speed but put more load on DIGIweb; lower values are more conservative. Set `max_in_flight = 1` to reproduce the original sequential submit-then-poll behavior.
 
-During live imports, interactive terminals show one updating progress bar:
+During live imports, interactive terminals show one updating progress bar. The packaged `./to-digi` launcher conditionally gives Docker a pseudo-TTY only when the host stdout is a TTY, so direct SSH terminal runs redraw one line while redirected or piped runs stay log-friendly:
 
 ```text
 Importing [██████████████████░░░░░░░░░░] 73.7% 2541/3447 | ok 2541 | fail 0 | active 6 | 11.5/s | 03:41 | ETA 01:18

@@ -1924,18 +1924,52 @@ mod tests {
         detail_plu
             .nutrition_remaps
             .push(crate::models::nutrition::NutritionRemapDetail {
-                source_field: "Ing Name 96".to_string(),
+                source_field: "Ing Name 95".to_string(),
+                nutrient: "Calcium".to_string(),
+                value_role: "amount".to_string(),
+                effective_value: "550".to_string(),
+                suppressed_from_ingredients: true,
+            });
+        detail_plu
+            .nutrition_remaps
+            .push(crate::models::nutrition::NutritionRemapDetail {
+                source_field: "Calcium".to_string(),
+                nutrient: "Calcium".to_string(),
+                value_role: "percent".to_string(),
+                effective_value: "42".to_string(),
+                suppressed_from_ingredients: false,
+            });
+        detail_plu
+            .nutrition_remaps
+            .push(crate::models::nutrition::NutritionRemapDetail {
+                source_field: "Iron".to_string(),
                 nutrient: "Iron".to_string(),
                 value_role: "amount".to_string(),
-                effective_value: "12".to_string(),
+                effective_value: "31".to_string(),
+                suppressed_from_ingredients: false,
+            });
+        detail_plu
+            .nutrition_remaps
+            .push(crate::models::nutrition::NutritionRemapDetail {
+                source_field: "Ing Name 96".to_string(),
+                nutrient: "Iron".to_string(),
+                value_role: "percent".to_string(),
+                effective_value: "5.5".to_string(),
                 suppressed_from_ingredients: true,
             });
         detail_plu
             .nutrition_facts
             .push(crate::models::nutrition::NutritionFact {
+                name: "Calcium".to_string(),
+                amount: Some("550".to_string()),
+                unit: Some("42".to_string()),
+            });
+        detail_plu
+            .nutrition_facts
+            .push(crate::models::nutrition::NutritionFact {
                 name: "Iron".to_string(),
-                amount: Some("12".to_string()),
-                unit: None,
+                amount: Some("31".to_string()),
+                unit: Some("5.5".to_string()),
             });
         let dataset = source_dataset(vec![("18", "0001", "PLU 18", "0200018")]);
         let validation_report = validate_plus(&[detail_plu.clone()]);
@@ -1951,10 +1985,16 @@ mod tests {
         let text = render_diagnostics_text(&filtered);
 
         assert!(text.contains("Nutrition profile: bigway"));
-        assert!(text.contains("Ing Name 96 -> Iron amount = 12"));
+        assert!(text.contains("Ing Name 95 -> Calcium amount = 550"));
+        assert!(text.contains("Calcium -> Calcium percent = 42"));
+        assert!(text.contains("Iron -> Iron amount = 31"));
+        assert!(text.contains("Ing Name 96 -> Iron percent = 5.5"));
+        assert!(!text.contains("Ing Name 95 -> Calcium percent"));
+        assert!(!text.contains("Ing Name 96 -> Iron amount"));
         assert!(text.contains("suppress ingredient: YES"));
         assert!(text.contains("Effective nutrition facts:"));
-        assert!(text.contains("Iron amount=12 percent=none"));
+        assert!(text.contains("Calcium amount=550 percent=42"));
+        assert!(text.contains("Iron amount=31 percent=5.5"));
     }
 
     #[test]

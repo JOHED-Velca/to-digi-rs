@@ -1,6 +1,6 @@
 profile_version = 1
 profile_name = "bigway"
-description = "Bigway DCA nutrition remapping. Ing Name 95..99 carry customer-specific nutrition values, not ingredient text."
+description = "Bigway DCA nutrition remapping. Ing Name 95..99 plus explicit Calcium/Iron columns carry customer-specific nutrition values."
 
 [safety]
 fill_empty_only = true
@@ -10,13 +10,25 @@ reject_invalid_results = true
 [[nutrition_remap]]
 source_field = "Ing Name 95"
 nutrient = "Calcium"
-value_role = "percent"
+value_role = "amount"
 suppress_from_ingredients = true
+
+[[nutrition_remap]]
+source_field = "Calcium"
+nutrient = "Calcium"
+value_role = "percent"
+suppress_from_ingredients = false
+
+[[nutrition_remap]]
+source_field = "Iron"
+nutrient = "Iron"
+value_role = "amount"
+suppress_from_ingredients = false
 
 [[nutrition_remap]]
 source_field = "Ing Name 96"
 nutrient = "Iron"
-value_role = "amount"
+value_role = "percent"
 suppress_from_ingredients = true
 
 [[nutrition_remap]]
