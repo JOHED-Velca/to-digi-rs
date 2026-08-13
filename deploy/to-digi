@@ -67,7 +67,7 @@ command_label() {
             fi
             ;;
         resume) printf 'resume\n' ;;
-        analyze|diagnose|discover|dry-run|map-audit|profile|sanitize|verify|test-connection|doctor|pull|init|version) printf '%s\n' "$1" ;;
+        analyze|confirm|diagnose|discover|dry-run|map-audit|profile|sanitize|verify|test-connection|doctor|pull|init|version) printf '%s\n' "$1" ;;
         --help|-h|--version|-V) printf 'info\n' ;;
         *) printf 'cli\n' ;;
     esac
@@ -121,14 +121,14 @@ resume_arg_value() {
 
 needs_config() {
     case "${1:-import}" in
-        import|resume|verify|test-connection|doctor) return 0 ;;
+        import|resume|confirm|verify|test-connection|doctor) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 needs_source_mdb() {
     case "${1:-import}" in
-        import|resume|analyze|diagnose|discover|dry-run|map-audit|profile|verify|sanitize|doctor) return 0 ;;
+        import|resume|analyze|confirm|diagnose|discover|dry-run|map-audit|profile|verify|sanitize|doctor) return 0 ;;
         *) return 1 ;;
     esac
 }

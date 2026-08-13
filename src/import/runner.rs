@@ -993,20 +993,37 @@ fn progress_snapshot(
 }
 
 fn render_interactive_progress(snapshot: &ProgressSnapshot) -> String {
-    let width = 20usize;
-    let filled = ((snapshot.percent() / 100.0) * width as f64).round() as usize;
-    let filled = filled.min(width);
-    let bar = format!("{}{}", "#".repeat(filled), "-".repeat(width - filled));
+    render_interactive_progress_with_options(snapshot, terminal_width(), unicode_progress_enabled())
+}
+
+fn render_interactive_progress_with_options(
+    snapshot: &ProgressSnapshot,
+    terminal_width: usize,
+    unicode: bool,
+) -> String {
+    let bar_width = terminal_width.saturating_sub(96).clamp(12, 32);
+    let filled = ((snapshot.percent() / 100.0) * bar_width as f64).round() as usize;
+    let filled = filled.min(bar_width);
+    let (filled_char, empty_char) = if unicode { ("█", "░") } else { ("#", "-") };
+    let bar = format!(
+        "{}{}",
+        filled_char.repeat(filled),
+        empty_char.repeat(bar_width - filled)
+    );
+    let unknown_segment = if snapshot.unknown > 0 {
+        format!(" | ? {}", snapshot.unknown)
+    } else {
+        String::new()
+    };
     format!(
-        "Importing [{bar}] {}/{} {:.1}% | ok {} | fail {} | unknown {} | active {} | remaining {} | {:.1} PLU/s | elapsed {} | ETA {}",
+        "Importing [{bar}] {:.1}% {}/{} | ok {} | fail {}{} | active {} | {:.1}/s | {} | ETA {}",
+        snapshot.percent(),
         snapshot.completed,
         snapshot.selected,
-        snapshot.percent(),
         snapshot.success,
         snapshot.failed,
-        snapshot.unknown,
+        unknown_segment,
         snapshot.active,
-        snapshot.remaining,
         snapshot.rate_per_second(),
         format_duration(snapshot.elapsed),
         snapshot
@@ -1014,6 +1031,20 @@ fn render_interactive_progress(snapshot: &ProgressSnapshot) -> String {
             .map(format_duration)
             .unwrap_or_else(|| "--:--".to_string())
     )
+}
+
+fn terminal_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value >= 40)
+        .unwrap_or(100)
+}
+
+fn unicode_progress_enabled() -> bool {
+    !std::env::var("TO_DIGI_RS_ASCII_PROGRESS")
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
 }
 
 fn render_noninteractive_progress(snapshot: &ProgressSnapshot) -> String {
@@ -1941,12 +1972,51 @@ mod tests {
         let manifest = progress_manifest(&[RecordStatus::Success, RecordStatus::Success]);
         let snapshot = progress_snapshot(&manifest, 0, Duration::from_secs(1));
 
-        let line = render_interactive_progress(&snapshot);
+        let line = render_interactive_progress_with_options(&snapshot, 100, false);
 
-        assert!(line.contains("2/2 100.0%"));
+        assert!(line.contains("[############]"));
+        assert!(line.contains("100.0% 2/2"));
         assert!(line.contains("active 0"));
-        assert!(line.contains("remaining 0"));
         assert!(line.contains("ETA --:--"));
+    }
+
+    #[test]
+    fn interactive_progress_uses_bar_style_and_omits_zero_unknown_noise() {
+        let manifest = progress_manifest(&[
+            RecordStatus::Success,
+            RecordStatus::Success,
+            RecordStatus::NotAttempted,
+            RecordStatus::NotAttempted,
+        ]);
+        let snapshot = progress_snapshot(&manifest, 2, Duration::from_secs(4));
+
+        let line = render_interactive_progress_with_options(&snapshot, 80, true);
+
+        assert!(line.starts_with("Importing ["));
+        assert!(line.contains("50.0% 2/4"));
+        assert!(line.contains("ok 2"));
+        assert!(line.contains("fail 0"));
+        assert!(!line.contains("| ? 0"));
+        assert!(line.contains("active 2"));
+        assert!(line.contains("0.5/s"));
+        assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn interactive_progress_shows_unknown_when_present_and_ascii_fallback() {
+        let manifest = progress_manifest(&[
+            RecordStatus::Success,
+            RecordStatus::UnknownStatus,
+            RecordStatus::AmbiguousSubmission,
+            RecordStatus::NotAttempted,
+        ]);
+        let snapshot = progress_snapshot(&manifest, 1, Duration::from_secs(2));
+
+        let line = render_interactive_progress_with_options(&snapshot, 72, false);
+
+        assert!(line.contains("[#########---]"));
+        assert!(line.contains("| ? 2"));
+        assert!(line.contains("75.0% 3/4"));
     }
 
     #[test]

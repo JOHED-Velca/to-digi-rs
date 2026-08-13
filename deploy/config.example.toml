@@ -27,7 +27,8 @@ max_in_flight = 16
 default = ""
 
 [verification]
-# Fill these only after an operator independently confirms the objects exist in DIGIweb.
+# Fill these only after an operator independently confirms the objects exist in DIGIweb,
+# preferably with: ./to-digi confirm all --profile bigway
 # Do not copy values from the MDB without checking the server setup.
 confirmed_departments = []
 confirmed_groups = []

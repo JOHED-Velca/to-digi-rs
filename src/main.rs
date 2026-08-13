@@ -1,6 +1,7 @@
 mod analysis;
 mod cli;
 mod config;
+mod confirm;
 mod deployment;
 mod diagnostics;
 mod digiweb;
@@ -18,6 +19,7 @@ mod source;
 mod validation;
 
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -26,8 +28,12 @@ use analysis::{
     AnalysisInput, collect_analysis, render_console_summary, write_json_report, write_text_report,
 };
 use clap::Parser;
-use cli::{Cli, CliCommand, EffectiveCommand, ProfileSelection, effective_command};
+use cli::{Cli, CliCommand, ConfirmTarget, EffectiveCommand, ProfileSelection, effective_command};
 use config::{AppConfig, client_secret_log_message, load_client_secret};
+use confirm::{
+    ConfirmationPlan, apply_confirmation_to_config_text, render_confirmation_preview,
+    write_confirmed_config,
+};
 use deployment::{run_doctor, run_init};
 use diagnostics::{
     DiagnosticCategory, DiagnosticTiming, DiagnosticsInput, build_diagnostics_report,
@@ -115,6 +121,11 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
         AppConfig::load(config_path)?
     };
     let command = effective_command(cli, &config);
+    if matches!(command, EffectiveCommand::Confirm { .. }) && !config_exists {
+        return Err(AppError::Config(
+            "config.toml is required for the 'confirm' command".to_string(),
+        ));
+    }
     if matches!(
         command,
         EffectiveCommand::Analyze { .. }
@@ -133,6 +144,7 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
         EffectiveCommand::Analyze { .. }
             | EffectiveCommand::Discover { .. }
             | EffectiveCommand::Diagnose { .. }
+            | EffectiveCommand::Confirm { .. }
             | EffectiveCommand::DryRun { .. }
             | EffectiveCommand::Doctor { .. }
             | EffectiveCommand::MapAudit { .. }
@@ -156,6 +168,7 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
         EffectiveCommand::Analyze { .. }
             | EffectiveCommand::Discover { .. }
             | EffectiveCommand::Diagnose { .. }
+            | EffectiveCommand::Confirm { .. }
             | EffectiveCommand::DryRun { .. }
             | EffectiveCommand::MapAudit { .. }
             | EffectiveCommand::ProfileSuggest { .. }
@@ -188,7 +201,29 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
             invalid_only,
             plu,
             category,
-        } => run_diagnose(&config, logger, invalid_only, plu, category),
+            sanitize_profile,
+        } => run_diagnose(
+            &config,
+            logger,
+            invalid_only,
+            plu,
+            category,
+            sanitize_profile.as_ref(),
+        ),
+        EffectiveCommand::Confirm {
+            target,
+            sanitize_profile,
+            dry_run,
+            yes,
+        } => run_confirm(
+            &config,
+            logger,
+            target,
+            sanitize_profile.as_ref(),
+            dry_run,
+            yes,
+            Path::new("config.toml"),
+        ),
         EffectiveCommand::Doctor {
             pull,
             inside_container,
@@ -317,17 +352,38 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
             invalid_only,
             plu,
             category,
+            sanitize_profile,
         } => {
             logger.kv("Network access permitted", "no")?;
             logger.kv("Authentication attempted", "NO")?;
             logger.kv("DIGIweb API requests attempted", "NO")?;
             logger.kv("Source database modified", "NO")?;
+            if let Some(profile) = sanitize_profile {
+                logger.kv("Sanitization profile", &profile.display())?;
+            }
             logger.kv("Invalid only", if *invalid_only { "yes" } else { "no" })?;
             if let Some(plu) = plu {
                 logger.kv("PLU filter", &plu.to_string())?;
             }
             if let Some(category) = category {
                 logger.kv("Diagnostic category", category.as_str())?;
+            }
+        }
+        EffectiveCommand::Confirm {
+            target,
+            sanitize_profile,
+            dry_run,
+            yes,
+        } => {
+            logger.kv("Network access permitted", "no")?;
+            logger.kv("Authentication attempted", "NO")?;
+            logger.kv("DIGIweb API requests attempted", "NO")?;
+            logger.kv("Source database modified", "NO")?;
+            logger.kv("Confirmation target", confirm_target_name(*target))?;
+            logger.kv("Dry run", if *dry_run { "yes" } else { "no" })?;
+            logger.kv("Non-interactive yes", if *yes { "yes" } else { "no" })?;
+            if let Some(profile) = sanitize_profile {
+                logger.kv("Sanitization profile", &profile.display())?;
             }
         }
         EffectiveCommand::Doctor {
@@ -1114,6 +1170,7 @@ fn run_diagnose(
     invalid_only: bool,
     plu: Option<u64>,
     category: Option<DiagnosticCategory>,
+    sanitize_profile_path: Option<&ProfileSelection>,
 ) -> Result<i32, AppError> {
     println!("Starting PLU diagnostics...");
     println!(
@@ -1124,9 +1181,10 @@ fn run_diagnose(
     logger.line("Authentication attempted: NO")?;
     logger.line("DIGIweb API requests attempted: NO")?;
     logger.line("Source database modified: NO")?;
+    let profile = load_optional_sanitization_profile(sanitize_profile_path)?;
     let started_at = chrono::Local::now();
     let source_started = Instant::now();
-    let source = read_source_context(config, logger, None, true)?;
+    let source = read_source_context(config, logger, profile, true)?;
     let finished_at = chrono::Local::now();
     let report = build_diagnostics_report(DiagnosticsInput {
         source_path: FIXED_SOURCE_FILE,
@@ -1915,6 +1973,114 @@ async fn run_verify(
     Ok(0)
 }
 
+fn run_confirm(
+    config: &AppConfig,
+    logger: &mut AuditLogger,
+    target: ConfirmTarget,
+    sanitize_profile_path: Option<&ProfileSelection>,
+    dry_run: bool,
+    yes: bool,
+    config_path: &Path,
+) -> Result<i32, AppError> {
+    println!("Starting reference confirmation...");
+    println!("No DIGIweb server lookup will be performed.");
+    logger.line("REFERENCE CONFIRMATION")?;
+    logger.line("Network access permitted: NO")?;
+    logger.line("Authentication attempted: NO")?;
+    logger.line("DIGIweb API requests attempted: NO")?;
+    logger.line("Source database modified: NO")?;
+    logger.kv("Confirmation target", confirm_target_name(target))?;
+    let profile = load_optional_sanitization_profile(sanitize_profile_path)?;
+    let profile_label = sanitize_profile_path
+        .map(ProfileSelection::display)
+        .unwrap_or_else(|| "none".to_string());
+    let source = read_source_context(config, logger, profile, false)?;
+    let excluded_count = excluded_plu_numbers(&source).len();
+    let readiness =
+        evaluate_reference_readiness(&source.valid_plus, &config.verification, excluded_count)?;
+    let plan = ConfirmationPlan::from_readiness(
+        profile_label,
+        source.valid_plus.len(),
+        target,
+        &readiness,
+    );
+    let preview = render_confirmation_preview(&plan, dry_run);
+    print!("{preview}");
+    logger.line("No DIGIweb server lookup has been performed.")?;
+    logger.kv(
+        "Departments to add",
+        &plan.additions.departments.len().to_string(),
+    )?;
+    logger.kv("Groups to add", &plan.additions.groups.len().to_string())?;
+    logger.kv(
+        "Label formats to add",
+        &plan.additions.label_formats.len().to_string(),
+    )?;
+
+    if dry_run {
+        logger.line("Dry-run confirmation preview complete; config.toml was not changed.")?;
+        println!("Final status: CONFIRM_DRY_RUN");
+        return Ok(0);
+    }
+    if plan.additions.is_empty() {
+        logger.line("No new confirmations were required; config.toml was not changed.")?;
+        println!("No new confirmations are required.");
+        println!("Final status: CONFIRM_NO_CHANGE");
+        return Ok(0);
+    }
+    if !yes {
+        print!("Have you independently confirmed these objects exist in DIGIweb? [y/N]: ");
+        io::stdout().flush().map_err(|err| {
+            AppError::Logging(format!("failed to flush confirmation prompt: {err}"))
+        })?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer).map_err(|err| {
+            AppError::Config(format!("failed to read confirmation answer: {err}"))
+        })?;
+        if !operator_answer_is_affirmative(&answer) {
+            logger.line("Operator did not confirm; config.toml was not changed.")?;
+            println!("No changes made.");
+            println!("Final status: CONFIRM_CANCELLED");
+            return Ok(1);
+        }
+    }
+
+    let current_text = fs::read_to_string(config_path).map_err(|err| {
+        AppError::Config(format!(
+            "failed to read config '{}': {err}",
+            config_path.display()
+        ))
+    })?;
+    let updated_text = apply_confirmation_to_config_text(&current_text, &plan.additions)?;
+    if updated_text == current_text {
+        logger.line("Updated config matched existing config; no write was required.")?;
+        println!("No changes made.");
+        println!("Final status: CONFIRM_NO_CHANGE");
+        return Ok(0);
+    }
+    let backup = write_confirmed_config(config_path, &updated_text)?;
+    logger.kv("Updated config", &config_path.display().to_string())?;
+    logger.kv("Config backup", &backup.display().to_string())?;
+    logger.line("Operator-confirmed references were written to config.toml.")?;
+    println!("Updated config.toml");
+    println!("Backup: {}", backup.display());
+    println!("Final status: CONFIRM_UPDATED");
+    Ok(0)
+}
+
+fn operator_answer_is_affirmative(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+fn confirm_target_name(target: ConfirmTarget) -> &'static str {
+    match target {
+        ConfirmTarget::Departments => "departments",
+        ConfirmTarget::Groups => "groups",
+        ConfirmTarget::LabelFormats => "label-formats",
+        ConfirmTarget::All => "all",
+    }
+}
+
 struct VerifyReportInput<'a> {
     source: &'a SourceContext,
     config: &'a AppConfig,
@@ -2582,6 +2748,16 @@ mod tests {
             final_readiness_result(AuthenticationReadinessStatus::Failed, &readiness),
             ReadinessResult::NotReady
         );
+    }
+
+    #[test]
+    fn confirmation_prompt_default_no_is_not_affirmative() {
+        for answer in ["", "\n", "n", "no", "maybe"] {
+            assert!(!operator_answer_is_affirmative(answer));
+        }
+        for answer in ["y", "Y", "yes", "YES\n"] {
+            assert!(operator_answer_is_affirmative(answer));
+        }
     }
 
     #[test]

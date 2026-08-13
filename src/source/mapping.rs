@@ -1107,6 +1107,12 @@ mod tests {
             selling_date_term: None,
             nutrition_remap: vec![
                 NutritionRemapRule {
+                    source_field: "Ing Name 95".to_string(),
+                    nutrient: "Calcium".to_string(),
+                    value_role: NutritionValueRole::Percent,
+                    suppress_from_ingredients: true,
+                },
+                NutritionRemapRule {
                     source_field: "Ing Name 96".to_string(),
                     nutrient: "Iron".to_string(),
                     value_role: NutritionValueRole::Amount,
@@ -1936,11 +1942,40 @@ mod tests {
     }
 
     #[test]
+    fn generic_mode_keeps_ing_name_95_as_ingredient_and_calcium_column_as_amount() {
+        let mut pluing = pluing_row("1", "1", "Flour");
+        pluing
+            .values
+            .insert("Ing Name 95".to_string(), "10".to_string());
+        let mut explicit = pluing_row("1", "1", "");
+        explicit
+            .values
+            .insert("Calcium".to_string(), "1".to_string());
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("1", "1", "Bread")],
+            ingredient_rows: vec![pluing],
+            nutrition_rows: vec![explicit],
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let plu = &report.plus[0];
+        let calcium = plu
+            .nutrition_facts
+            .iter()
+            .find(|fact| fact.name.eq_ignore_ascii_case("calcium"))
+            .expect("calcium");
+
+        assert_eq!(plu.ingredients.as_deref(), Some("Flour 10"));
+        assert_eq!(calcium.amount.as_deref(), Some("1"));
+        assert_eq!(calcium.unit, None);
+    }
+
+    #[test]
     fn bigway_profile_remaps_and_suppresses_customer_nutrition_fields() {
         let mut pluing = pluing_row("1", "1", "Flour");
         pluing
             .values
-            .insert("Ing Name 95".to_string(), "Maybe calcium".to_string());
+            .insert("Ing Name 95".to_string(), "0010".to_string());
         pluing
             .values
             .insert("Ing Name 96".to_string(), "0008".to_string());
@@ -1965,9 +2000,12 @@ mod tests {
                 .expect("normalize");
         let plu = &report.plus[0];
 
-        assert_eq!(plu.ingredients.as_deref(), Some("Flour Maybe calcium"));
+        assert_eq!(plu.ingredients.as_deref(), Some("Flour"));
         assert_eq!(plu.nutrition_profile.as_deref(), Some("bigway"));
-        assert_eq!(plu.nutrition_remaps.len(), 4);
+        assert_eq!(plu.nutrition_remaps.len(), 5);
+        assert!(plu.nutrition_facts.iter().any(|fact| {
+            fact.name == "Calcium" && fact.amount.is_none() && fact.unit.as_deref() == Some("10")
+        }));
         assert!(plu.nutrition_facts.iter().any(|fact| {
             fact.name == "Iron" && fact.amount.as_deref() == Some("8") && fact.unit.is_none()
         }));
@@ -1986,20 +2024,21 @@ mod tests {
                 .count(),
             1
         );
-        assert!(
-            !plu.nutrition_facts
+        assert_eq!(
+            plu.nutrition_facts
                 .iter()
-                .any(|fact| fact.name.eq_ignore_ascii_case("calcium"))
+                .filter(|fact| fact.name.eq_ignore_ascii_case("calcium"))
+                .count(),
+            1
         );
     }
 
     #[test]
     fn bigway_profile_merges_with_explicit_nutrition_without_duplicate_rows() {
         let mut pluing = pluing_row("1", "1", "Flour");
-        pluing.values.insert(
-            "Ing Name 95".to_string(),
-            "Calcium percent text".to_string(),
-        );
+        pluing
+            .values
+            .insert("Ing Name 95".to_string(), "0017".to_string());
         pluing
             .values
             .insert("Ing Name 96".to_string(), "8".to_string());
@@ -2057,12 +2096,94 @@ mod tests {
                 && fact.unit.as_deref() == Some("9")
         }));
         assert!(plu.nutrition_facts.iter().any(|fact| {
-            fact.name.eq_ignore_ascii_case("calcium") && fact.amount.as_deref() == Some("33")
+            fact.name.eq_ignore_ascii_case("calcium")
+                && fact.amount.as_deref() == Some("33")
+                && fact.unit.as_deref() == Some("17")
         }));
-        assert_eq!(
-            plu.ingredients.as_deref(),
-            Some("Flour Calcium percent text")
-        );
+        assert_eq!(plu.ingredients.as_deref(), Some("Flour"));
+    }
+
+    #[test]
+    fn bigway_calcium_amount_and_percent_serialize_as_one_nft_row() {
+        let mut pluing = pluing_row("1", "1", "Flour");
+        pluing
+            .values
+            .insert("Ing Name 95".to_string(), "10".to_string());
+        let mut explicit = pluing_row("1", "1", "");
+        explicit
+            .values
+            .insert("Calcium".to_string(), "1".to_string());
+        let profile = bigway_profile();
+        let dataset = SourceDataset {
+            plu_rows: vec![pludata_row("1", "1", "Bread")],
+            ingredient_rows: vec![pluing],
+            nutrition_rows: vec![explicit],
+        };
+
+        let report =
+            normalize_dataset_with_profile(&dataset, &MappingConfig::default(), 1, Some(&profile))
+                .expect("normalize");
+        let payload = crate::digiweb::payload::DigiwebPluPayload::from_plu(
+            &report.plus[0],
+            &crate::config::DigiwebConfig::default(),
+        )
+        .expect("payload");
+        let calcium_rows = payload
+            .plunft
+            .expect("nft")
+            .data
+            .into_iter()
+            .filter(|fact| fact.name.eq_ignore_ascii_case("calcium"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(calcium_rows.len(), 1);
+        assert_eq!(calcium_rows[0].data1.as_deref(), Some("1"));
+        assert_eq!(calcium_rows[0].data2.as_deref(), Some("10"));
+        assert_eq!(report.plus[0].ingredients.as_deref(), Some("Flour"));
+    }
+
+    #[test]
+    fn bigway_calcium_blank_roles_are_omitted_independently() {
+        let mut percent_only = pluing_row("1", "1", "Flour");
+        percent_only
+            .values
+            .insert("Ing Name 95".to_string(), "0017".to_string());
+        let mut amount_only = pluing_row("2", "1", "Flour");
+        amount_only
+            .values
+            .insert("Ing Name 95".to_string(), "   ".to_string());
+        let mut explicit_amount_only = pluing_row("2", "1", "");
+        explicit_amount_only
+            .values
+            .insert("Calcium".to_string(), "17".to_string());
+        let profile = bigway_profile();
+        let dataset = SourceDataset {
+            plu_rows: vec![
+                pludata_row("1", "1", "Bread"),
+                pludata_row("2", "1", "Milk"),
+            ],
+            ingredient_rows: vec![percent_only, amount_only],
+            nutrition_rows: vec![explicit_amount_only],
+        };
+
+        let report =
+            normalize_dataset_with_profile(&dataset, &MappingConfig::default(), 1, Some(&profile))
+                .expect("normalize");
+        let percent_only_calcium = report.plus[0]
+            .nutrition_facts
+            .iter()
+            .find(|fact| fact.name.eq_ignore_ascii_case("calcium"))
+            .expect("percent-only calcium");
+        let amount_only_calcium = report.plus[1]
+            .nutrition_facts
+            .iter()
+            .find(|fact| fact.name.eq_ignore_ascii_case("calcium"))
+            .expect("amount-only calcium");
+
+        assert_eq!(percent_only_calcium.amount, None);
+        assert_eq!(percent_only_calcium.unit.as_deref(), Some("17"));
+        assert_eq!(amount_only_calcium.amount.as_deref(), Some("17"));
+        assert_eq!(amount_only_calcium.unit, None);
     }
 
     #[test]

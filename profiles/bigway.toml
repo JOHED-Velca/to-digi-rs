@@ -1,11 +1,17 @@
 profile_version = 1
 profile_name = "bigway"
-description = "Bigway DCA nutrition remapping. Calcium / Ing Name 95 is intentionally not mapped because its source semantics are ambiguous."
+description = "Bigway DCA nutrition remapping. Ing Name 95..99 carry customer-specific nutrition values, not ingredient text."
 
 [safety]
 fill_empty_only = true
 preserve_nonempty_values = true
 reject_invalid_results = true
+
+[[nutrition_remap]]
+source_field = "Ing Name 95"
+nutrient = "Calcium"
+value_role = "percent"
+suppress_from_ingredients = true
 
 [[nutrition_remap]]
 source_field = "Ing Name 96"

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::config::AppConfig;
 use crate::diagnostics::DiagnosticCategory;
@@ -16,6 +16,8 @@ pub struct Cli {
 pub enum CliCommand {
     /// Analyze plu.mdb without contacting DIGIweb
     Analyze(AnalyzeArgs),
+    /// Record operator-confirmed DIGIweb references in config.toml
+    Confirm(ConfirmArgs),
     /// Discover raw MDB structure and data quality without profile or network access
     Discover(DiscoverArgs),
     /// Diagnose exact invalid/skipped PLUs without contacting DIGIweb
@@ -77,6 +79,39 @@ pub struct DiagnoseArgs {
     /// Limit output to a diagnostic category
     #[arg(long, value_parser = parse_diagnostic_category)]
     pub category: Option<DiagnosticCategory>,
+    /// Apply a fill-only sanitization profile before diagnostics
+    #[arg(long, value_name = "PROFILE", conflicts_with = "profile")]
+    pub sanitize_profile: Option<PathBuf>,
+    /// Apply a built-in profile such as bigway before diagnostics
+    #[arg(long, value_name = "NAME", conflicts_with = "sanitize_profile")]
+    pub profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct ConfirmArgs {
+    /// Reference kind to confirm from the effective source/profile combination
+    #[arg(value_enum)]
+    pub target: ConfirmTarget,
+    /// Apply a fill-only sanitization profile before collecting references
+    #[arg(long, value_name = "PROFILE", conflicts_with = "profile")]
+    pub sanitize_profile: Option<PathBuf>,
+    /// Apply a built-in profile such as bigway before collecting references
+    #[arg(long, value_name = "NAME", conflicts_with = "sanitize_profile")]
+    pub profile: Option<String>,
+    /// Preview the config changes without writing config.toml
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Confirm non-interactively; required for unattended writes
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ConfirmTarget {
+    Departments,
+    Groups,
+    LabelFormats,
+    All,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
@@ -282,6 +317,13 @@ pub enum EffectiveCommand {
         invalid_only: bool,
         plu: Option<u64>,
         category: Option<DiagnosticCategory>,
+        sanitize_profile: Option<ProfileSelection>,
+    },
+    Confirm {
+        target: ConfirmTarget,
+        sanitize_profile: Option<ProfileSelection>,
+        dry_run: bool,
+        yes: bool,
     },
     Doctor {
         pull: bool,
@@ -332,6 +374,7 @@ impl EffectiveCommand {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Analyze { .. } => "analyze",
+            Self::Confirm { .. } => "confirm",
             Self::Discover { .. } => "discover",
             Self::Diagnose { .. } => "diagnose",
             Self::Doctor { .. } => "doctor",
@@ -352,7 +395,8 @@ impl EffectiveCommand {
         match self {
             Self::Analyze { legacy_used, .. } => *legacy_used,
             Self::Import { legacy_used, .. } => *legacy_used,
-            Self::Discover { .. }
+            Self::Confirm { .. }
+            | Self::Discover { .. }
             | Self::Diagnose { .. }
             | Self::Doctor { .. }
             | Self::DryRun { .. }
@@ -387,6 +431,23 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
             invalid_only: args.invalid_only,
             plu: args.plu,
             category: args.category,
+            sanitize_profile: resolve_optional_profile(
+                args.sanitize_profile.clone(),
+                args.profile.clone(),
+                false,
+                config,
+            ),
+        },
+        Some(CliCommand::Confirm(args)) => EffectiveCommand::Confirm {
+            target: args.target,
+            sanitize_profile: resolve_optional_profile(
+                args.sanitize_profile.clone(),
+                args.profile.clone(),
+                false,
+                config,
+            ),
+            dry_run: args.dry_run,
+            yes: args.yes,
         },
         Some(CliCommand::Doctor(args)) => EffectiveCommand::Doctor {
             pull: args.pull,
@@ -592,6 +653,10 @@ mod tests {
         assert!(matches!(
             parse(&["to-digi-rs", "analyze"]).command,
             Some(CliCommand::Analyze(_))
+        ));
+        assert!(matches!(
+            parse(&["to-digi-rs", "confirm", "all"]).command,
+            Some(CliCommand::Confirm(_))
         ));
         assert!(matches!(
             parse(&["to-digi-rs", "discover"]).command,
@@ -835,6 +900,7 @@ mod tests {
     fn help_includes_all_commands_and_version_is_current() {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("analyze"));
+        assert!(help.contains("confirm"));
         assert!(help.contains("discover"));
         assert!(help.contains("diagnose"));
         assert!(help.contains("doctor"));
@@ -991,6 +1057,52 @@ mod tests {
                     ..
                 } if name == profile
             ));
+            assert!(matches!(
+                effective_command(
+                    &parse(&["to-digi-rs", "diagnose", "--profile", profile, "--plu", "1"]),
+                    &AppConfig::default()
+                ),
+                EffectiveCommand::Diagnose {
+                    sanitize_profile: Some(ProfileSelection::BuiltIn(name)),
+                    plu: Some(1),
+                    ..
+                } if name == profile
+            ));
+            assert!(matches!(
+                effective_command(
+                    &parse(&["to-digi-rs", "confirm", "all", "--profile", profile, "--yes"]),
+                    &AppConfig::default()
+                ),
+                EffectiveCommand::Confirm {
+                    sanitize_profile: Some(ProfileSelection::BuiltIn(name)),
+                    target: ConfirmTarget::All,
+                    yes: true,
+                    ..
+                } if name == profile
+            ));
+        }
+    }
+
+    #[test]
+    fn confirm_targets_parse_with_safety_flags() {
+        for (target, expected) in [
+            ("departments", ConfirmTarget::Departments),
+            ("groups", ConfirmTarget::Groups),
+            ("label-formats", ConfirmTarget::LabelFormats),
+            ("all", ConfirmTarget::All),
+        ] {
+            assert!(matches!(
+                effective_command(
+                    &parse(&["to-digi-rs", "confirm", target, "--dry-run"]),
+                    &AppConfig::default()
+                ),
+                EffectiveCommand::Confirm {
+                    target,
+                    dry_run: true,
+                    yes: false,
+                    ..
+                } if target == expected
+            ));
         }
     }
 
@@ -1047,6 +1159,7 @@ mod tests {
                 invalid_only: false,
                 plu: None,
                 category: Some(DiagnosticCategory::DuplicateBarcode),
+                sanitize_profile: None,
             }
         );
         assert_eq!(

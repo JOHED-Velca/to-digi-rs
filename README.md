@@ -90,6 +90,7 @@ Then place the customer database in the same directory using the exact filename 
 ./to-digi verify [--profile starsky|bigway] [--sanitize-profile profiles/custom.toml]
 ./to-digi import [--limit N | --test | --plu PLU_NUMBER] [--dry-run] [--continue-on-error]
 ./to-digi import [--profile starsky|bigway] [--sanitize-profile profiles/custom.toml]
+./to-digi confirm all --profile bigway [--dry-run | --yes]
 ./to-digi resume output/run-YYYYMMDD-HHMMSS-import/import-results.json [--retry-failed]
 ./to-digi version
 ```
@@ -100,7 +101,7 @@ Then place the customer database in the same directory using the exact filename 
 
 - `discover` writes `discovery-report.txt/json` with raw MDB field-quality, department/group reference, setup, sanitization-candidate, and timing details.
 - `diagnose` writes `diagnostics-report.txt/json` with exact invalid/skipped PLUs, row-level missing required values, duplicate effective barcodes, and required label formats.
-- `diagnose --plu N` also reports useful local details for valid PLUs, including raw/effective Label Format, required references, derived barcode, ingredient/NFT counts, and payload destination summary.
+- `diagnose --profile bigway --plu N` also reports useful local details for valid PLUs using the selected effective profile, including raw/effective Label Format, required references, derived barcode, ingredient/NFT counts, and payload destination summary.
 - `dry-run` writes `dry-run-report.txt` and `dry-run-manifest.json`, builds selected payload previews when enabled, and records `api_write_requests = 0`.
 - `dry-run --plu N` and `import --plu N` select that exact normalized valid PLU. They do not fall back to another record when the requested PLU is missing, invalid, duplicated, or excluded. `--plu` is mutually exclusive with `--limit`, `--test`, and resume selection.
 - `map-audit` writes `mapping-report.txt/json` showing the current source-to-payload mappings, including ingredient versus nutrition separation and bounded payload metadata samples.
@@ -108,7 +109,29 @@ Then place the customer database in the same directory using the exact filename 
 
 `verify` is intentionally fail-closed for external DIGIweb prerequisites. If the source requires departments, groups, or label formats and no supported read/lookup endpoint confirms them, `verify` reports `NOT READY / UNVERIFIED REFERENCE` instead of giving a false ready signal.
 
-Because this version has no supported DIGIweb read endpoint for Department, Group, or Label Format existence, operators can explicitly record independent server-side confirmations in `[verification]`. These confirmations are manual audit evidence, not API proof:
+Because this version has no supported DIGIweb read endpoint for Department, Group, or Label Format existence, operators can explicitly record independent server-side confirmations in `[verification]`. These confirmations are manual audit evidence, not API proof. Use `confirm` after checking the objects directly in DIGIweb:
+
+```bash
+./to-digi confirm all --profile bigway
+./to-digi verify --profile bigway
+./to-digi import --profile bigway
+```
+
+Preview without changing `config.toml`:
+
+```bash
+./to-digi confirm all --profile bigway --dry-run
+```
+
+For non-interactive operator-approved runs, pass `--yes` explicitly:
+
+```bash
+./to-digi confirm departments --profile bigway --yes
+./to-digi confirm groups --profile bigway --yes
+./to-digi confirm label-formats --profile bigway --yes
+```
+
+The command rewrites only `[verification]`, keeps existing confirmations, deduplicates and sorts values, creates a backup, and never modifies `plu.mdb`.
 
 ```toml
 [verification]
@@ -155,7 +178,18 @@ Use `./to-digi analyze --raw` when you need an unsanitized source analysis. The 
 
 Starsky rules fill empty Department with `1`, empty Barcode with the normalized PLU code, empty Barcode Format with `05`, and empty Print Format Code with `00`. They also treat Best Before `0` as disabled/default, preserve `1..999`, and replace empty, malformed, negative, or greater-than-999 Best Before values with `0`. These rules affect DIGIweb `plusellingdateterm`; use-by fields keep their separate source mappings.
 
-Bigway remaps `PluIng` fields `Ing Name 96..99` into nutrition facts for Iron, Sugar, and Potassium, and suppresses those reused fields from ingredient text. `Ing Name 95` / Calcium is intentionally not mapped because the source semantics are ambiguous.
+Bigway remaps customer-specific `PluIng` fields into nutrition facts and suppresses those reused fields from ingredient text:
+
+```text
+Calcium     -> Calcium amount
+Ing Name 95 -> Calcium percent
+Ing Name 96 -> Iron amount
+Ing Name 97 -> Sugar amount
+Ing Name 98 -> Potassium amount
+Ing Name 99 -> Potassium percent
+```
+
+This is profile-specific behavior. Without `--profile bigway`, `Ing Name 1..99` remains generic ingredient text unless a selected profile explicitly remaps a field.
 
 Source Label Format `0` is a confirmed default and resolves in memory to effective Label Format `1`. The raw source value remains visible in diagnostics and reports, but DIGIweb payloads and prerequisite checks use the effective `plulabelformat` value. Positive Label Formats remain unchanged and are treated as required server-side references.
 
@@ -184,7 +218,17 @@ Existing full `v0.8.0` configuration files remain compatible. Defaults are suppl
 
 `[import].max_in_flight` controls how many submitted DIGIweb requests may be active at once. Higher values can improve full-import speed but put more load on DIGIweb; lower values are more conservative. Set `max_in_flight = 1` to reproduce the original sequential submit-then-poll behavior.
 
-During live imports, interactive terminals show one updating progress line. Non-interactive runs, including `tee` and CI, print periodic `PROGRESS ...` lines and a final progress line with selected/completed counts, success/failure counts, active requests, remaining records, rate, elapsed time, and ETA when calculable.
+During live imports, interactive terminals show one updating progress bar:
+
+```text
+Importing [██████████████████░░░░░░░░░░] 73.7% 2541/3447 | ok 2541 | fail 0 | active 6 | 11.5/s | 03:41 | ETA 01:18
+```
+
+Set `TO_DIGI_RS_ASCII_PROGRESS=1` for an ASCII-only bar. Non-interactive runs, including `tee` and CI, print periodic line-oriented records:
+
+```text
+PROGRESS selected=3447 completed=1853 percent=53.8 success=1853 failed=0 unknown=0 active=1 remaining=1593 rate=12.0/s elapsed=02:34 eta=02:13
+```
 
 Environment overrides take precedence over config values:
 
@@ -205,9 +249,9 @@ Manual readiness workflow:
 ```bash
 ./to-digi analyze
 # Check listed Departments, Groups, and effective Label Formats in DIGIweb.
-# Edit [verification] in config.toml with only independently confirmed objects.
-./to-digi verify
-./to-digi import --test
+./to-digi confirm all --profile bigway
+./to-digi verify --profile bigway
+./to-digi import --profile bigway --test
 ```
 
 `verify` writes `verify-report.txt/json`. If all required references are manually confirmed and eligible PLUs are ready, the result is `READY`. If eligible PLUs are ready but some source records are intentionally excluded for customer action, the result is `READY_WITH_SKIPS`. Both are safe to proceed to `import --test`; `NOT_READY` blocks import.
@@ -278,6 +322,20 @@ bash scripts/package-deploy.sh
 ```
 
 The archive excludes `config.toml`, `plu.mdb`, logs, output, manifests, payload previews, and credentials.
+
+Local Docker builds show `Git revision: unknown` unless build metadata is passed explicitly. For a local metadata test build, use:
+
+```bash
+REV="$(git rev-parse HEAD)"
+docker build \
+  --build-arg TO_DIGI_RS_RELEASE_IMAGE="to-digi-rs:0.9.0-dev-${REV:0:7}" \
+  --build-arg TO_DIGI_RS_GIT_REVISION="$REV" \
+  -t "to-digi-rs:0.9.0-dev-${REV:0:7}" .
+```
+
+Official container publishing already passes the release image and Git revision through GitHub Actions.
+
+One accepted Starsky benchmark with a customer-like MDB completed 3447/3447 selected PLUs successfully, with 0 runtime failures, 10.88 PLUs/sec average rate, 316.887 seconds importer elapsed, and `max_in_flight = 16`. This is one observed benchmark, not a universal throughput guarantee.
 
 ## Troubleshooting
 

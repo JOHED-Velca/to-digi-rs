@@ -70,7 +70,8 @@ The bundle never includes a real `plu.mdb`, customer credentials, logs, manifest
 ./to-digi test-connection
 ./to-digi analyze [--raw]
 ./to-digi discover [--timings]
-./to-digi diagnose [--invalid-only] [--plu PLU_NUMBER] [--category CATEGORY]
+./to-digi diagnose [--profile bigway] [--invalid-only] [--plu PLU_NUMBER] [--category CATEGORY]
+./to-digi confirm departments|groups|label-formats|all [--profile bigway] [--dry-run] [--yes]
 ./to-digi map-audit [--sample N] [--plu PLU_NUMBER] [--timings]
 ./to-digi profile suggest --name bigway
 ./to-digi sanitize
@@ -118,7 +119,15 @@ The launcher does not prune, stop, remove, or modify unrelated Docker resources.
 
 `verify` checks connectivity and import readiness, but it is fail-closed for DIGIweb prerequisites. If required departments, groups, or label formats cannot be confirmed through a supported lookup endpoint, it reports `NOT READY / UNVERIFIED REFERENCE` rather than claiming the customer is ready for import.
 
-This version has no supported DIGIweb lookup endpoint for Department, Group, or Label Format existence. After checking those objects directly in DIGIweb, record manual confirmations in `config.toml`:
+This version has no supported DIGIweb lookup endpoint for Department, Group, or Label Format existence. After checking those objects directly in DIGIweb, record operator confirmations with `confirm`:
+
+```bash
+./to-digi confirm all --profile bigway
+./to-digi verify --profile bigway
+./to-digi import --profile bigway
+```
+
+Use `--dry-run` to preview without changing `config.toml`, or `--yes` only after the operator has independently confirmed the objects. `confirm` updates only `[verification]`, preserves existing confirmations and other settings, deduplicates and sorts values, creates a backup, and never modifies `plu.mdb`.
 
 ```toml
 [verification]
@@ -134,8 +143,9 @@ Use this safe sequence before live writes:
 ```bash
 ./to-digi diagnose --invalid-only
 ./to-digi dry-run --test
-./to-digi verify
-./to-digi import --test
+./to-digi confirm all --profile bigway
+./to-digi verify --profile bigway
+./to-digi import --profile bigway --test
 ```
 
 Run the live test import only after dry-run output has been reviewed and readiness is confirmed. Source Label Format `0` resolves in memory to effective Label Format `1`; positive Label Formats remain unchanged. Effective Label Formats are treated as required server-side references.
@@ -170,7 +180,13 @@ Existing full `v0.8.0` configs continue to parse. Defaults are supplied for clie
 
 `[import].max_in_flight` bounds concurrent accepted DIGIweb requests. Higher values can shorten large imports but increase server load; lower values are more conservative. `max_in_flight = 1` restores the original sequential submit-then-poll behavior.
 
-Live imports show one updating progress line on an interactive terminal. Non-interactive output emits periodic `PROGRESS ...` lines with selected, completed, success, failed, active, remaining, rate, elapsed, and ETA fields.
+Live imports show one updating progress bar on an interactive terminal:
+
+```text
+Importing [██████████████████░░░░░░░░░░] 73.7% 2541/3447 | ok 2541 | fail 0 | active 6 | 11.5/s | 03:41 | ETA 01:18
+```
+
+Set `TO_DIGI_RS_ASCII_PROGRESS=1` for an ASCII-only bar. Non-interactive output emits periodic `PROGRESS ...` lines with selected, completed, success, failed, unknown, active, remaining, rate, elapsed, and ETA fields.
 
 Configuration precedence:
 
@@ -198,9 +214,9 @@ Recommended readiness workflow:
 ```bash
 ./to-digi analyze
 # Check listed Departments, Groups, and effective Label Formats in DIGIweb.
-# Edit [verification] confirmations in config.toml.
-./to-digi verify
-./to-digi import --test
+./to-digi confirm all --profile bigway
+./to-digi verify --profile bigway
+./to-digi import --profile bigway --test
 ```
 
 `verify` writes `verify-report.txt/json`. `READY` means all eligible PLUs and references are ready. `READY_WITH_SKIPS` means eligible PLUs are ready while some source records remain intentionally excluded for customer action. `NOT_READY` blocks import before any PLU write.
@@ -224,7 +240,18 @@ Use raw analysis when needed:
 
 The built-in Starsky profile matches `profiles/starsky.toml`. It preserves Best Before values `1..999`, leaves `0` disabled/default, and converts empty, malformed, negative, or greater-than-999 values to `0`.
 
-The built-in Bigway profile matches `profiles/bigway.toml`. It remaps `Ing Name 96..99` into Iron, Sugar, and Potassium nutrition facts and suppresses those reused fields from ingredient text. `Ing Name 95` / Calcium is intentionally not mapped because the source semantics are ambiguous.
+The built-in Bigway profile matches `profiles/bigway.toml`. It remaps customer-specific nutrition fields and suppresses those reused fields from ingredient text:
+
+```text
+Calcium     -> Calcium amount
+Ing Name 95 -> Calcium percent
+Ing Name 96 -> Iron amount
+Ing Name 97 -> Sugar amount
+Ing Name 98 -> Potassium amount
+Ing Name 99 -> Potassium percent
+```
+
+This is profile-specific behavior. Without `--profile bigway`, `Ing Name 1..99` remains generic ingredient text unless a selected profile explicitly remaps a field.
 
 ## Output
 
