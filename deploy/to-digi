@@ -489,10 +489,14 @@ printf 'Deployment directory: %s\n' "$SCRIPT_DIR"
 printf 'Command: %s\n' "$COMMAND_LABEL"
 
 DOCKER_TTY_ARGS=()
-if host_stdin_is_tty || requires_container_stdin "${FORWARDED_ARGS[@]}"; then
+COMMAND_REQUIRES_STDIN=0
+if requires_container_stdin "${FORWARDED_ARGS[@]}"; then
+    COMMAND_REQUIRES_STDIN=1
+fi
+if host_stdin_is_tty || [ "$COMMAND_REQUIRES_STDIN" -eq 1 ]; then
     DOCKER_TTY_ARGS+=(--interactive)
 fi
-if host_stdout_is_tty; then
+if host_stdout_is_tty && [ "$COMMAND_REQUIRES_STDIN" -eq 0 ]; then
     DOCKER_TTY_ARGS+=(--tty)
 fi
 

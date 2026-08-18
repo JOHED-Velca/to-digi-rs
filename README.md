@@ -2,25 +2,30 @@
 
 `to-digi-rs` is a Linux-compatible, one-shot PLU importer for DIGIweb.
 
-It reads only `./plu.mdb`, exports supported Access tables with `mdbtools`, normalizes and validates PLU records, authenticates to DIGIweb when needed, writes `logs.txt`, and exits. It does not run a GUI, service, scheduler, watcher, staging database, or permanent sync loop.
+It reads only `./plu.mdb`, extracts supported Access tables with `mdbtools`, normalizes and validates PLU data, authenticates to DIGIweb, submits PLUs through the Third-Party API, writes audit output, and exits.
 
-## Current Workflow
+It is not a GUI, service, scheduler, folder watcher, staging database, or permanent sync loop.
 
-Version `0.9.0` preserves the validated `v0.8.0` importer behavior and adds a self-initializing deployment workflow for Ubuntu and WSL:
+## What It Imports
+
+The current importer focuses on:
+
+- PLUs from `Pludata`
+- Ingredients from `PluIng`
+- Nutrition facts from supported source columns
+- Customer-specific sanitization profiles such as `starsky` and `bigway`
+
+The source database must be named exactly:
 
 ```text
-docker pull image
--> docker run image init
--> place plu.mdb
--> ./to-digi import --config-ip ... --config-secret
--> ./to-digi doctor
--> ./to-digi analyze
--> ./to-digi import
+plu.mdb
 ```
 
-The immutable `v0.8.0` release remains `27e77faa136439a2e42f9a6ff63b17ad4ff720ac` and `ghcr.io/johed-velca/to-digi-rs:0.8.0`; do not retag it.
+Place it beside the launcher or run from the directory containing it.
 
-## First-Time Ubuntu/WSL Installation
+## First-Time Setup From GHCR
+
+Choose the image to install. For a release candidate, replace the tag with the one provided for the customer, for example `0.9.0-rc.3`.
 
 ```bash
 IMAGE="ghcr.io/johed-velca/to-digi-rs:0.9.0"
@@ -38,7 +43,7 @@ docker run --rm \
   init
 ```
 
-The `init` command creates:
+This creates:
 
 ```text
 to-digi
@@ -47,48 +52,62 @@ run.sh
 compose.yaml
 config.example.toml
 config.toml
-profiles/example.toml
-profiles/bigway.toml
-profiles/starsky.toml
+profiles/
 output/
 ```
 
-The generated launcher and Compose file are pinned to the exact image that created them. The customer does not need Git, Rust, source code, or a publishing token. `TO_DIGI_RS_IMAGE` remains available as an advanced manual override when an operator intentionally wants to run a different image.
+## First-Run TODOs
 
-Release-candidate images such as `0.9.0-rc.N` are pilot builds, not final releases.
+Before the first real import:
 
-Then place the customer database in the same directory using the exact filename `plu.mdb`, configure the customer DIGIweb host and secret, and continue:
+1. Place the Access database beside `./to-digi` as `plu.mdb`.
+2. Set the customer DIGIweb IP address.
+3. Set the DIGIweb client secret.
+4. Choose a profile when needed, for example `--profile bigway`.
+5. Confirm required DIGIweb references before full import.
+6. Run a dry run or one-PLU test before importing everything.
+
+Recommended first setup command:
 
 ```bash
 ./to-digi import \
   --config-ip 192.168.0.150 \
-  --config-secret
+  --config-secret \
+  --profile bigway \
+  --test
 ```
 
-`--config-secret` prompts without echoing the secret, writes it to `config.toml`, creates a backup, and then continues with the import. Use stdin for automation without exposing the secret through argv:
+`--config-secret` prompts without echoing the secret, writes it to `config.toml`, creates a backup, then continues with the requested command.
+
+For automation, avoid putting secrets in command history:
 
 ```bash
 printf '%s' "$DIGI_SECRET" |
 ./to-digi import \
   --config-ip 192.168.0.150 \
-  --config-secret-stdin
+  --config-secret-stdin \
+  --profile bigway \
+  --test
 ```
 
-Follow-up commands:
+Runtime-only secret override remains supported:
+
+```bash
+export TO_DIGI_RS_CLIENT_SECRET='secret-provided-by-operator'
+./to-digi import --profile bigway --test
+```
+
+## Typical Workflow
 
 ```bash
 ./to-digi doctor
-./to-digi test-connection
-./to-digi analyze
-./to-digi discover
-./to-digi diagnose
-./to-digi map-audit
-./to-digi profile suggest --name bigway
-./to-digi sanitize
-./to-digi diagnose --plu 18
-./to-digi dry-run --test
-./to-digi verify
-./to-digi import
+./to-digi analyze --profile bigway
+./to-digi diagnose --profile bigway --invalid-only
+./to-digi dry-run --profile bigway --test
+./to-digi confirm all --profile bigway
+./to-digi verify --profile bigway
+./to-digi import --profile bigway --test
+./to-digi import --profile bigway
 ```
 
 ## Commands
@@ -101,120 +120,22 @@ Follow-up commands:
 ./to-digi discover [--timings]
 ./to-digi diagnose [--invalid-only] [--plu PLU_NUMBER] [--category CATEGORY]
 ./to-digi map-audit [--sample N] [--plu PLU_NUMBER] [--timings]
-./to-digi profile suggest --name bigway
+./to-digi profile suggest --name NAME
 ./to-digi sanitize [--profile starsky|bigway|profiles/custom.toml]
-./to-digi dry-run [--limit N | --test | --plu PLU_NUMBER] [--profile starsky|bigway] [--sanitize-profile profiles/custom.toml]
-./to-digi verify [--profile starsky|bigway] [--sanitize-profile profiles/custom.toml]
-./to-digi import [--limit N | --test | --plu PLU_NUMBER] [--dry-run] [--continue-on-error]
-./to-digi import [--profile starsky|bigway] [--sanitize-profile profiles/custom.toml]
+./to-digi dry-run [--limit N | --test | --plu PLU_NUMBER] [--profile starsky|bigway]
+./to-digi verify [--profile starsky|bigway]
+./to-digi confirm departments|groups|label-formats|all [--profile bigway] [--dry-run] [--yes]
+./to-digi import [--limit N | --test | --plu PLU_NUMBER] [--profile starsky|bigway]
 ./to-digi import [--config-ip IP] [--config-secret | --config-secret-stdin]
-./to-digi confirm all --profile bigway [--dry-run | --yes]
 ./to-digi resume output/run-YYYYMMDD-HHMMSS-import/import-results.json [--retry-failed]
 ./to-digi version
 ```
 
-`import.sh` and `run.sh` remain compatibility wrappers around `to-digi`.
-
-`discover`, `diagnose`, `dry-run`, `map-audit`, and `profile suggest` are strictly offline diagnostics. They do not require `config.toml`, do not load credentials, do not authenticate, do not contact DIGIweb, do not submit PLUs, and do not modify `plu.mdb`.
-
-- `discover` writes `discovery-report.txt/json` with raw MDB field-quality, department/group reference, setup, sanitization-candidate, and timing details.
-- `diagnose` writes `diagnostics-report.txt/json` with exact invalid/skipped PLUs, row-level missing required values, duplicate effective barcodes, and required label formats.
-- `diagnose --profile bigway --plu N` also reports useful local details for valid PLUs using the selected effective profile, including raw/effective Label Format, required references, derived barcode, ingredient/NFT counts, and payload destination summary.
-- `dry-run` writes `dry-run-report.txt` and `dry-run-manifest.json`, builds selected payload previews when enabled, and records `api_write_requests = 0`.
-- `dry-run --plu N` and `import --plu N` select that exact normalized valid PLU. They do not fall back to another record when the requested PLU is missing, invalid, duplicated, or excluded. `--plu` is mutually exclusive with `--limit`, `--test`, and resume selection.
-- `map-audit` writes `mapping-report.txt/json` showing the current source-to-payload mappings, including ingredient versus nutrition separation and bounded payload metadata samples.
-- `profile suggest --name NAME` writes `profiles/NAME.draft.toml` and `profile-recommendations.txt` without overwriting an existing draft. Only deterministic safe findings become active rules; ambiguous findings stay as comments/recommendations.
-
-`verify` is intentionally fail-closed for external DIGIweb prerequisites. If the source requires departments, groups, or label formats and no supported read/lookup endpoint confirms them, `verify` reports `NOT READY / UNVERIFIED REFERENCE` instead of giving a false ready signal.
-
-Because this version has no supported DIGIweb read endpoint for Department, Group, or Label Format existence, operators can explicitly record independent server-side confirmations in `[verification]`. These confirmations are manual audit evidence, not API proof. Use `confirm` after checking the objects directly in DIGIweb:
-
-```bash
-./to-digi confirm all --profile bigway
-./to-digi verify --profile bigway
-./to-digi import --profile bigway
-```
-
-Preview without changing `config.toml`:
-
-```bash
-./to-digi confirm all --profile bigway --dry-run
-```
-
-For non-interactive operator-approved runs, pass `--yes` explicitly:
-
-```bash
-./to-digi confirm departments --profile bigway --yes
-./to-digi confirm groups --profile bigway --yes
-./to-digi confirm label-formats --profile bigway --yes
-```
-
-The command rewrites only `[verification]`, keeps existing confirmations, deduplicates and sorts values, creates a backup, and never modifies `plu.mdb`.
-
-```toml
-[verification]
-confirmed_departments = [2]
-confirmed_groups = ["2:997", "2:998"]
-confirmed_label_formats = [1, 2, 3, 4, 6, 8, 21]
-```
-
-Extra confirmations that are not required by the current MDB are reported as stale warnings only. Missing required confirmations keep `verify` and `import` fail-closed.
-
-Safe pre-import order:
-
-```bash
-./to-digi diagnose --invalid-only
-./to-digi dry-run --test
-./to-digi verify
-./to-digi import --test
-```
-
-Run the live test import only after dry-run output is clean enough for the customer and `verify` has not found an unverified hard reference.
-
-## Profiles
-
-Fresh deployments do not apply a sanitization profile by default:
-
-```toml
-[profiles]
-default = ""
-
-[verification]
-confirmed_departments = []
-confirmed_groups = []
-confirmed_label_formats = []
-```
-
-Profile precedence is deterministic:
-
-1. Explicit external profile, such as `--sanitize-profile profiles/custom.toml`
-2. Explicit built-in profile, such as `--profile starsky` or `--profile bigway`
-3. Deployment default profile from `[profiles].default`
-4. No profile, only where that meaning is supported
-
-Use `./to-digi analyze --raw` when you need an unsanitized source analysis. The built-in Starsky and Bigway profiles match their files in `profiles/`.
-
-Starsky rules fill empty Department with `1`, empty Barcode with the normalized PLU code, empty Barcode Format with `05`, and empty Print Format Code with `00`. They also treat Best Before `0` as disabled/default, preserve `1..999`, and replace empty, malformed, negative, or greater-than-999 Best Before values with `0`. These rules affect DIGIweb `plusellingdateterm`; use-by fields keep their separate source mappings.
-
-Bigway remaps customer-specific `PluIng` fields into nutrition facts and suppresses those reused fields from ingredient text:
-
-```text
-Ing Name 95 -> Calcium amount
-Calcium     -> Calcium percent
-Iron        -> Iron amount
-Ing Name 96 -> Iron percent
-Ing Name 97 -> Sugar amount
-Ing Name 98 -> Potassium amount
-Ing Name 99 -> Potassium percent
-```
-
-This is profile-specific behavior. Without `--profile bigway`, `Ing Name 1..99` remains generic ingredient text unless a selected profile explicitly remaps a field.
-
-Source Label Format `0` is a confirmed default and resolves in memory to effective Label Format `1`. The raw source value remains visible in diagnostics and reports, but DIGIweb payloads and prerequisite checks use the effective `plulabelformat` value. Positive Label Formats remain unchanged and are treated as required server-side references.
+`import.sh` and `run.sh` are compatibility wrappers around `to-digi`.
 
 ## Configuration
 
-New deployments can start with the minimal generated `config.toml`:
+Generated `config.toml` starts small:
 
 ```toml
 [digiweb]
@@ -231,84 +152,107 @@ max_in_flight = 16
 
 [profiles]
 default = ""
+
+[verification]
+confirmed_departments = []
+confirmed_groups = []
+confirmed_label_formats = []
 ```
 
-Existing full `v0.8.0` configuration files remain compatible. Defaults are supplied for client id, token path, PLU write path, status path, timeouts, table names, store number, and payload-preview behavior. `token_url` may be an absolute URL or a relative path resolved against `base_url`; when omitted, the standard Keycloak token path is derived from `base_url`.
+Important fields:
 
-Customer setup flags can update the generated config before import:
+- `digiweb.base_url`: customer DIGIweb host, usually `https://IP_ADDRESS`
+- `digiweb.client_secret`: client secret, preferably set with `--config-secret`
+- `digiweb.store_number`: DIGIweb store number
+- `digiweb.allow_invalid_certificates`: set `true` only for trusted self-signed installs
+- `import.max_in_flight`: accepted default is `16`
+- `profiles.default`: optional default profile name
+- `verification.*`: operator-confirmed prerequisites
 
-```bash
-./to-digi import --config-ip 192.168.0.150 --config-secret
-```
+`--config-ip` updates `digiweb.base_url` and absolute customer-local `digiweb.token_url` values while preserving scheme, port, path, and query. Relative API paths remain relative.
 
-`--config-ip` accepts only an IP address, not a URL. It updates `digiweb.base_url` and any absolute customer-local `digiweb.token_url`, preserving scheme, port, path, and query. Relative endpoint paths stay relative. `--config_secret` is accepted as an alias for `--config-secret`.
+## Profiles
 
-`--config-secret` prompts without echoing and persists the secret to `config.toml`. `--config-secret-stdin` reads and persists the secret from stdin for automation. The existing `TO_DIGI_RS_CLIENT_SECRET` runtime override remains unchanged and is not persisted automatically.
+Built-in profiles:
 
-`[import].max_in_flight` controls how many submitted DIGIweb requests may be active at once. Higher values can improve full-import speed but put more load on DIGIweb; lower values are more conservative. Set `max_in_flight = 1` to reproduce the original sequential submit-then-poll behavior.
+- `starsky`: fills known safe empty fields, handles Best Before defaults, and preserves validated mappings.
+- `bigway`: applies customer-specific nutrition remaps and ingredient suppression.
 
-During live imports, interactive terminals show one updating progress bar. The packaged `./to-digi` launcher conditionally gives Docker a pseudo-TTY only when the host stdout is a TTY, so direct SSH terminal runs redraw one line while redirected or piped runs stay log-friendly:
+Confirmed Bigway nutrition mapping:
 
 ```text
-Importing [██████████████████░░░░░░░░░░] 73.7% 2541/3447 | ok 2541 | fail 0 | active 6 | 11.5/s | 03:41 | ETA 01:18
+Ing Name 95 -> Calcium amount
+Calcium     -> Calcium percent
+Iron        -> Iron amount
+Ing Name 96 -> Iron percent
+Ing Name 97 -> Sugar amount
+Ing Name 98 -> Potassium amount
+Ing Name 99 -> Potassium percent
 ```
 
-Set `TO_DIGI_RS_ASCII_PROGRESS=1` for an ASCII-only bar. Non-interactive runs, including `tee` and CI, print periodic line-oriented records:
+Without `--profile bigway`, `Ing Name 1..99` remain generic ingredient text unless another selected profile remaps them.
+
+## Architecture
+
+The application is intentionally split by responsibility:
 
 ```text
-PROGRESS selected=3447 completed=1853 percent=53.8 success=1853 failed=0 unknown=0 active=1 remaining=1593 rate=12.0/s elapsed=02:34 eta=02:13
+plu.mdb
+-> source reader
+-> source rows
+-> normalized domain models
+-> validation
+-> DIGIweb payloads
+-> authenticated API client
+-> import manifest and logs
 ```
 
-Environment overrides take precedence over config values:
+Key rules:
+
+- The source reader never sends HTTP requests.
+- The DIGIweb client never parses MDB rows.
+- Validation happens before live submission.
+- Failed or unknown asynchronous submissions are recorded without blind retry.
+- `plu.mdb` is opened read-only and never modified.
+
+## Modules
 
 ```text
-TO_DIGI_RS_BASE_URL
-TO_DIGI_RS_CLIENT_SECRET
-TO_DIGI_RS_CLIENT_SECRET_FILE
-TO_DIGI_RS_STORE_NUMBER
-TO_DIGI_RS_ALLOW_INVALID_CERTIFICATES
-TO_DIGI_RS_DEFAULT_PROFILE
-TO_DIGI_RS_IMAGE
+src/config.rs          configuration loading and secret resolution
+src/config_setup.rs    first-time IP and secret config updates
+src/cli.rs             command-line parsing
+src/source/            MDB validation, schema inspection, export, mapping
+src/models/            normalized PLU, ingredient, nutrition models
+src/validation/        validation issues and blocking checks
+src/digiweb/           auth, payloads, API client, status polling
+src/import/            import runner, manifests, final results
+src/recovery/          resume state, locking, source identity checks
+src/diagnostics.rs     analyze/diagnose/dry-run reporting
+src/confirm.rs         operator prerequisite confirmations
+src/deployment.rs      generated launcher and packaging assets
 ```
 
-`DIGIWEB_CLIENT_SECRET` is still accepted for compatibility. Do not pass secrets on the command line, because they may enter shell history or process listings. Secrets, tokens, refresh tokens, and authorization headers are never printed or logged.
+## Output
 
-Manual readiness workflow:
-
-```bash
-./to-digi analyze
-# Check listed Departments, Groups, and effective Label Formats in DIGIweb.
-./to-digi confirm all --profile bigway
-./to-digi verify --profile bigway
-./to-digi import --profile bigway --test
-```
-
-`verify` writes `verify-report.txt/json`. If all required references are manually confirmed and eligible PLUs are ready, the result is `READY`. If eligible PLUs are ready but some source records are intentionally excluded for customer action, the result is `READY_WITH_SKIPS`. Both are safe to proceed to `import --test`; `NOT_READY` blocks import.
-
-Deprecated `[import]` command-selector values such as `send_only_first_plu` and `dry_run_inspect_only` still parse during the compatibility period, but new generated configuration does not include them. Use CLI commands and flags instead. A live `import` command refuses to run when legacy `dry_run_inspect_only = true` is still set, and points the operator to `./to-digi dry-run`.
-
-## Output And Resume
-
-The launcher creates a timestamped output directory for each run:
+Each launcher run archives output under:
 
 ```text
-output/run-20260722-143000-analyze/
-output/run-20260722-143200-diagnose/
-output/run-20260722-143300-dry-run/
-output/run-20260722-150500-import/
-output/run-20260722-151500-resume/
+output/run-YYYYMMDD-HHMMSS-COMMAND/
 ```
 
-It archives logs, analysis reports, discovery reports, diagnostics reports, dry-run reports, dry-run manifests, verify reports, mapping reports, profile recommendations, sanitization reports, profile snapshots, payload previews, manifests, and resume snapshots when present. Existing output and manifests are preserved. Draft profiles remain under `profiles/` for review.
+Common files:
 
-Resume with:
-
-```bash
-./to-digi resume output/run-20260722-150500-import/import-results.json
-./to-digi resume output/run-20260722-150500-import/import-results.json --retry-failed
+```text
+logs.txt
+analysis-report.txt/json
+diagnostics-report.txt/json
+dry-run-report.txt
+dry-run-manifest.json
+import-results.json
+payload-previews/
 ```
 
-`UNKNOWN_STATUS` and `AMBIGUOUS_SUBMISSION` records are never automatically resent.
+Secrets, access tokens, refresh tokens, and authorization headers must not appear in output files.
 
 ## Exit Codes
 
@@ -322,60 +266,45 @@ Resume with:
 
 ## Development
 
-On Ubuntu without Docker:
+Ubuntu prerequisite when running outside Docker:
 
 ```bash
 sudo apt install mdbtools
+```
+
+Useful local commands:
+
+```bash
 cargo run -- analyze --raw
-cargo run -- discover
 cargo run -- diagnose --invalid-only
 cargo run -- dry-run --test
-cargo run -- map-audit --sample 5
-cargo run -- profile suggest --name bigway
 cargo run -- test-connection
 ```
 
-Checks:
+Required checks:
 
 ```bash
 cargo fmt --check
 cargo test --locked
-bash scripts/test-deploy.sh
 git diff --check
+bash scripts/test-deploy.sh
 ```
 
-Package the deployment archive:
+Build a deployment archive:
 
 ```bash
 bash scripts/package-deploy.sh
 ```
 
-The archive excludes `config.toml`, `plu.mdb`, logs, output, manifests, payload previews, and credentials.
-
-Local Docker builds show `Git revision: unknown` unless build metadata is passed explicitly. For a local metadata test build, use:
+Build a local Docker image:
 
 ```bash
-REV="$(git rev-parse HEAD)"
-docker build \
-  --build-arg TO_DIGI_RS_RELEASE_IMAGE="to-digi-rs:0.9.0-dev-${REV:0:7}" \
-  --build-arg TO_DIGI_RS_GIT_REVISION="$REV" \
-  -t "to-digi-rs:0.9.0-dev-${REV:0:7}" .
+docker build -t to-digi-rs:local .
 ```
 
-Official container publishing already passes the release image and Git revision through GitHub Actions.
+## Notes
 
-One accepted Starsky benchmark with a customer-like MDB completed 3447/3447 selected PLUs successfully, with 0 runtime failures, 10.88 PLUs/sec average rate, 316.887 seconds importer elapsed, and `max_in_flight = 16`. This is one observed benchmark, not a universal throughput guarantee.
-
-## Troubleshooting
-
-`import.sh not found after docker pull`: run the image `init` command shown above. Pulling an image does not copy host launchers by itself.
-
-`Docker daemon is not reachable`: start Docker Desktop/Engine or add the Linux user to the `docker` group, then open a new shell.
-
-`Image pull denied`: run `docker login ghcr.io` with a token that can read the package, then `./to-digi pull`.
-
-`Missing config.toml`: run `./to-digi init` again or copy `config.example.toml` to `config.toml`, then fill in customer values.
-
-`Missing plu.mdb`: place the source database beside `./to-digi` using the exact lowercase filename `plu.mdb`.
-
-`Self-signed certificate`: set `allow_invalid_certificates = true` only when required. The importer logs a warning when certificate validation is disabled.
+- Do not pass real secrets as command-line arguments.
+- Do not rename, move, delete, or edit `plu.mdb`.
+- Do not run a full import until diagnostics, dry-run, and readiness checks look correct.
+- Release-candidate tags such as `0.9.0-rc.3` are pilot builds, not final releases.

@@ -381,18 +381,21 @@ test_launcher_allocates_tty_only_for_interactive_stdout() {
     make_fake_docker "$fake_dir/docker"
 
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-tty-interactive.log" \
-    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \
-    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" version >"$output" 2>&1
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDIN_TTY=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --test >"$output" 2>&1
+    assert_contains "$TEST_ROOT/fake-tty-interactive.log" "--interactive"
     assert_contains "$TEST_ROOT/fake-tty-interactive.log" "--tty"
 
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-tty-redirected.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
-    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" version >"$output" 2>&1
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --test >"$output" 2>&1
+    assert_not_contains "$TEST_ROOT/fake-tty-redirected.log" "--interactive"
     assert_not_contains "$TEST_ROOT/fake-tty-redirected.log" "--tty"
 
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-tty-piped.log" \
-    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
-    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" version | cat >"$output"
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDIN_TTY=1 \
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --test | cat >"$output"
+    assert_contains "$TEST_ROOT/fake-tty-piped.log" "--interactive"
     assert_not_contains "$TEST_ROOT/fake-tty-piped.log" "--tty"
 }
 
@@ -405,10 +408,10 @@ test_launcher_allocates_interactive_stdin_independently() {
     make_fake_docker "$fake_dir/docker"
 
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-interactive.log" \
-    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDIN_TTY=1 \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDIN_TTY=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \
     PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" confirm all --profile bigway >"$output" 2>&1
     assert_contains "$TEST_ROOT/fake-stdin-interactive.log" "--interactive"
-    assert_not_contains "$TEST_ROOT/fake-stdin-interactive.log" "--tty"
+    assert_contains "$TEST_ROOT/fake-stdin-interactive.log" "--tty"
 
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-yes.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
@@ -419,12 +422,20 @@ test_launcher_allocates_interactive_stdin_independently() {
     assert_not_contains "$TEST_ROOT/fake-stdin-yes.log" "--tty"
 
     printf 'test-secret' | FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-secret.log" \
-    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \
     PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --config-ip 192.168.0.150 --config-secret-stdin \
         >"$output" 2>&1
     assert_contains "$TEST_ROOT/fake-stdin-secret.log" "--interactive"
     assert_not_contains "$TEST_ROOT/fake-stdin-secret.log" "--tty"
     assert_contains "$TEST_ROOT/fake-stdin-secret.log" "import --config-ip 192.168.0.150 --config-secret-stdin"
+
+    printf 'test-secret' | FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-secret-underscore.log" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --config_ip 192.168.0.150 --config_secret_stdin \
+        >"$output" 2>&1
+    assert_contains "$TEST_ROOT/fake-stdin-secret-underscore.log" "--interactive"
+    assert_not_contains "$TEST_ROOT/fake-stdin-secret-underscore.log" "--tty"
+    assert_contains "$TEST_ROOT/fake-stdin-secret-underscore.log" "import --config_ip 192.168.0.150 --config_secret_stdin"
 
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-secret-prompt.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDIN_TTY=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \

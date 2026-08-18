@@ -134,7 +134,6 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
             logger.kv("Config backup", &backup.display().to_string())?;
             println!("Backup: {}", backup.display());
         }
-        println!("Starting {}...", import_config_setup_command_name(cli));
     }
     let config_not_required_for_dispatch = matches!(
         cli.command,
@@ -359,14 +358,6 @@ fn import_config_setup_args(cli: &Cli) -> ConfigSetupArgs {
             secret_stdin: args.config_secret_stdin,
         },
         _ => ConfigSetupArgs::default(),
-    }
-}
-
-fn import_config_setup_command_name(cli: &Cli) -> &'static str {
-    match &cli.command {
-        Some(CliCommand::Import(args)) if args.dry_run => "dry-run",
-        Some(CliCommand::Import(_)) | None => "import",
-        _ => "command",
     }
 }
 
