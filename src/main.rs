@@ -1,6 +1,7 @@
 mod analysis;
 mod cli;
 mod config;
+mod config_setup;
 mod confirm;
 mod deployment;
 mod diagnostics;
@@ -19,7 +20,7 @@ mod source;
 mod validation;
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -28,8 +29,12 @@ use analysis::{
     AnalysisInput, collect_analysis, render_console_summary, write_json_report, write_text_report,
 };
 use clap::Parser;
-use cli::{Cli, CliCommand, ConfirmTarget, EffectiveCommand, ProfileSelection, effective_command};
+use cli::{
+    Cli, CliCommand, ConfigSetupArgs, ConfirmTarget, EffectiveCommand, ProfileSelection,
+    effective_command,
+};
 use config::{AppConfig, client_secret_log_message, load_client_secret};
+use config_setup::apply_customer_config_update;
 use confirm::{
     ConfirmationPlan, apply_confirmation_to_config_text, render_confirmation_preview,
     write_confirmed_config,
@@ -63,6 +68,7 @@ use sanitization::{
     SanitizationIntegration, SanitizationProfile, SanitizationReportInput, apply_profile,
     load_profile_from_safe_path, validate_profile_path, write_sanitization_reports,
 };
+use secrecy::SecretString;
 use selection::{SelectionCriteria, select_eligible_plus, selection_error};
 use serde::Serialize;
 use source::SourceDataset;
@@ -104,6 +110,32 @@ async fn run(cli: &Cli, logger: &mut AuditLogger) -> i32 {
 async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError> {
     let config_path = Path::new("config.toml");
     let config_exists = config_path.exists();
+    let config_setup = import_config_setup_args(cli);
+    if config_setup.is_requested() {
+        if !config_exists {
+            return Err(AppError::Config(
+                "config.toml is required before --config-ip or --config-secret can update customer setup"
+                    .to_string(),
+            ));
+        }
+        let secret = read_config_setup_secret(&config_setup)?;
+        let result = apply_customer_config_update(config_path, config_setup.ip, secret.as_ref())?;
+        logger.line("Customer configuration updated before command dispatch.")?;
+        println!("Configuration updated.");
+        if let Some(host) = &result.host {
+            logger.kv("DIGIweb host", host)?;
+            println!("DIGIweb host: {host}");
+        }
+        if result.client_secret_configured {
+            logger.kv("Client secret", "configured")?;
+            println!("Client secret: configured");
+        }
+        if let Some(backup) = &result.backup {
+            logger.kv("Config backup", &backup.display().to_string())?;
+            println!("Backup: {}", backup.display());
+        }
+        println!("Starting {}...", import_config_setup_command_name(cli));
+    }
     let config_not_required_for_dispatch = matches!(
         cli.command,
         Some(CliCommand::Discover(_))
@@ -246,6 +278,7 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
             resume,
             retry_failed,
             sanitize_profile,
+            config_setup: _,
             ..
         } => {
             if config.import.dry_run_inspect_only {
@@ -316,6 +349,61 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
             Ok(0)
         }
     }
+}
+
+fn import_config_setup_args(cli: &Cli) -> ConfigSetupArgs {
+    match &cli.command {
+        Some(CliCommand::Import(args)) => ConfigSetupArgs {
+            ip: args.config_ip,
+            secret_prompt: args.config_secret,
+            secret_stdin: args.config_secret_stdin,
+        },
+        _ => ConfigSetupArgs::default(),
+    }
+}
+
+fn import_config_setup_command_name(cli: &Cli) -> &'static str {
+    match &cli.command {
+        Some(CliCommand::Import(args)) if args.dry_run => "dry-run",
+        Some(CliCommand::Import(_)) | None => "import",
+        _ => "command",
+    }
+}
+
+fn read_config_setup_secret(setup: &ConfigSetupArgs) -> Result<Option<SecretString>, AppError> {
+    if setup.secret_prompt {
+        if !io::stdin().is_terminal() {
+            return Err(AppError::Config(
+                "--config-secret requires interactive stdin; use --config-secret-stdin or TO_DIGI_RS_CLIENT_SECRET for non-interactive runs"
+                    .to_string(),
+            ));
+        }
+        let secret = rpassword::prompt_password("DIGIweb client secret: ").map_err(|err| {
+            AppError::Config(format!("failed to read DIGIweb client secret: {err}"))
+        })?;
+        if secret.trim().is_empty() {
+            return Err(AppError::Config(
+                "DIGIweb client secret must not be empty".to_string(),
+            ));
+        }
+        return Ok(Some(SecretString::new(secret)));
+    }
+    if setup.secret_stdin {
+        let mut secret = String::new();
+        io::stdin().read_to_string(&mut secret).map_err(|err| {
+            AppError::Config(format!(
+                "failed to read DIGIweb client secret from stdin: {err}"
+            ))
+        })?;
+        let secret = secret.trim_end_matches(['\r', '\n']).to_string();
+        if secret.trim().is_empty() {
+            return Err(AppError::Config(
+                "DIGIweb client secret from stdin must not be empty".to_string(),
+            ));
+        }
+        return Ok(Some(SecretString::new(secret)));
+    }
+    Ok(None)
 }
 
 fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(), AppError> {
@@ -424,6 +512,7 @@ fn log_command(command: &EffectiveCommand, logger: &mut AuditLogger) -> Result<(
             sanitize_profile,
             legacy_used,
             defaulted_from_no_command,
+            config_setup: _,
         } => {
             if *defaulted_from_no_command {
                 logger.line("No command supplied; defaulting to import.")?;

@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -198,6 +199,15 @@ pub struct ImportArgs {
     /// Apply a built-in profile such as starsky before import
     #[arg(long, value_name = "NAME", conflicts_with_all = ["resume", "sanitize_profile"])]
     pub profile: Option<String>,
+    /// Update config.toml DIGIweb customer-host URL fields before continuing
+    #[arg(long, alias = "config_ip", value_parser = parse_ip_address)]
+    pub config_ip: Option<IpAddr>,
+    /// Prompt securely for the DIGIweb client secret and persist it before continuing
+    #[arg(long, alias = "config_secret", conflicts_with = "config_secret_stdin")]
+    pub config_secret: bool,
+    /// Read the DIGIweb client secret from stdin and persist it before continuing
+    #[arg(long, alias = "config_secret_stdin", conflicts_with = "config_secret")]
+    pub config_secret_stdin: bool,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
@@ -277,6 +287,27 @@ impl ProfileSelection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ConfigSetupArgs {
+    pub ip: Option<IpAddr>,
+    pub secret_prompt: bool,
+    pub secret_stdin: bool,
+}
+
+impl ConfigSetupArgs {
+    fn from_import_args(args: &ImportArgs) -> Self {
+        Self {
+            ip: args.config_ip,
+            secret_prompt: args.config_secret,
+            secret_stdin: args.config_secret_stdin,
+        }
+    }
+
+    pub fn is_requested(&self) -> bool {
+        self.ip.is_some() || self.secret_prompt || self.secret_stdin
+    }
+}
+
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let parsed = value
         .parse::<usize>()
@@ -297,6 +328,12 @@ fn parse_positive_u64(value: &str) -> Result<u64, String> {
     } else {
         Ok(parsed)
     }
+}
+
+fn parse_ip_address(value: &str) -> Result<IpAddr, String> {
+    value.parse::<IpAddr>().map_err(|_| {
+        "--config-ip expects an IP address such as 192.168.0.150, not a URL or path".to_string()
+    })
 }
 
 fn parse_diagnostic_category(value: &str) -> Result<DiagnosticCategory, String> {
@@ -343,6 +380,7 @@ pub enum EffectiveCommand {
         legacy_used: bool,
         defaulted_from_no_command: bool,
         sanitize_profile: Option<ProfileSelection>,
+        config_setup: ConfigSetupArgs,
     },
     DryRun {
         limit: Option<usize>,
@@ -486,6 +524,7 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
                 false,
                 config,
             ),
+            config_setup: ConfigSetupArgs::from_import_args(args),
         },
         Some(CliCommand::DryRun(args)) => EffectiveCommand::DryRun {
             limit: if args.test { Some(1) } else { args.limit },
@@ -517,6 +556,7 @@ pub fn effective_command(cli: &Cli, config: &AppConfig) -> EffectiveCommand {
             legacy_used: false,
             defaulted_from_no_command: false,
             sanitize_profile: None,
+            config_setup: ConfigSetupArgs::default(),
         },
         Some(CliCommand::Sanitize(args)) => EffectiveCommand::Sanitize {
             profile: resolve_required_profile(
@@ -613,6 +653,7 @@ fn legacy_effective_command(config: &AppConfig) -> EffectiveCommand {
             legacy_used: true,
             defaulted_from_no_command: true,
             sanitize_profile: default_profile(config),
+            config_setup: ConfigSetupArgs::default(),
         }
     }
 }
@@ -644,6 +685,7 @@ mod tests {
                 legacy_used: true,
                 defaulted_from_no_command: true,
                 sanitize_profile: None,
+                config_setup: ConfigSetupArgs::default(),
             }
         );
     }
@@ -730,6 +772,55 @@ mod tests {
     }
 
     #[test]
+    fn import_customer_config_flags_parse_with_underscore_aliases() {
+        let config = AppConfig::default();
+        let command = effective_command(
+            &parse(&[
+                "to-digi-rs",
+                "import",
+                "--config_ip",
+                "192.168.0.150",
+                "--config_secret",
+            ]),
+            &config,
+        );
+
+        match command {
+            EffectiveCommand::Import { config_setup, .. } => {
+                assert_eq!(config_setup.ip, Some("192.168.0.150".parse().expect("ip")));
+                assert!(config_setup.secret_prompt);
+                assert!(!config_setup.secret_stdin);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_secret_sources_conflict_and_ip_rejects_urls() {
+        assert!(
+            Cli::try_parse_from([
+                "to-digi-rs",
+                "import",
+                "--config-secret",
+                "--config-secret-stdin",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "to-digi-rs",
+                "import",
+                "--config-ip",
+                "https://192.168.0.150",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["to-digi-rs", "import", "--config-ip", "999.999.1.1"]).is_err()
+        );
+    }
+
+    #[test]
     fn test_alias_maps_to_limit_one_and_conflicts_with_limit() {
         let config = AppConfig::default();
         let cli = parse(&["to-digi-rs", "import", "--test"]);
@@ -745,6 +836,7 @@ mod tests {
                 legacy_used: false,
                 defaulted_from_no_command: false,
                 sanitize_profile: None,
+                config_setup: ConfigSetupArgs::default(),
             }
         );
         assert!(Cli::try_parse_from(["to-digi-rs", "import", "--test", "--limit", "1"]).is_err());
@@ -771,6 +863,7 @@ mod tests {
                 legacy_used: false,
                 defaulted_from_no_command: false,
                 sanitize_profile: None,
+                config_setup: ConfigSetupArgs::default(),
             }
         );
         let cli = parse(&["to-digi-rs", "dry-run", "--plu", "721"]);
@@ -818,6 +911,7 @@ mod tests {
                 legacy_used: false,
                 defaulted_from_no_command: false,
                 sanitize_profile: None,
+                config_setup: ConfigSetupArgs::default(),
             }
         );
         assert!(
@@ -955,6 +1049,7 @@ mod tests {
                 legacy_used: true,
                 defaulted_from_no_command: true,
                 sanitize_profile: None,
+                config_setup: ConfigSetupArgs::default(),
             }
         );
     }
@@ -978,6 +1073,7 @@ mod tests {
                 legacy_used: false,
                 defaulted_from_no_command: false,
                 sanitize_profile: None,
+                config_setup: ConfigSetupArgs::default(),
             }
         );
     }

@@ -26,7 +26,7 @@ render_asset "$ROOT_DIR/deploy/to-digi" "$BUNDLE_DIR/to-digi" 0755
 install -m 0755 "$ROOT_DIR/deploy/import.sh" "$BUNDLE_DIR/import.sh"
 install -m 0755 "$ROOT_DIR/deploy/run.sh" "$BUNDLE_DIR/run.sh"
 install -m 0644 "$ROOT_DIR/deploy/config.example.toml" "$BUNDLE_DIR/config.example.toml"
-install -m 0644 "$ROOT_DIR/deploy/README.md" "$BUNDLE_DIR/README.md"
+render_asset "$ROOT_DIR/deploy/README.md" "$BUNDLE_DIR/README.md" 0644
 install -m 0644 "$ROOT_DIR/profiles/example.toml" "$BUNDLE_DIR/profiles/example.toml"
 install -m 0644 "$ROOT_DIR/profiles/bigway.toml" "$BUNDLE_DIR/profiles/bigway.toml"
 install -m 0644 "$ROOT_DIR/profiles/starsky.toml" "$BUNDLE_DIR/profiles/starsky.toml"

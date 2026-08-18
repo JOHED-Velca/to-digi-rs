@@ -417,13 +417,29 @@ test_launcher_allocates_interactive_stdin_independently() {
     assert_contains "$TEST_ROOT/fake-stdin-yes.log" "confirm all --profile bigway --yes"
     assert_not_contains "$TEST_ROOT/fake-stdin-yes.log" "--interactive"
     assert_not_contains "$TEST_ROOT/fake-stdin-yes.log" "--tty"
+
+    printf 'test-secret' | FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-secret.log" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --config-ip 192.168.0.150 --config-secret-stdin \
+        >"$output" 2>&1
+    assert_contains "$TEST_ROOT/fake-stdin-secret.log" "--interactive"
+    assert_not_contains "$TEST_ROOT/fake-stdin-secret.log" "--tty"
+    assert_contains "$TEST_ROOT/fake-stdin-secret.log" "import --config-ip 192.168.0.150 --config-secret-stdin"
+
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-secret-prompt.log" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDIN_TTY=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --config_ip 192.168.0.150 --config_secret \
+        >"$output" 2>&1
+    assert_contains "$TEST_ROOT/fake-stdin-secret-prompt.log" "--interactive"
+    assert_contains "$TEST_ROOT/fake-stdin-secret-prompt.log" "--tty"
+    assert_contains "$TEST_ROOT/fake-stdin-secret-prompt.log" "import --config_ip 192.168.0.150 --config_secret"
 }
 
 test_package_archive_contains_expected_files_only() {
     local archive
-    archive="$(TO_DIGI_RS_VERSION=0.9.0-rc.1 TO_DIGI_RS_PACKAGE_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1 "$ROOT_DIR/scripts/package-deploy.sh")"
+    archive="$(TO_DIGI_RS_VERSION=0.9.0-rc.3 TO_DIGI_RS_PACKAGE_IMAGE=ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.3 "$ROOT_DIR/scripts/package-deploy.sh")"
     [ -f "$archive" ] || fail "archive was not created"
-    [ "$(basename "$archive")" = "to-digi-rs-deploy-v0.9.0-rc.1.tar.gz" ] || fail "unexpected archive name: $archive"
+    [ "$(basename "$archive")" = "to-digi-rs-deploy-v0.9.0-rc.3.tar.gz" ] || fail "unexpected archive name: $archive"
     local listing="$TEST_ROOT/archive-list.txt"
     tar -tzf "$archive" | sort >"$listing"
 
@@ -443,8 +459,10 @@ test_package_archive_contains_expected_files_only() {
     local extract_dir="$TEST_ROOT/archive-extract"
     mkdir -p "$extract_dir"
     tar -xzf "$archive" -C "$extract_dir"
-    assert_contains "$extract_dir/to-digi-rs-deploy/to-digi" "DEFAULT_IMAGE=\"ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1\""
-    assert_contains "$extract_dir/to-digi-rs-deploy/compose.yaml" "image: \${TO_DIGI_RS_IMAGE:-ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1}"
+    assert_contains "$extract_dir/to-digi-rs-deploy/to-digi" "DEFAULT_IMAGE=\"ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.3\""
+    assert_contains "$extract_dir/to-digi-rs-deploy/compose.yaml" "image: \${TO_DIGI_RS_IMAGE:-ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.3}"
+    assert_contains "$extract_dir/to-digi-rs-deploy/README.md" "IMAGE=\"ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.3\""
+    assert_not_contains "$extract_dir/to-digi-rs-deploy/README.md" "0.9.0-rc.1"
     [ ! -f "$extract_dir/to-digi-rs-deploy/config.toml" ] || fail "archive unexpectedly contains config.toml"
     [ ! -f "$extract_dir/to-digi-rs-deploy/plu.mdb" ] || fail "archive unexpectedly contains plu.mdb"
 }

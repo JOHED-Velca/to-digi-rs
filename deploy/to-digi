@@ -65,6 +65,16 @@ host_stdin_is_tty() {
     test_tty_override_enabled && [ "${TO_DIGI_RS_TEST_STDIN_TTY:-}" = "1" ]
 }
 
+requires_container_stdin() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --config-secret-stdin|--config-secret-stdin=*|--config_secret_stdin|--config_secret_stdin=*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 command_label() {
     if has_arg_name "--help" "$@" || has_arg_name "-h" "$@"; then
         printf 'info\n'
@@ -218,7 +228,7 @@ validate_local_inputs() {
         [ -f "$SCRIPT_DIR/config.toml" ] || fail "Missing required configuration file:
 $SCRIPT_DIR/config.toml
 
-Run ./to-digi init, then edit config.toml with the customer DIGIweb host and secret." 2
+Run ./to-digi init, then use ./to-digi import --config-ip IP --config-secret." 2
         [ -r "$SCRIPT_DIR/config.toml" ] || fail "config.toml is not readable: $SCRIPT_DIR/config.toml" 2
     fi
     if needs_source_mdb "${1:-import}"; then
@@ -479,7 +489,7 @@ printf 'Deployment directory: %s\n' "$SCRIPT_DIR"
 printf 'Command: %s\n' "$COMMAND_LABEL"
 
 DOCKER_TTY_ARGS=()
-if host_stdin_is_tty; then
+if host_stdin_is_tty || requires_container_stdin "${FORWARDED_ARGS[@]}"; then
     DOCKER_TTY_ARGS+=(--interactive)
 fi
 if host_stdout_is_tty; then

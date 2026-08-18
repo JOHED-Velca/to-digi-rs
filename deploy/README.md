@@ -7,7 +7,7 @@ This directory is the portable customer deployment template for `to-digi-rs` v0.
 New deployments no longer require cloning the repository or manually downloading scripts. Initialize an empty host directory from the Docker image:
 
 ```bash
-IMAGE="ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1"
+IMAGE="ghcr.io/johed-velca/to-digi-rs:0.9.0"
 
 mkdir -p ~/digi/to-digi-rs-deploy
 cd ~/digi/to-digi-rs-deploy
@@ -22,9 +22,30 @@ docker run --rm \
   init
 ```
 
-The generated launcher and Compose file are pinned to the exact image that created them, such as `ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1`. Customers do not need Git, Rust, source code, or a publishing token. `TO_DIGI_RS_IMAGE` remains an advanced manual override. Release candidates are pilot builds and should not be treated as final releases.
+The generated launcher, Compose file, and packaged README are pinned to the exact image that created them. Customers do not need Git, Rust, source code, or a publishing token. `TO_DIGI_RS_IMAGE` remains an advanced manual override. Release candidates are pilot builds and should not be treated as final releases.
 
-Then edit `config.toml`, place `plu.mdb` beside `to-digi`, and run:
+Then place `plu.mdb` beside `to-digi` and run the first import with customer setup flags:
+
+```bash
+./to-digi import \
+  --config-ip 192.168.0.150 \
+  --config-secret
+```
+
+`--config-ip` writes the customer DIGIweb host into customer-local URL fields such as `digiweb.base_url` and absolute `digiweb.token_url` values. Relative endpoint paths remain relative. `--config-secret` prompts for the DIGIweb client secret without echoing it, persists it to `config.toml`, creates a timestamped backup, then continues using the updated configuration.
+
+For non-interactive setup, read the secret from stdin rather than putting it in argv:
+
+```bash
+printf '%s' "$DIGI_SECRET" |
+./to-digi import \
+  --config-ip 192.168.0.150 \
+  --config-secret-stdin
+```
+
+`TO_DIGI_RS_CLIENT_SECRET` remains available as a runtime environment override and is not persisted unless the operator explicitly uses `--config-secret` or `--config-secret-stdin`.
+
+Typical follow-up commands:
 
 ```bash
 ./to-digi doctor
@@ -82,6 +103,8 @@ The bundle never includes a real `plu.mdb`, customer credentials, logs, manifest
 ./to-digi import --limit 1
 ./to-digi import --plu PLU_NUMBER
 ./to-digi import --continue-on-error
+./to-digi import --config-ip 192.168.0.150 --config-secret
+./to-digi import --config-ip 192.168.0.150 --config-secret-stdin
 ./to-digi resume output/run-YYYYMMDD-HHMMSS-import/import-results.json
 ./to-digi resume output/run-YYYYMMDD-HHMMSS-import/import-results.json --retry-failed
 ./to-digi version
@@ -177,6 +200,16 @@ confirmed_label_formats = []
 ```
 
 Existing full `v0.8.0` configs continue to parse. Defaults are supplied for client id, token path, PLU write path, request-status path, timeouts, mapping table names, and payload previews. `token_url` may be omitted, absolute, or a relative path resolved against `base_url`.
+
+Customer setup flags can update the generated config before import:
+
+```bash
+./to-digi import --config-ip 192.168.0.150 --config-secret
+```
+
+`--config-ip` accepts only an IP address, not a URL. It updates `digiweb.base_url` and any absolute customer-local `digiweb.token_url`, preserving scheme, port, path, and query. Relative endpoint paths stay relative. `--config_ip` is accepted as an alias.
+
+`--config-secret` prompts without echoing and persists the secret to `config.toml`. `--config-secret-stdin` reads and persists the secret from stdin for automation. `--config_secret` and `--config_secret_stdin` are accepted aliases. The existing `TO_DIGI_RS_CLIENT_SECRET` runtime override remains unchanged and is not persisted automatically.
 
 `[import].max_in_flight` bounds concurrent accepted DIGIweb requests. Higher values can shorten large imports but increase server load; lower values are more conservative. `max_in_flight = 1` restores the original sequential submit-then-poll behavior.
 

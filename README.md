@@ -11,8 +11,8 @@ Version `0.9.0` preserves the validated `v0.8.0` importer behavior and adds a se
 ```text
 docker pull image
 -> docker run image init
--> edit generated config.toml
 -> place plu.mdb
+-> ./to-digi import --config-ip ... --config-secret
 -> ./to-digi doctor
 -> ./to-digi analyze
 -> ./to-digi import
@@ -23,7 +23,7 @@ The immutable `v0.8.0` release remains `27e77faa136439a2e42f9a6ff63b17ad4ff720ac
 ## First-Time Ubuntu/WSL Installation
 
 ```bash
-IMAGE="ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1"
+IMAGE="ghcr.io/johed-velca/to-digi-rs:0.9.0"
 
 mkdir -p ~/digi/to-digi-rs-deploy
 cd ~/digi/to-digi-rs-deploy
@@ -53,11 +53,28 @@ profiles/starsky.toml
 output/
 ```
 
-The generated launcher and Compose file are pinned to the exact image that created them, such as `ghcr.io/johed-velca/to-digi-rs:0.9.0-rc.1`. The customer does not need Git, Rust, source code, or a publishing token. `TO_DIGI_RS_IMAGE` remains available as an advanced manual override when an operator intentionally wants to run a different image.
+The generated launcher and Compose file are pinned to the exact image that created them. The customer does not need Git, Rust, source code, or a publishing token. `TO_DIGI_RS_IMAGE` remains available as an advanced manual override when an operator intentionally wants to run a different image.
 
-Release-candidate images such as `0.9.0-rc.1` are pilot builds, not final releases.
+Release-candidate images such as `0.9.0-rc.N` are pilot builds, not final releases.
 
-Then place the customer database in the same directory using the exact filename `plu.mdb`, edit only the DIGIweb host/IP and client secret in `config.toml`, and run:
+Then place the customer database in the same directory using the exact filename `plu.mdb`, configure the customer DIGIweb host and secret, and continue:
+
+```bash
+./to-digi import \
+  --config-ip 192.168.0.150 \
+  --config-secret
+```
+
+`--config-secret` prompts without echoing the secret, writes it to `config.toml`, creates a backup, and then continues with the import. Use stdin for automation without exposing the secret through argv:
+
+```bash
+printf '%s' "$DIGI_SECRET" |
+./to-digi import \
+  --config-ip 192.168.0.150 \
+  --config-secret-stdin
+```
+
+Follow-up commands:
 
 ```bash
 ./to-digi doctor
@@ -90,6 +107,7 @@ Then place the customer database in the same directory using the exact filename 
 ./to-digi verify [--profile starsky|bigway] [--sanitize-profile profiles/custom.toml]
 ./to-digi import [--limit N | --test | --plu PLU_NUMBER] [--dry-run] [--continue-on-error]
 ./to-digi import [--profile starsky|bigway] [--sanitize-profile profiles/custom.toml]
+./to-digi import [--config-ip IP] [--config-secret | --config-secret-stdin]
 ./to-digi confirm all --profile bigway [--dry-run | --yes]
 ./to-digi resume output/run-YYYYMMDD-HHMMSS-import/import-results.json [--retry-failed]
 ./to-digi version
@@ -216,6 +234,16 @@ default = ""
 ```
 
 Existing full `v0.8.0` configuration files remain compatible. Defaults are supplied for client id, token path, PLU write path, status path, timeouts, table names, store number, and payload-preview behavior. `token_url` may be an absolute URL or a relative path resolved against `base_url`; when omitted, the standard Keycloak token path is derived from `base_url`.
+
+Customer setup flags can update the generated config before import:
+
+```bash
+./to-digi import --config-ip 192.168.0.150 --config-secret
+```
+
+`--config-ip` accepts only an IP address, not a URL. It updates `digiweb.base_url` and any absolute customer-local `digiweb.token_url`, preserving scheme, port, path, and query. Relative endpoint paths stay relative. `--config_secret` is accepted as an alias for `--config-secret`.
+
+`--config-secret` prompts without echoing and persists the secret to `config.toml`. `--config-secret-stdin` reads and persists the secret from stdin for automation. The existing `TO_DIGI_RS_CLIENT_SECRET` runtime override remains unchanged and is not persisted automatically.
 
 `[import].max_in_flight` controls how many submitted DIGIweb requests may be active at once. Higher values can improve full-import speed but put more load on DIGIweb; lower values are more conservative. Set `max_in_flight = 1` to reproduce the original sequential submit-then-poll behavior.
 

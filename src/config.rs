@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt;
 use std::fs;
 use std::path::Path;
 
@@ -24,7 +25,7 @@ pub struct AppConfig {
     pub verification: VerificationConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct DigiwebConfig {
     pub base_url: String,
@@ -38,6 +39,41 @@ pub struct DigiwebConfig {
     pub request_status_path_template: String,
     pub plu_barcode_type: String,
     pub plu_barcode_ref_no: String,
+}
+
+impl fmt::Debug for DigiwebConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DigiwebConfig")
+            .field("base_url", &self.base_url)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &if self.client_secret.is_empty() {
+                    "<empty>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field(
+                "log_credentials_for_testing",
+                &self.log_credentials_for_testing,
+            )
+            .field("token_url", &self.token_url)
+            .field("store_number", &self.store_number)
+            .field(
+                "allow_invalid_certificates",
+                &self.allow_invalid_certificates,
+            )
+            .field("plu_upsert_path", &self.plu_upsert_path)
+            .field(
+                "request_status_path_template",
+                &self.request_status_path_template,
+            )
+            .field("plu_barcode_type", &self.plu_barcode_type)
+            .field("plu_barcode_ref_no", &self.plu_barcode_ref_no)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
