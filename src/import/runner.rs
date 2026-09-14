@@ -53,19 +53,19 @@ struct RuntimeImportMetrics {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct ProgressSnapshot {
-    selected: usize,
-    completed: usize,
-    success: usize,
-    failed: usize,
-    unknown: usize,
-    active: usize,
-    remaining: usize,
-    elapsed: Duration,
+pub struct ImportProgressSnapshot {
+    pub selected: usize,
+    pub completed: usize,
+    pub success: usize,
+    pub failed: usize,
+    pub unknown: usize,
+    pub active: usize,
+    pub remaining: usize,
+    pub elapsed: Duration,
 }
 
-impl ProgressSnapshot {
-    fn percent(&self) -> f64 {
+impl ImportProgressSnapshot {
+    pub fn percent(&self) -> f64 {
         if self.selected == 0 {
             100.0
         } else {
@@ -73,7 +73,7 @@ impl ProgressSnapshot {
         }
     }
 
-    fn rate_per_second(&self) -> f64 {
+    pub fn rate_per_second(&self) -> f64 {
         let elapsed = self.elapsed.as_secs_f64();
         if elapsed <= 0.0 {
             0.0
@@ -82,7 +82,7 @@ impl ProgressSnapshot {
         }
     }
 
-    fn eta(&self) -> Option<Duration> {
+    pub fn eta(&self) -> Option<Duration> {
         let rate = self.rate_per_second();
         if rate <= 0.0 || self.remaining == 0 {
             None
@@ -92,9 +92,11 @@ impl ProgressSnapshot {
     }
 }
 
-struct ProgressReporter {
+struct ProgressReporter<'a> {
     interactive: bool,
+    console_enabled: bool,
     last_printed: Option<Instant>,
+    observer: Option<&'a mut dyn FnMut(ImportProgressSnapshot)>,
 }
 
 pub async fn run_import(
@@ -107,6 +109,90 @@ pub async fn run_import(
     sanitization: Option<SanitizationIntegration>,
     options: ImportRunOptions,
     logger: &mut AuditLogger,
+) -> Result<ImportSummary, AppError> {
+    run_import_with_stdout(
+        config,
+        plus,
+        source_identity,
+        target_identity,
+        manifest_path,
+        resume_manifest,
+        sanitization,
+        options,
+        logger,
+        true,
+        None,
+    )
+    .await
+}
+
+pub async fn run_import_quiet(
+    config: AppConfig,
+    plus: &[Plu],
+    source_identity: SourceIdentity,
+    target_identity: TargetIdentity,
+    manifest_path: &Path,
+    resume_manifest: Option<&Path>,
+    sanitization: Option<SanitizationIntegration>,
+    options: ImportRunOptions,
+    logger: &mut AuditLogger,
+) -> Result<ImportSummary, AppError> {
+    run_import_with_stdout(
+        config,
+        plus,
+        source_identity,
+        target_identity,
+        manifest_path,
+        resume_manifest,
+        sanitization,
+        options,
+        logger,
+        false,
+        None,
+    )
+    .await
+}
+
+pub async fn run_import_quiet_with_progress(
+    config: AppConfig,
+    plus: &[Plu],
+    source_identity: SourceIdentity,
+    target_identity: TargetIdentity,
+    manifest_path: &Path,
+    resume_manifest: Option<&Path>,
+    sanitization: Option<SanitizationIntegration>,
+    options: ImportRunOptions,
+    logger: &mut AuditLogger,
+    progress_observer: &mut dyn FnMut(ImportProgressSnapshot),
+) -> Result<ImportSummary, AppError> {
+    run_import_with_stdout(
+        config,
+        plus,
+        source_identity,
+        target_identity,
+        manifest_path,
+        resume_manifest,
+        sanitization,
+        options,
+        logger,
+        false,
+        Some(progress_observer),
+    )
+    .await
+}
+
+async fn run_import_with_stdout(
+    config: AppConfig,
+    plus: &[Plu],
+    source_identity: SourceIdentity,
+    target_identity: TargetIdentity,
+    manifest_path: &Path,
+    resume_manifest: Option<&Path>,
+    sanitization: Option<SanitizationIntegration>,
+    options: ImportRunOptions,
+    logger: &mut AuditLogger,
+    stdout_enabled: bool,
+    progress_observer: Option<&mut dyn FnMut(ImportProgressSnapshot)>,
 ) -> Result<ImportSummary, AppError> {
     config.token_url()?;
     config.plu_upsert_path()?;
@@ -124,7 +210,7 @@ pub async fn run_import(
             criteria,
         )
         .map_err(|failure| AppError::ValidationPayload(failure.message()))?;
-        enforce_reference_readiness(&selected_for_readiness, &config, logger)?;
+        enforce_reference_readiness(&selected_for_readiness, &config, logger, stdout_enabled)?;
     }
     let client = DigiwebClient::new(config.clone())?;
 
@@ -182,12 +268,14 @@ pub async fn run_import(
         )?;
         logger.kv("Not attempted", &manifest.summary.not_attempted.to_string())?;
         logger.kv("Already successful", "0")?;
-        print!(
-            "IMPORT RUN CREATED\n\nManifest:\n{}\n\nSelected PLUs: {}\nNot attempted: {}\nAlready successful: 0\n\n",
-            manifest_path.display(),
-            manifest.selection.selected_count,
-            manifest.summary.not_attempted
-        );
+        if stdout_enabled {
+            print!(
+                "IMPORT RUN CREATED\n\nManifest:\n{}\n\nSelected PLUs: {}\nNot attempted: {}\nAlready successful: 0\n\n",
+                manifest_path.display(),
+                manifest.selection.selected_count,
+                manifest.summary.not_attempted
+            );
+        }
         manifest
     };
     let active_manifest_path = resume_manifest.unwrap_or(manifest_path);
@@ -213,7 +301,7 @@ pub async fn run_import(
         &config,
     )?;
     if resume_manifest.is_some() {
-        enforce_reference_readiness(&selected_plus, &config, logger)?;
+        enforce_reference_readiness(&selected_plus, &config, logger, stdout_enabled)?;
     }
 
     if resume_manifest.is_some() {
@@ -254,16 +342,18 @@ pub async fn run_import(
             &plan.ambiguous_submissions.to_string(),
         )?;
         logger.kv("Not attempted", &plan.not_attempted_to_submit.to_string())?;
-        print!(
-            "RESUMING IMPORT\n\nManifest:\n{}\n\nSelected PLUs: {}\nAlready successful: {}\nExisting requests to poll: {}\nConfirmed failures: {}\nAmbiguous submissions: {}\nNot attempted: {}\n\n",
-            active_manifest_path.display(),
-            manifest.selection.selected_count,
-            plan.already_successful,
-            plan.existing_requests_to_poll,
-            plan.confirmed_failures,
-            plan.ambiguous_submissions,
-            plan.not_attempted_to_submit
-        );
+        if stdout_enabled {
+            print!(
+                "RESUMING IMPORT\n\nManifest:\n{}\n\nSelected PLUs: {}\nAlready successful: {}\nExisting requests to poll: {}\nConfirmed failures: {}\nAmbiguous submissions: {}\nNot attempted: {}\n\n",
+                active_manifest_path.display(),
+                manifest.selection.selected_count,
+                plan.already_successful,
+                plan.existing_requests_to_poll,
+                plan.confirmed_failures,
+                plan.ambiguous_submissions,
+                plan.not_attempted_to_submit
+            );
+        }
     } else {
         if options.test_mode {
             logger.line("Test mode enabled: equivalent to --limit 1.")?;
@@ -335,6 +425,8 @@ pub async fn run_import(
         logger,
         &mut runtime_metrics,
         run_timer,
+        stdout_enabled,
+        progress_observer,
     )
     .await?;
     if !interrupted {
@@ -376,23 +468,25 @@ pub async fn run_import(
         "Average PLUs/sec",
         &manifest.metrics.average_plus_per_second,
     )?;
-    print!(
-        "{}\n\nManifest status: {}\n\nSelected PLUs: {}\nSuccessful: {}\nFailed: {}\nUnknown status: {}\nAmbiguous submissions: {}\nNot attempted: {}\nMax in-flight observed: {}\nAverage PLUs/sec: {}\n",
-        if resume_manifest.is_some() {
-            "RESUME COMPLETE"
-        } else {
-            "IMPORT RUN COMPLETE"
-        },
-        status.as_text(),
-        manifest.selection.selected_count,
-        manifest.summary.success,
-        manifest.summary.failed,
-        manifest.summary.unknown_status,
-        manifest.summary.ambiguous_submission,
-        manifest.summary.not_attempted,
-        manifest.metrics.max_in_flight_observed,
-        manifest.metrics.average_plus_per_second
-    );
+    if stdout_enabled {
+        print!(
+            "{}\n\nManifest status: {}\n\nSelected PLUs: {}\nSuccessful: {}\nFailed: {}\nUnknown status: {}\nAmbiguous submissions: {}\nNot attempted: {}\nMax in-flight observed: {}\nAverage PLUs/sec: {}\n",
+            if resume_manifest.is_some() {
+                "RESUME COMPLETE"
+            } else {
+                "IMPORT RUN COMPLETE"
+            },
+            status.as_text(),
+            manifest.selection.selected_count,
+            manifest.summary.success,
+            manifest.summary.failed,
+            manifest.summary.unknown_status,
+            manifest.summary.ambiguous_submission,
+            manifest.summary.not_attempted,
+            manifest.metrics.max_in_flight_observed,
+            manifest.metrics.average_plus_per_second
+        );
+    }
     Ok(summary_from_manifest(&manifest, plus.len()))
 }
 
@@ -409,6 +503,8 @@ async fn run_bounded_import_loop(
     logger: &mut AuditLogger,
     metrics: &mut RuntimeImportMetrics,
     run_started: Instant,
+    stdout_enabled: bool,
+    progress_observer: Option<&mut dyn FnMut(ImportProgressSnapshot)>,
 ) -> Result<bool, AppError> {
     let max_in_flight = config.import.max_in_flight.clamp(1, 64);
     let poll_interval = Duration::from_millis(config.timeouts.poll_interval_millis.max(1));
@@ -421,7 +517,7 @@ async fn run_bounded_import_loop(
     let mut in_flight = Vec::<InFlightRequest>::new();
     let mut stop_new_submissions = false;
     let mut interrupt_signal = Box::pin(tokio::signal::ctrl_c());
-    let mut progress = ProgressReporter::new();
+    let mut progress = ProgressReporter::new(stdout_enabled, progress_observer);
     progress.print(true, manifest, in_flight.len(), run_started)?;
 
     loop {
@@ -933,11 +1029,16 @@ fn average_u128(values: &[u128]) -> Option<u128> {
     }
 }
 
-impl ProgressReporter {
-    fn new() -> Self {
+impl<'a> ProgressReporter<'a> {
+    fn new(
+        console_enabled: bool,
+        observer: Option<&'a mut dyn FnMut(ImportProgressSnapshot)>,
+    ) -> Self {
         Self {
             interactive: io::stdout().is_terminal(),
+            console_enabled,
             last_printed: None,
+            observer,
         }
     }
 
@@ -948,6 +1049,13 @@ impl ProgressReporter {
         active: usize,
         started: Instant,
     ) -> Result<(), AppError> {
+        let snapshot = progress_snapshot(manifest, active, started.elapsed());
+        if let Some(observer) = self.observer.as_deref_mut() {
+            observer(snapshot.clone());
+        }
+        if !self.console_enabled {
+            return Ok(());
+        }
         let now = Instant::now();
         if !force
             && self
@@ -957,7 +1065,6 @@ impl ProgressReporter {
             return Ok(());
         }
         self.last_printed = Some(now);
-        let snapshot = progress_snapshot(manifest, active, started.elapsed());
         if self.interactive {
             print!("\r{}", render_interactive_progress(&snapshot));
             io::stdout()
@@ -977,10 +1084,10 @@ fn progress_snapshot(
     manifest: &ImportManifest,
     active: usize,
     elapsed: Duration,
-) -> ProgressSnapshot {
+) -> ImportProgressSnapshot {
     let unknown = manifest.summary.unknown_status + manifest.summary.ambiguous_submission;
     let completed = manifest.summary.success + manifest.summary.failed + unknown;
-    ProgressSnapshot {
+    ImportProgressSnapshot {
         selected: manifest.selection.selected_count,
         completed,
         success: manifest.summary.success,
@@ -992,12 +1099,12 @@ fn progress_snapshot(
     }
 }
 
-fn render_interactive_progress(snapshot: &ProgressSnapshot) -> String {
+fn render_interactive_progress(snapshot: &ImportProgressSnapshot) -> String {
     render_interactive_progress_with_options(snapshot, terminal_width(), unicode_progress_enabled())
 }
 
 fn render_interactive_progress_with_options(
-    snapshot: &ProgressSnapshot,
+    snapshot: &ImportProgressSnapshot,
     terminal_width: usize,
     unicode: bool,
 ) -> String {
@@ -1056,7 +1163,7 @@ fn unicode_progress_enabled() -> bool {
         .unwrap_or(false)
 }
 
-fn render_noninteractive_progress(snapshot: &ProgressSnapshot) -> String {
+fn render_noninteractive_progress(snapshot: &ImportProgressSnapshot) -> String {
     format!(
         "PROGRESS selected={} completed={} percent={:.1} success={} failed={} unknown={} active={} remaining={} rate={:.1}/s elapsed={} eta={}",
         snapshot.selected,
@@ -1092,6 +1199,7 @@ fn enforce_reference_readiness(
     selected_plus: &[&Plu],
     config: &AppConfig,
     logger: &mut AuditLogger,
+    stdout_enabled: bool,
 ) -> Result<(), AppError> {
     let selected_for_readiness_owned = selected_plus
         .iter()
@@ -1145,10 +1253,12 @@ fn enforce_reference_readiness(
     logger.line("No PLUs were submitted.")?;
     logger.kv("PLU write requests", "0")?;
     logger.line("Run: ./to-digi verify")?;
-    print!(
-        "IMPORT BLOCKED\n\nUnverified required references: {}\n\nNo PLUs were submitted.\n\nRun:\n./to-digi verify\n\n",
-        reference_readiness.unverified_reference_count
-    );
+    if stdout_enabled {
+        print!(
+            "IMPORT BLOCKED\n\nUnverified required references: {}\n\nNo PLUs were submitted.\n\nRun:\n./to-digi verify\n\n",
+            reference_readiness.unverified_reference_count
+        );
+    }
     Err(AppError::ValidationPayload(
         "import blocked by unverified required DIGIweb references".to_string(),
     ))
@@ -2039,6 +2149,59 @@ mod tests {
         assert!(!line.contains('\r'));
         assert!(!line.contains('\n'));
         assert!(!line.contains('\x1b'));
+    }
+
+    #[test]
+    fn progress_observer_receives_snapshot_when_console_output_is_disabled() {
+        let manifest = progress_manifest(&[RecordStatus::Success, RecordStatus::NotAttempted]);
+        let mut observed = Vec::new();
+        {
+            let mut observer = |snapshot: ImportProgressSnapshot| observed.push(snapshot);
+            let mut reporter = ProgressReporter::new(false, Some(&mut observer));
+
+            reporter
+                .print(false, &manifest, 1, Instant::now())
+                .expect("progress");
+
+            assert_eq!(reporter.last_printed, None);
+        }
+
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].selected, 2);
+        assert_eq!(observed[0].completed, 1);
+        assert_eq!(observed[0].success, 1);
+        assert_eq!(observed[0].active, 1);
+    }
+
+    #[test]
+    fn progress_observer_reports_current_manifest_state_without_mutating_results() {
+        let mut manifest =
+            progress_manifest(&[RecordStatus::NotAttempted, RecordStatus::NotAttempted]);
+        let mut observed = Vec::new();
+        {
+            let mut observer = |snapshot: ImportProgressSnapshot| observed.push(snapshot);
+            let mut reporter = ProgressReporter::new(false, Some(&mut observer));
+            let started = Instant::now();
+
+            reporter
+                .print(false, &manifest, 0, started)
+                .expect("initial progress");
+            manifest.records[0].status = RecordStatus::Success;
+            manifest.recalculate_summary();
+            reporter
+                .print(false, &manifest, 0, started)
+                .expect("updated progress");
+        }
+
+        assert_eq!(
+            observed
+                .iter()
+                .map(|snapshot| (snapshot.completed, snapshot.success, snapshot.remaining))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 2), (1, 1, 1)]
+        );
+        assert_eq!(manifest.summary.success, 1);
+        assert_eq!(manifest.summary.not_attempted, 1);
     }
 
     #[test]

@@ -96,7 +96,11 @@ pub fn run_init(refresh_generated_files: bool, logger: &mut AuditLogger) -> Resu
 
     println!("Created or verified deployment files.");
     println!("Primary launcher: ./to-digi");
-    println!("Next steps: edit config.toml, place plu.mdb here, then run ./to-digi doctor");
+    println!("Deployment ready.");
+    println!("Place MDB:");
+    println!("~/digi/plu.mdb");
+    println!("Then run:");
+    println!("./to-digi");
     logger.line("Initialization complete.")?;
     logger.flush()?;
     Ok(0)

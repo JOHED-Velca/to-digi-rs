@@ -17,6 +17,7 @@ mod recovery;
 mod sanitization;
 mod selection;
 mod source;
+mod terminal_ui;
 mod validation;
 
 use std::fs;
@@ -82,6 +83,48 @@ use validation::validator::{ValidationReport, valid_plu_candidates, validate_plu
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    if cli.command.is_none() {
+        if terminal_ui::should_launch_interactive(
+            false,
+            io::stdin().is_terminal(),
+            io::stdout().is_terminal(),
+        ) {
+            let default_profile =
+                AppConfig::load(Path::new("config.toml"))
+                    .ok()
+                    .and_then(|config| {
+                        let value = config.profiles.default.trim().to_string();
+                        (!value.is_empty()).then_some(value)
+                    });
+            let mut logger = match AuditLogger::create(Path::new("logs.txt")) {
+                Ok(logger) => logger,
+                Err(err) => {
+                    eprintln!("failed to create logs.txt: {err}");
+                    std::process::exit(4);
+                }
+            };
+            match terminal_ui::run_terminal_ui(
+                terminal_ui::TerminalUiOptions { default_profile },
+                &mut logger,
+            )
+            .await
+            {
+                Ok(terminal_ui::TerminalExit::Quit) => std::process::exit(0),
+                Ok(terminal_ui::TerminalExit::Command(cli)) => {
+                    let exit_code = run(&cli, &mut logger).await;
+                    std::process::exit(exit_code);
+                }
+                Err(err) => {
+                    let _ = logger.error(err.to_string());
+                    eprintln!("failed to run interactive menu: {err}");
+                    std::process::exit(err.exit_code());
+                }
+            }
+        } else {
+            eprint!("{}", terminal_ui::no_terminal_message());
+            std::process::exit(2);
+        }
+    }
     let exit_code = match AuditLogger::create(Path::new("logs.txt")) {
         Ok(mut logger) => run(&cli, &mut logger).await,
         Err(err) => {

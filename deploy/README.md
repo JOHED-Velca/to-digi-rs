@@ -24,7 +24,13 @@ docker run --rm \
 
 The generated launcher, Compose file, and packaged README are pinned to the exact image that created them. Customers do not need Git, Rust, source code, or a publishing token. `TO_DIGI_RS_IMAGE` remains an advanced manual override. Release candidates are pilot builds and should not be treated as final releases.
 
-Then place `plu.mdb` beside `to-digi` and run the first import with customer setup flags:
+Then place the customer database at `~/digi/plu.mdb` and run the guided workflow:
+
+```bash
+./to-digi
+```
+
+Advanced setup can still be done from the CLI:
 
 ```bash
 ./to-digi import \
@@ -114,6 +120,7 @@ The launcher:
 
 - Resolves its own directory, including paths with spaces.
 - Bind-mounts that directory to `/work`.
+- Bind-mounts `$HOME/digi/plu.mdb` to `/work/plu.mdb` read-only for source-using commands.
 - Runs the container as the invoking UID/GID.
 - Uses host networking for local-network DIGIweb access on Linux.
 - Prints the selected image and command.
@@ -136,7 +143,7 @@ Pull only the selected image:
 
 The launcher does not prune, stop, remove, or modify unrelated Docker resources.
 
-`discover`, `diagnose`, `dry-run`, `map-audit`, and `profile suggest` are offline-only diagnostics. They require `plu.mdb`, but not `config.toml` or credentials, and they do not authenticate, contact DIGIweb, submit PLUs, or modify the source MDB.
+`discover`, `diagnose`, `dry-run`, `map-audit`, and `profile suggest` are offline-only diagnostics. They require `~/digi/plu.mdb`, but not `config.toml` or credentials, and they do not authenticate, contact DIGIweb, submit PLUs, or modify the source MDB.
 
 `diagnose` writes exact invalid/skipped PLU details, duplicate effective barcode groups, and required label formats to `diagnostics-report.txt/json`. `diagnose --plu N` also shows local details for valid PLUs, including raw/effective Label Format, required references, ingredient/NFT counts, and payload destination summary. `dry-run` writes `dry-run-report.txt` and `dry-run-manifest.json`, may build payload previews, and always records zero API write requests. `dry-run --plu N` and `import --plu N` select that exact normalized valid PLU only; they do not substitute another PLU when the target is missing, invalid, duplicated, or excluded.
 
@@ -317,7 +324,7 @@ The launcher preserves previous output and only removes transient root-level rep
 
 `Missing config.toml`: run `./to-digi init` or copy `config.example.toml` to `config.toml`.
 
-`Missing plu.mdb`: place the customer Access database beside `to-digi` using the exact lowercase filename `plu.mdb`.
+`Missing plu.mdb`: place the customer Access database at `~/digi/plu.mdb` using the exact lowercase filename `plu.mdb`.
 
 `dry_run_inspect_only conflict`: run `./to-digi dry-run` or remove the deprecated setting before running a live `./to-digi import`.
 

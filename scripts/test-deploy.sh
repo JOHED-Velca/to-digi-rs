@@ -149,6 +149,7 @@ FAKE
 copy_deploy() {
     local dir="$1"
     mkdir -p "$dir/profiles" "$dir/output"
+    mkdir -p "$TEST_ROOT/home/digi"
     cp "$ROOT_DIR/deploy/to-digi" "$dir/to-digi"
     cp "$ROOT_DIR/deploy/import.sh" "$dir/import.sh"
     cp "$ROOT_DIR/deploy/run.sh" "$dir/run.sh"
@@ -157,7 +158,8 @@ copy_deploy() {
     cp "$ROOT_DIR/profiles/example.toml" "$dir/profiles/example.toml"
     cp "$ROOT_DIR/profiles/bigway.toml" "$dir/profiles/bigway.toml"
     cp "$ROOT_DIR/profiles/starsky.toml" "$dir/profiles/starsky.toml"
-    printf 'mdb\n' >"$dir/plu.mdb"
+    printf 'deployment-dir-mdb-should-not-be-used\n' >"$dir/plu.mdb"
+    printf 'canonical-mdb\n' >"$TEST_ROOT/home/digi/plu.mdb"
     chmod +x "$dir/to-digi" "$dir/import.sh" "$dir/run.sh"
 }
 
@@ -170,6 +172,7 @@ run_with_fake_docker() {
     make_fake_docker "$fake_dir/docker"
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-docker.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$fake_dir:$PATH" \
     "$deploy_dir/to-digi" "$@" >"$output_file" 2>&1
 }
@@ -184,7 +187,7 @@ test_launcher_archives_output_and_preserves_exit_code() {
     make_fake_docker "$fake_dir/docker"
     set +e
     FAKE_DOCKER_LOG="$log" FAKE_IMPORT_EXIT=7 TO_DIGI_RS_IMAGE=to-digi-rs:0.9.0 \
-    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" PATH="$fake_dir:$PATH" \
     "$deploy_dir/to-digi" import --limit 1 >"$output" 2>&1
     local code=$?
     set -e
@@ -193,6 +196,7 @@ test_launcher_archives_output_and_preserves_exit_code() {
     assert_contains "$output" "Importer exit code: 7"
     assert_contains "$log" "run --rm"
     assert_contains "$log" "--mount type=bind,src=$deploy_dir,dst=/work"
+    assert_contains "$log" "--mount type=bind,src=$TEST_ROOT/home/digi/plu.mdb,dst=/work/plu.mdb,readonly"
     assert_contains "$log" "import --limit 1"
     [ -f "$deploy_dir"/output/run-*-import/logs.txt ] || fail "logs.txt was not archived"
     [ -f "$deploy_dir"/output/run-*-import/import-results.json ] || fail "manifest was not archived"
@@ -238,13 +242,14 @@ test_missing_config_and_plu_fail_clearly() {
     assert_contains "$output" "Missing required configuration file"
 
     copy_deploy "$deploy_dir"
-    rm "$deploy_dir/plu.mdb"
+    rm "$TEST_ROOT/home/digi/plu.mdb"
     set +e
     run_with_fake_docker "$deploy_dir" "$output" analyze
     code=$?
     set -e
     [ "$code" -eq 2 ] || fail "missing plu exit code was $code"
     assert_contains "$output" "Missing required source database"
+    assert_contains "$output" "~/digi/plu.mdb"
 }
 
 test_profile_and_resume_paths_are_translated() {
@@ -301,7 +306,7 @@ test_doctor_checks_image_and_never_imports_data() {
     local fake_dir="$TEST_ROOT/fake-bin"
     mkdir -p "$fake_dir"
     make_fake_docker "$fake_dir/docker"
-    FAKE_DOCKER_LOG="$doctor_log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    FAKE_DOCKER_LOG="$doctor_log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" doctor >"$output" 2>&1
     assert_contains "$doctor_log" "image inspect ghcr.io/johed-velca/to-digi-rs:0.9.0"
     assert_contains "$doctor_log" "doctor --inside-container"
@@ -309,7 +314,7 @@ test_doctor_checks_image_and_never_imports_data() {
     assert_not_contains "$doctor_log" "import --limit"
 
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-doctor-selected.log" TO_DIGI_RS_IMAGE=to-digi-rs:dev-selected \
-    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$fake_dir:$PATH" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" PATH="$fake_dir:$PATH" \
     "$deploy_dir/to-digi" doctor >"$output" 2>&1
     assert_contains "$TEST_ROOT/fake-doctor-selected.log" "image inspect to-digi-rs:dev-selected"
     assert_contains "$TEST_ROOT/fake-doctor-selected.log" "TO_DIGI_RS_IMAGE=to-digi-rs:dev-selected"
@@ -318,7 +323,7 @@ test_doctor_checks_image_and_never_imports_data() {
 
     set +e
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-doctor-image.log" FAKE_DOCKER_IMAGE_INSPECT_EXIT=1 \
-    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 PATH="$TEST_ROOT/fake-bin:$PATH" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
     "$deploy_dir/to-digi" doctor >"$output" 2>&1
     local code=$?
     set -e
@@ -330,12 +335,12 @@ test_wrappers_forward_to_to_digi() {
     local deploy_dir="$TEST_ROOT/deploy-wrappers"
     local output="$TEST_ROOT/output-wrapper.txt"
     copy_deploy "$deploy_dir"
-    FAKE_DOCKER_LOG="$TEST_ROOT/fake-docker.log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-docker.log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$TEST_ROOT/fake-bin:$PATH" "$deploy_dir/import.sh" analyze >"$output" 2>&1
     assert_contains "$output" "NOTICE: import.sh is a compatibility wrapper"
     assert_contains "$TEST_ROOT/fake-docker.log" "analyze"
 
-    FAKE_DOCKER_LOG="$TEST_ROOT/fake-docker.log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-docker.log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$TEST_ROOT/fake-bin:$PATH" "$deploy_dir/run.sh" version >"$output" 2>&1
     assert_contains "$output" "NOTICE: run.sh is a compatibility wrapper"
 }
@@ -346,7 +351,7 @@ test_cli_parse_error_without_log_is_not_warned_as_missing_log() {
     copy_deploy "$deploy_dir"
 
     set +e
-    FAKE_DOCKER_LOG="$TEST_ROOT/fake-parse-error.log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-parse-error.log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$TEST_ROOT/fake-bin:$PATH" "$deploy_dir/to-digi" import --plu 721 --test >"$output" 2>&1
     local code=$?
     set -e
@@ -362,7 +367,7 @@ test_non_usage_exit_without_log_still_warns_as_missing_log() {
     copy_deploy "$deploy_dir"
 
     set +e
-    FAKE_DOCKER_LOG="$TEST_ROOT/fake-missing-log.log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-missing-log.log" TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$TEST_ROOT/fake-bin:$PATH" "$deploy_dir/to-digi" import --fake-startup-failure >"$output" 2>&1
     local code=$?
     set -e
@@ -382,18 +387,21 @@ test_launcher_allocates_tty_only_for_interactive_stdout() {
 
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-tty-interactive.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDIN_TTY=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \
+    TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --test >"$output" 2>&1
     assert_contains "$TEST_ROOT/fake-tty-interactive.log" "--interactive"
     assert_contains "$TEST_ROOT/fake-tty-interactive.log" "--tty"
 
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-tty-redirected.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --test >"$output" 2>&1
     assert_not_contains "$TEST_ROOT/fake-tty-redirected.log" "--interactive"
     assert_not_contains "$TEST_ROOT/fake-tty-redirected.log" "--tty"
 
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-tty-piped.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDIN_TTY=1 \
+    TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --test | cat >"$output"
     assert_contains "$TEST_ROOT/fake-tty-piped.log" "--interactive"
     assert_not_contains "$TEST_ROOT/fake-tty-piped.log" "--tty"
@@ -409,12 +417,14 @@ test_launcher_allocates_interactive_stdin_independently() {
 
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-interactive.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDIN_TTY=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \
+    TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" confirm all --profile bigway >"$output" 2>&1
     assert_contains "$TEST_ROOT/fake-stdin-interactive.log" "--interactive"
     assert_contains "$TEST_ROOT/fake-stdin-interactive.log" "--tty"
 
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-yes.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
+    TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" confirm all --profile bigway --yes \
         </dev/null >"$output" 2>&1
     assert_contains "$TEST_ROOT/fake-stdin-yes.log" "confirm all --profile bigway --yes"
@@ -423,6 +433,7 @@ test_launcher_allocates_interactive_stdin_independently() {
 
     printf 'test-secret' | FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-secret.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \
+    TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --config-ip 192.168.0.150 --config-secret-stdin \
         >"$output" 2>&1
     assert_contains "$TEST_ROOT/fake-stdin-secret.log" "--interactive"
@@ -431,6 +442,7 @@ test_launcher_allocates_interactive_stdin_independently() {
 
     printf 'test-secret' | FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-secret-underscore.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \
+    TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --config_ip 192.168.0.150 --config_secret_stdin \
         >"$output" 2>&1
     assert_contains "$TEST_ROOT/fake-stdin-secret-underscore.log" "--interactive"
@@ -439,6 +451,7 @@ test_launcher_allocates_interactive_stdin_independently() {
 
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-stdin-secret-prompt.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDIN_TTY=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \
+    TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
     PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --config_ip 192.168.0.150 --config_secret \
         >"$output" 2>&1
     assert_contains "$TEST_ROOT/fake-stdin-secret-prompt.log" "--interactive"
@@ -498,6 +511,26 @@ test_launcher_does_not_print_secrets() {
     assert_not_contains "$output" "super-secret-value"
 }
 
+test_no_argument_tui_uses_tty_and_does_not_require_mdb() {
+    local deploy_dir="$TEST_ROOT/deploy-tui"
+    local output="$TEST_ROOT/output-tui.txt"
+    local fake_dir="$TEST_ROOT/fake-bin"
+    copy_deploy "$deploy_dir"
+    mkdir -p "$fake_dir"
+    make_fake_docker "$fake_dir/docker"
+    rm "$TEST_ROOT/home/digi/plu.mdb"
+
+    FAKE_DOCKER_LOG="$TEST_ROOT/fake-tui.log" \
+    TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 TO_DIGI_RS_TEST_STDIN_TTY=1 TO_DIGI_RS_TEST_STDOUT_TTY=1 \
+    TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" >"$output" 2>&1
+
+    assert_contains "$TEST_ROOT/fake-tui.log" "--interactive"
+    assert_contains "$TEST_ROOT/fake-tui.log" "--tty"
+    assert_contains "$output" "Command: tui"
+    assert_not_contains "$TEST_ROOT/fake-tui.log" "$deploy_dir/plu.mdb,dst=/work/plu.mdb"
+}
+
 test_launcher_archives_output_and_preserves_exit_code
 test_help_version_and_pull_do_not_require_config_or_plu
 test_subcommand_help_does_not_warn_about_missing_logs
@@ -513,5 +546,6 @@ test_launcher_allocates_interactive_stdin_independently
 test_package_archive_contains_expected_files_only
 test_publish_workflow_supports_release_candidates
 test_launcher_does_not_print_secrets
+test_no_argument_tui_uses_tty_and_does_not_require_mdb
 
 printf 'deployment script tests passed\n'

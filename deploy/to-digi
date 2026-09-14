@@ -76,6 +76,10 @@ requires_container_stdin() {
 }
 
 command_label() {
+    if [ "$#" -eq 0 ]; then
+        printf 'tui\n'
+        return 0
+    fi
     if has_arg_name "--help" "$@" || has_arg_name "-h" "$@"; then
         printf 'info\n'
         return 0
@@ -157,6 +161,14 @@ needs_source_mdb() {
     esac
 }
 
+host_mdb_root() {
+    printf '%s\n' "${TO_DIGI_RS_TEST_HOME:-$HOME}"
+}
+
+host_mdb_path() {
+    printf '%s/digi/plu.mdb\n' "$(host_mdb_root)"
+}
+
 resolve_safe_deploy_path() {
     local value="$1"
     local label="$2"
@@ -232,13 +244,17 @@ Run ./to-digi init, then use ./to-digi import --config-ip IP --config-secret." 2
         [ -r "$SCRIPT_DIR/config.toml" ] || fail "config.toml is not readable: $SCRIPT_DIR/config.toml" 2
     fi
     if needs_source_mdb "${1:-import}"; then
-        [ ! -L "$SCRIPT_DIR/plu.mdb" ] || fail "plu.mdb must be a regular file, not a symbolic link: $SCRIPT_DIR/plu.mdb" 2
-        [ -e "$SCRIPT_DIR/plu.mdb" ] || fail "Missing required source database:
-$SCRIPT_DIR/plu.mdb
+        [ ! -L "$HOST_MDB" ] || fail "plu.mdb must be a regular file, not a symbolic link:
+$HOST_MDB" 2
+        [ -e "$HOST_MDB" ] || fail "Missing required source database:
+~/digi/plu.mdb
 
-Place the customer database beside ./to-digi using the exact filename plu.mdb." 2
-        [ -f "$SCRIPT_DIR/plu.mdb" ] || fail "plu.mdb must be a regular file: $SCRIPT_DIR/plu.mdb" 2
-        [ -r "$SCRIPT_DIR/plu.mdb" ] || fail "plu.mdb is not readable by the invoking user: $SCRIPT_DIR/plu.mdb" 2
+Place the customer database at:
+~/digi/plu.mdb" 2
+        [ -f "$HOST_MDB" ] || fail "plu.mdb must be a regular file:
+$HOST_MDB" 2
+        [ -r "$HOST_MDB" ] || fail "plu.mdb is not readable by the invoking user:
+$HOST_MDB" 2
     fi
 }
 
@@ -269,7 +285,7 @@ archive_outputs() {
     if [ -f "$SCRIPT_DIR/logs.txt" ]; then
         mv "$SCRIPT_DIR/logs.txt" "$RUN_DIR/logs.txt" || warn "Could not archive logs.txt to $RUN_DIR"
         log_path="$RUN_DIR/logs.txt"
-    elif [ "$COMMAND_LABEL" != "info" ] && ! is_cli_usage_failure "$import_exit_code"; then
+    elif [ "$COMMAND_LABEL" != "info" ] && [ "$COMMAND_LABEL" != "tui" ] && ! is_cli_usage_failure "$import_exit_code"; then
         warn "Importer did not create logs.txt."
     fi
 
@@ -362,7 +378,7 @@ archive_outputs() {
     fi
 
     local manifest_path=""
-    if [ "$COMMAND_LABEL" = "import" ] && [ -f "$RUN_DIR/import-results.json" ]; then
+    if { [ "$COMMAND_LABEL" = "import" ] || [ "$COMMAND_LABEL" = "tui" ]; } && [ -f "$RUN_DIR/import-results.json" ]; then
         manifest_path="$RUN_DIR/import-results.json"
     fi
     local snapshot_path=""
@@ -371,6 +387,30 @@ archive_outputs() {
         chmod 600 "$RUN_DIR/import-results.snapshot.json" 2>/dev/null || true
         snapshot_path="$RUN_DIR/import-results.snapshot.json"
         manifest_path="$resume_host_path"
+    fi
+
+    if [ "$COMMAND_LABEL" = "tui" ] &&
+        [ -z "$log_path" ] &&
+        [ -z "$analysis_path" ] &&
+        [ -z "$analysis_json_path" ] &&
+        [ -z "$discovery_path" ] &&
+        [ -z "$discovery_json_path" ] &&
+        [ -z "$diagnostics_path" ] &&
+        [ -z "$diagnostics_json_path" ] &&
+        [ -z "$dry_run_path" ] &&
+        [ -z "$dry_run_manifest_path" ] &&
+        [ -z "$verify_path" ] &&
+        [ -z "$verify_json_path" ] &&
+        [ -z "$mapping_path" ] &&
+        [ -z "$mapping_json_path" ] &&
+        [ -z "$recommendations_path" ] &&
+        [ -z "$sanitization_path" ] &&
+        [ -z "$sanitization_json_path" ] &&
+        [ -z "$sanitization_snapshot_path" ] &&
+        [ -z "$manifest_path" ] &&
+        [ -z "$snapshot_path" ]; then
+        printf '\nInteractive menu closed.\n'
+        return 0
     fi
 
     local latest_tmp="$OUTPUT_DIR/.latest.$$"
@@ -407,6 +447,7 @@ archive_outputs() {
 
 SCRIPT_DIR="$(resolve_script_dir)" || fail "Unable to resolve the directory containing to-digi." 2
 OUTPUT_DIR="$SCRIPT_DIR/output"
+HOST_MDB="$(host_mdb_path)"
 TO_DIGI_RS_IMAGE="${TO_DIGI_RS_IMAGE:-$DEFAULT_IMAGE}"
 COMMAND_LABEL="$(command_label "$@")"
 RUN_ID="run-$(date +%Y%m%d-%H%M%S)-$COMMAND_LABEL"
@@ -474,7 +515,7 @@ if [ "$COMMAND_LABEL" = "doctor" ]; then
     FORWARDED_ARGS+=("--inside-container")
 fi
 
-if [ "$COMMAND_LABEL" = "import" ]; then
+if [ "$COMMAND_LABEL" = "import" ] || [ "$COMMAND_LABEL" = "tui" ]; then
     export TO_DIGI_RS_IMPORT_MANIFEST_PATH="/work/output/$RUN_ID/import-results.json"
 else
     export TO_DIGI_RS_IMPORT_MANIFEST_PATH=""
@@ -486,6 +527,7 @@ CONTAINER_OUTPUT_FILE="$RUN_DIR/.container-output.tmp"
 
 printf 'Using image: %s\n' "$TO_DIGI_RS_IMAGE"
 printf 'Deployment directory: %s\n' "$SCRIPT_DIR"
+printf 'MDB source: ~/digi/plu.mdb\n'
 printf 'Command: %s\n' "$COMMAND_LABEL"
 
 DOCKER_TTY_ARGS=()
@@ -500,11 +542,19 @@ if host_stdout_is_tty && [ "$COMMAND_REQUIRES_STDIN" -eq 0 ]; then
     DOCKER_TTY_ARGS+=(--tty)
 fi
 
+SOURCE_MOUNT_ARGS=()
+if needs_source_mdb "$COMMAND_LABEL"; then
+    SOURCE_MOUNT_ARGS+=(--mount "type=bind,src=$HOST_MDB,dst=/work/plu.mdb,readonly")
+elif [ "$COMMAND_LABEL" = "tui" ] && [ ! -L "$HOST_MDB" ] && [ -f "$HOST_MDB" ] && [ -r "$HOST_MDB" ]; then
+    SOURCE_MOUNT_ARGS+=(--mount "type=bind,src=$HOST_MDB,dst=/work/plu.mdb,readonly")
+fi
+
 DOCKER_ARGS=(
     run --rm
     "${DOCKER_TTY_ARGS[@]}"
     --user "$(id -u):$(id -g)"
     --mount "type=bind,src=$SCRIPT_DIR,dst=/work"
+    "${SOURCE_MOUNT_ARGS[@]}"
     --workdir /work
     --network host
     --security-opt no-new-privileges:true
