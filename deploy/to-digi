@@ -523,7 +523,6 @@ fi
 
 export TO_DIGI_RS_IMAGE
 clean_transient_outputs
-CONTAINER_OUTPUT_FILE="$RUN_DIR/.container-output.tmp"
 
 printf 'Using image: %s\n' "$TO_DIGI_RS_IMAGE"
 printf 'Deployment directory: %s\n' "$SCRIPT_DIR"
@@ -572,11 +571,21 @@ DOCKER_ARGS=(
     "$TO_DIGI_RS_IMAGE"
 )
 
-(
-    cd "$SCRIPT_DIR" || exit 2
-    "$DOCKER_BIN" "${DOCKER_ARGS[@]}" "${FORWARDED_ARGS[@]}"
-) 2>&1 | tee "$CONTAINER_OUTPUT_FILE"
-import_exit_code=${PIPESTATUS[0]}
+if [ "$COMMAND_LABEL" = "tui" ] && host_stdin_is_tty && host_stdout_is_tty; then
+    CONTAINER_OUTPUT_FILE=""
+    (
+        cd "$SCRIPT_DIR" || exit 2
+        "$DOCKER_BIN" "${DOCKER_ARGS[@]}" "${FORWARDED_ARGS[@]}"
+    )
+    import_exit_code=$?
+else
+    CONTAINER_OUTPUT_FILE="$RUN_DIR/.container-output.tmp"
+    (
+        cd "$SCRIPT_DIR" || exit 2
+        "$DOCKER_BIN" "${DOCKER_ARGS[@]}" "${FORWARDED_ARGS[@]}"
+    ) 2>&1 | tee "$CONTAINER_OUTPUT_FILE"
+    import_exit_code=${PIPESTATUS[0]}
+fi
 
 archive_outputs "$import_exit_code"
 rm -f "$CONTAINER_OUTPUT_FILE" 2>/dev/null || true

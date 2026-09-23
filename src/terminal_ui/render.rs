@@ -11,7 +11,7 @@ use crate::config::AppConfig;
 use crate::digiweb::preflight::{AuthenticationReadinessStatus, ReadinessResult};
 
 use super::app::TerminalApp;
-use super::model::{CANONICAL_MDB_DISPLAY_PATH, InputMode, LogoMode, Screen};
+use super::model::{CANONICAL_MDB_DISPLAY_PATH, DetailsContext, InputMode, LogoMode, Screen};
 pub(super) fn render_app(frame: &mut ratatui::Frame<'_>, app: &TerminalApp) {
     let area = frame.area();
     frame.render_widget(Clear, area);
@@ -20,7 +20,6 @@ pub(super) fn render_app(frame: &mut ratatui::Frame<'_>, app: &TerminalApp) {
             Line::from("to-digi-rs"),
             Line::from("Terminal too small."),
             Line::from("Use 80x24 or larger."),
-            Line::from("q quit"),
         ];
         frame.render_widget(
             Paragraph::new(text)
@@ -43,7 +42,7 @@ pub(super) fn render_app(frame: &mut ratatui::Frame<'_>, app: &TerminalApp) {
     render_header(frame, chunks[0], app.screen, area.width);
     render_screen(frame, chunks[1], app);
     frame.render_widget(
-        Paragraph::new("Up/Down move    Enter select    Esc back    q quit")
+        Paragraph::new(footer_text(app))
             .style(secondary_style())
             .alignment(Alignment::Center),
         chunks[2],
@@ -86,6 +85,11 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, screen: Screen, wid
 }
 
 fn render_screen(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TerminalApp) {
+    let panels = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(area);
+    let body_width = panels[0].width.saturating_sub(4);
     let body = if let Some(message) = &app.busy_message {
         vec![Line::from(message.clone())]
     } else if let Some(mode) = app.input_mode {
@@ -107,14 +111,11 @@ fn render_screen(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TerminalApp) 
                 Line::from("Bigway - customer-specific nutrition and sanitization mappings."),
                 Line::from("Starsky - customer-specific validation and field defaults."),
             ],
-            Screen::Analysis => render_analysis_body(app, area.width),
+            Screen::Analysis => render_analysis_body(app, body_width),
             Screen::Diagnostics => render_diagnostics_body(app),
             Screen::References => vec![
                 Line::from("Have these been checked in DIGIweb?"),
                 Line::from(""),
-                Line::from(reference_text_from_analysis(app, area.width)),
-                Line::from(""),
-                Line::from("No is selected by default."),
             ],
             Screen::ReadinessReady => render_readiness_body(app),
             Screen::DryRun => render_dry_run_body(app),
@@ -132,16 +133,21 @@ fn render_screen(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TerminalApp) 
                 Line::from(format!("to-digi-rs {}", env!("CARGO_PKG_VERSION"))),
                 Line::from("No v0.10 tag is created by this UI."),
             ],
-            Screen::Details => vec![Line::from(
-                "Detailed reports remain in command output files.",
-            )],
+            Screen::Details => render_details_body(app, body_width),
         }
     };
-
-    let panels = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(area);
+    let body = if !app.busy_message.is_some()
+        && app.input_mode.is_none()
+        && app.screen == Screen::References
+    {
+        let mut lines = body;
+        lines.extend(reference_lines_from_analysis(app, body_width));
+        lines.push(Line::from(""));
+        lines.push(Line::from("No is selected by default."));
+        lines
+    } else {
+        body
+    };
 
     frame.render_widget(
         Paragraph::new(body)
@@ -150,7 +156,12 @@ fn render_screen(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TerminalApp) 
                     .borders(Borders::ALL)
                     .title(app.screen.title()),
             )
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: false })
+            .scroll(if app.screen == Screen::Details {
+                (app.details_scroll, 0)
+            } else {
+                (0, 0)
+            }),
         panels[0],
     );
     render_menu(frame, panels[1], app);
@@ -178,12 +189,12 @@ fn render_screen(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TerminalApp) 
 
 fn render_input_body(app: &TerminalApp, mode: InputMode) -> Vec<Line<'static>> {
     let title = match mode {
-        InputMode::ServerIp => "DIGIweb Server IP",
+        InputMode::DigiwebHost => "DIGIweb Host",
         InputMode::Secret => "Client Secret",
         InputMode::DryRunPlu | InputMode::LivePlu => "Specific PLU",
     };
     let prompt = match mode {
-        InputMode::ServerIp => "Enter save    Esc cancel",
+        InputMode::DigiwebHost => "Enter save    Esc cancel",
         InputMode::Secret => "Enter save    Esc cancel",
         InputMode::DryRunPlu | InputMode::LivePlu => "Enter run    Esc cancel",
     };
@@ -197,7 +208,7 @@ fn render_input_body(app: &TerminalApp, mode: InputMode) -> Vec<Line<'static>> {
         app.input_buffer.clone()
     };
     let mut lines = vec![
-        Line::from(title.to_string()),
+        heading_line(title),
         Line::from(""),
         Line::from(format!("> {display_value}")),
         Line::from(""),
@@ -253,21 +264,28 @@ fn render_config_body(app: &TerminalApp) -> Vec<Line<'static>> {
     let secret_configured = !config.digiweb.client_secret.trim().is_empty()
         && config.digiweb.client_secret.trim() != "CHANGE_ME";
     let mut lines = vec![
-        Line::from("Server IP:"),
-        Line::from(format!(
+        heading_line("DIGIweb Host:"),
+        value_line(format!(
             "  {}",
             host_from_base_url(&config.digiweb.base_url)
         )),
         Line::from(""),
-        Line::from("Client Secret:"),
-        Line::from(if secret_configured {
-            "  OK Configured".to_string()
-        } else {
-            "  WARN Not configured".to_string()
-        }),
+        heading_line("Client ID:"),
+        value_line(format!("  {}", config.digiweb.client_id)),
         Line::from(""),
-        Line::from("Store:"),
-        Line::from(format!("  {}", config.digiweb.store_number)),
+        heading_line("Client Secret:"),
+        status_line(
+            secret_configured,
+            "Client Secret",
+            if secret_configured {
+                "Configured"
+            } else {
+                "Missing"
+            },
+        ),
+        Line::from(""),
+        heading_line("Store:"),
+        value_line(format!("  {}", config.digiweb.store_number)),
     ];
     if let Some(message) = &app.status_message {
         lines.push(Line::from(""));
@@ -292,13 +310,13 @@ fn render_analysis_body(app: &TerminalApp, width: u16) -> Vec<Line<'static>> {
         Line::from(format!("Eligible:     {}", summary.eligible)),
         Line::from(format!("Excluded:     {}", summary.excluded)),
         Line::from(""),
-        Line::from(compact_references(
-            &summary.departments,
-            &summary.groups,
-            &summary.label_formats,
-            width.saturating_sub(8),
-        )),
     ];
+    lines.extend(reference_lines(
+        &summary.departments,
+        &summary.groups,
+        &summary.label_formats,
+        width,
+    ));
     if summary.excluded > 0 {
         lines.push(Line::from(""));
         lines.push(Line::from(format!(
@@ -334,23 +352,27 @@ fn render_diagnostics_body(app: &TerminalApp) -> Vec<Line<'static>> {
     ]
 }
 
-fn reference_text_from_analysis(app: &TerminalApp, width: u16) -> String {
+fn reference_lines_from_analysis(app: &TerminalApp, width: u16) -> Vec<Line<'static>> {
     app.analysis
         .as_ref()
         .map(|summary| {
-            compact_references(
+            reference_lines(
                 &summary.departments,
                 &summary.groups,
                 &summary.label_formats,
-                width.saturating_sub(8),
+                width,
             )
         })
-        .unwrap_or_else(|| "Run analysis first.".to_string())
+        .unwrap_or_else(|| vec![Line::from("Run analysis first.")])
 }
 
 fn render_readiness_body(app: &TerminalApp) -> Vec<Line<'static>> {
     let Some(summary) = &app.readiness else {
-        return vec![Line::from("Readiness has not run yet.")];
+        return vec![
+            heading_line("Readiness"),
+            Line::from(""),
+            Line::from("No readiness check has been run."),
+        ];
     };
     let mut lines = vec![
         status_line(true, "Configuration", "Checked"),
@@ -370,7 +392,7 @@ fn render_readiness_body(app: &TerminalApp) -> Vec<Line<'static>> {
             summary.authentication.as_str(),
         ),
         Line::from(""),
-        Line::from(summary.readiness.as_str().to_string()),
+        status_value_line(summary.readiness.as_str()),
         Line::from(format!("Eligible {}", summary.eligible)),
         Line::from(format!("Excluded {}", summary.excluded)),
     ];
@@ -420,7 +442,7 @@ fn render_full_import_confirm_body(app: &TerminalApp) -> Vec<Line<'static>> {
         }),
         Line::from(""),
         Line::from(format!(
-            "Server:      {}",
+            "DIGIweb Host: {}",
             host_from_base_url(&config.digiweb.base_url)
         )),
         Line::from(format!(
@@ -538,6 +560,132 @@ fn render_completion_body(app: &TerminalApp) -> Vec<Line<'static>> {
     lines
 }
 
+fn render_details_body(app: &TerminalApp, width: u16) -> Vec<Line<'static>> {
+    match app.details_context {
+        DetailsContext::Readiness => render_readiness_details(app, width),
+        DetailsContext::Diagnostics => render_diagnostics_details(app),
+        DetailsContext::DryRun => render_dry_run_details(app),
+        DetailsContext::SingleImport => render_import_details(app, true),
+        DetailsContext::FullImport => render_import_details(app, false),
+        DetailsContext::Configuration => render_config_body(app),
+        DetailsContext::None => vec![Line::from("No additional details available.")],
+    }
+}
+
+fn render_readiness_details(app: &TerminalApp, width: u16) -> Vec<Line<'static>> {
+    let config = AppConfig::load(Path::new("config.toml")).unwrap_or_default();
+    let Some(summary) = &app.readiness else {
+        return vec![Line::from("No readiness check has been run.")];
+    };
+    let mut lines = vec![
+        heading_line("Readiness Details"),
+        Line::from(""),
+        Line::from(format!("Status: {}", summary.readiness.as_str())),
+        Line::from(""),
+        heading_line("Authentication:"),
+        status_value_line(summary.authentication.as_str()),
+    ];
+    if let Some(error) = &summary.authentication_error {
+        lines.push(Line::from(""));
+        lines.push(heading_line("Reason:"));
+        lines.push(Line::from(error.clone()));
+    }
+    lines.extend([
+        Line::from(""),
+        heading_line("Host:"),
+        value_line(host_from_base_url(&config.digiweb.base_url)),
+        Line::from(""),
+        heading_line("Client ID:"),
+        value_line(config.digiweb.client_id.clone()),
+    ]);
+    if summary.unverified_references > 0 {
+        lines.push(Line::from(""));
+        lines.push(heading_line("Missing references:"));
+        lines.extend(reference_lines_from_analysis(app, width));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("No PLUs were submitted."));
+    lines
+}
+
+fn render_diagnostics_details(app: &TerminalApp) -> Vec<Line<'static>> {
+    let Some(summary) = &app.diagnostics else {
+        return vec![Line::from("No diagnostics have been run.")];
+    };
+    vec![
+        heading_line("Diagnostics Details"),
+        Line::from(""),
+        Line::from(format!(
+            "Missing PLU name:      {}",
+            summary.missing_name_count
+        )),
+        Line::from(format!(
+            "Duplicate barcode:    {}",
+            summary.duplicate_barcode_count
+        )),
+        Line::from(format!("Excluded:             {}", summary.excluded)),
+        Line::from(format!("Problem PLUs:         {}", summary.problem_count)),
+        Line::from(""),
+        Line::from("Examples are bounded in diagnostics output when available."),
+    ]
+}
+
+fn render_dry_run_details(app: &TerminalApp) -> Vec<Line<'static>> {
+    let Some(summary) = &app.dry_run else {
+        return vec![Line::from("No dry run result is available.")];
+    };
+    let plu = summary
+        .selected_plu
+        .map(|plu| plu.to_string())
+        .unwrap_or_else(|| "selected set".to_string());
+    vec![
+        heading_line("Dry-run Details"),
+        Line::from(""),
+        Line::from(format!("PLU {plu}")),
+        Line::from(""),
+        Line::from("Status:"),
+        status_value_line(if summary.success { "VALID" } else { "EXCLUDED" }),
+        Line::from(""),
+        Line::from("No API writes performed."),
+    ]
+}
+
+fn render_import_details(app: &TerminalApp, single: bool) -> Vec<Line<'static>> {
+    let Some(summary) = &app.import_result else {
+        return vec![Line::from("No import result is available.")];
+    };
+    let mut lines = vec![
+        heading_line(if single {
+            "Single Import Details"
+        } else {
+            "Full Import Details"
+        }),
+        Line::from(""),
+    ];
+    if let Some(plu) = summary.selected_plu {
+        lines.push(Line::from(format!("PLU: {plu}")));
+        lines.push(Line::from(""));
+    }
+    lines.extend([
+        Line::from(format!("Selected:   {}", summary.selected)),
+        Line::from(format!("Submitted:  {}", summary.submitted)),
+        Line::from(format!("Successful: {}", summary.succeeded)),
+        Line::from(format!("Failed:     {}", summary.failed)),
+        Line::from(format!("Unknown:    {}", summary.unknown)),
+        Line::from(""),
+        Line::from("Status:"),
+        status_value_line(&summary.status),
+    ]);
+    if summary.failed > 0 || summary.unknown > 0 {
+        lines.push(Line::from(""));
+        lines.push(heading_line("Issues:"));
+        lines.push(Line::from(
+            "See the import manifest for bounded per-PLU records.",
+        ));
+    }
+    lines
+}
+
 fn format_progress_duration(duration: Duration) -> String {
     let total = duration.as_secs();
     let hours = total / 3600;
@@ -584,9 +732,24 @@ fn render_menu(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TerminalApp) {
     );
 }
 
-fn status_line(ok: bool, label: &str, value: &str) -> Line<'static> {
+pub(super) fn status_line(ok: bool, label: &str, value: &str) -> Line<'static> {
     let symbol = if ok { "OK" } else { "WARN" };
-    Line::from(format!("{symbol} {label:<24} {value}"))
+    let status_style = if ok {
+        success_style()
+    } else if matches!(
+        value.to_ascii_uppercase().as_str(),
+        "MISSING" | "FAILED" | "FAIL" | "NOT READY"
+    ) {
+        error_style()
+    } else {
+        warning_style()
+    };
+    Line::from(vec![
+        Span::styled(symbol.to_string(), status_style),
+        Span::raw(" "),
+        Span::styled(format!("{label:<24}"), heading_style()),
+        Span::styled(value.to_string(), value_style()),
+    ])
 }
 
 fn selected_style() -> Style {
@@ -595,22 +758,98 @@ fn selected_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+fn success_style() -> Style {
+    color_style(Color::Green)
+}
+
+fn warning_style() -> Style {
+    color_style(Color::Yellow)
+}
+
+fn error_style() -> Style {
+    color_style(Color::Red)
+}
+
+fn heading_style() -> Style {
+    color_style(Color::Cyan)
+}
+
+fn value_style() -> Style {
+    color_style(Color::White)
+}
+
+fn color_style(color: Color) -> Style {
+    if std::env::var_os("NO_COLOR").is_some() {
+        Style::default()
+    } else {
+        Style::default().fg(color)
+    }
+}
+
 fn secondary_style() -> Style {
-    Style::default().fg(Color::Gray)
+    color_style(Color::Gray)
+}
+
+fn heading_line(text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(text.into(), heading_style()))
+}
+
+fn value_line(text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(text.into(), value_style()))
+}
+
+fn status_value_line(value: &str) -> Line<'static> {
+    let upper = value.to_ascii_uppercase();
+    let style = if upper.contains("FAILED") || upper.contains("FAIL") || upper.contains("NOT READY")
+    {
+        error_style()
+    } else if upper.contains("OK")
+        || upper.contains("READY")
+        || upper.contains("SUCCESS")
+        || upper.contains("PASSED")
+        || upper.contains("CONFIGURED")
+    {
+        success_style()
+    } else if upper.contains("WARN") || upper.contains("UNKNOWN") || upper.contains("REVIEW") {
+        warning_style()
+    } else {
+        value_style()
+    };
+    Line::from(Span::styled(value.to_string(), style))
 }
 
 pub fn logo_lines(mode: LogoMode) -> Vec<String> {
     match mode {
         LogoMode::Full => vec![
-            "============        DIGI".to_string(),
-            " ==========     to-digi-rs".to_string(),
-            "  ========      DIGIweb Import Tool".to_string(),
-            "   ======".to_string(),
-            "    ====".to_string(),
-            "     ==        ".to_string(),
+            "████████▸        DIGI".to_string(),
+            "  ██████▸     to-digi-rs".to_string(),
+            "    ████▸     DIGIweb Import Tool".to_string(),
+            "      ██▸".to_string(),
+            "       ▀".to_string(),
         ],
-        LogoMode::Compact => vec!["v DIGI   to-digi-rs".to_string()],
+        LogoMode::Compact => vec!["▸ DIGI   to-digi-rs".to_string()],
     }
+}
+
+pub fn reference_lines(
+    departments: &[u32],
+    groups: &[(u32, u32)],
+    label_formats: &[u32],
+    width: u16,
+) -> Vec<Line<'static>> {
+    compact_references(departments, groups, label_formats, width)
+        .lines()
+        .map(|line| {
+            if line == "Groups:"
+                || line.starts_with("Departments:")
+                || line.starts_with("Label formats:")
+            {
+                heading_line(line.to_string())
+            } else {
+                value_line(line.to_string())
+            }
+        })
+        .collect()
 }
 
 pub fn compact_references(
@@ -628,12 +867,14 @@ pub fn compact_references(
 
     let mut lines = Vec::new();
     lines.push(format!("Departments: {}", join_u32s(&departments)));
+    lines.push(String::new());
     lines.push("Groups:".to_string());
     for (department, values) in group_map {
         let values = values.into_iter().collect::<Vec<_>>();
         let prefix = format!("  Department {department:02}: ");
         push_wrapped_line(&mut lines, &prefix, &join_u32s(&values), width);
     }
+    lines.push(String::new());
     lines.push(format!("Label formats: {}", join_u32s(&label_formats)));
     lines.join("\n")
 }
@@ -683,4 +924,21 @@ fn push_wrapped_line(lines: &mut Vec<String>, prefix: &str, value: &str, width: 
         }
     }
     lines.push(current);
+}
+
+fn footer_text(app: &TerminalApp) -> &'static str {
+    if app.input_mode.is_some() {
+        return match app.input_mode {
+            Some(InputMode::DryRunPlu | InputMode::LivePlu) => "Enter run    Esc cancel",
+            _ => "Enter save    Esc cancel",
+        };
+    }
+    if app.screen == Screen::Main {
+        return "Up/Down move    Enter select";
+    }
+    match app.screen {
+        Screen::Details => "Up/Down scroll    Esc back",
+        Screen::FullImportProgress => "Import running",
+        _ => "Up/Down move    Enter select    Esc back",
+    }
 }

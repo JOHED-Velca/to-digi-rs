@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use secrecy::{ExposeSecret, SecretString};
@@ -16,20 +15,20 @@ pub struct CustomerConfigUpdateResult {
 
 pub fn apply_customer_config_update(
     path: &Path,
-    ip: Option<IpAddr>,
+    host: Option<&str>,
     client_secret: Option<&SecretString>,
 ) -> Result<CustomerConfigUpdateResult, AppError> {
     let current_text = std::fs::read_to_string(path)
         .map_err(|err| AppError::Config(format!("failed to read config.toml: {err}")))?;
     let (updated_text, fields_updated) =
-        apply_customer_config_update_to_text(&current_text, ip, client_secret)?;
+        apply_customer_config_update_to_text(&current_text, host, client_secret)?;
     let backup = if updated_text == current_text {
         None
     } else {
         Some(write_confirmed_config(path, &updated_text)?)
     };
     Ok(CustomerConfigUpdateResult {
-        host: ip.map(|value| value.to_string()),
+        host: host.map(ToString::to_string),
         client_secret_configured: client_secret.is_some(),
         backup,
         fields_updated,
@@ -38,7 +37,7 @@ pub fn apply_customer_config_update(
 
 pub fn apply_customer_config_update_to_text(
     config_text: &str,
-    ip: Option<IpAddr>,
+    host: Option<&str>,
     client_secret: Option<&SecretString>,
 ) -> Result<(String, Vec<&'static str>), AppError> {
     let parsed = config_text
@@ -46,10 +45,11 @@ pub fn apply_customer_config_update_to_text(
         .map_err(|err| AppError::Config(format!("config.toml is invalid: {err}")))?;
     let mut updated = config_text.to_string();
     let mut fields_updated = Vec::new();
-    if let Some(ip) = ip {
+    if let Some(host) = host {
+        let host = validate_digiweb_host(host)?;
         let old_base = digiweb_string(&parsed, "base_url")?.unwrap_or("https://CHANGE_ME");
         let old_base_host = parse_url_host(old_base).ok().flatten();
-        let new_base = replace_absolute_url_host("digiweb.base_url", old_base, ip)?;
+        let new_base = replace_absolute_url_host("digiweb.base_url", old_base, &host)?;
         updated = set_digiweb_string(&updated, "base_url", &new_base);
         fields_updated.push("digiweb.base_url");
 
@@ -57,7 +57,7 @@ pub fn apply_customer_config_update_to_text(
             if is_absolute_url(token_url) {
                 if should_update_absolute_endpoint(token_url, old_base_host.as_deref())? {
                     let new_token_url =
-                        replace_absolute_url_host("digiweb.token_url", token_url, ip)?;
+                        replace_absolute_url_host("digiweb.token_url", token_url, &host)?;
                     updated = set_digiweb_string(&updated, "token_url", &new_token_url);
                     fields_updated.push("digiweb.token_url");
                 }
@@ -128,13 +128,13 @@ fn should_update_absolute_endpoint(
     };
     Ok(
         old_base_host.is_some_and(|base_host| host.eq_ignore_ascii_case(base_host))
-            || host.parse::<IpAddr>().is_ok(),
+            || host.parse::<std::net::IpAddr>().is_ok(),
     )
 }
 
-fn replace_absolute_url_host(field: &str, value: &str, ip: IpAddr) -> Result<String, AppError> {
+fn replace_absolute_url_host(field: &str, value: &str, host: &str) -> Result<String, AppError> {
     if let Ok(mut url) = reqwest::Url::parse(value) {
-        url.set_host(Some(&ip.to_string()))
+        url.set_host(Some(host))
             .map_err(|_| AppError::Config(format!("{field} host could not be replaced")))?;
         let mut rendered = url.to_string();
         if url.path() == "/"
@@ -149,10 +149,7 @@ fn replace_absolute_url_host(field: &str, value: &str, ip: IpAddr) -> Result<Str
     if let Some(parts) = placeholder_url_parts(value) {
         return Ok(format!(
             "{}://{}{}{}",
-            parts.scheme,
-            host_for_url(ip),
-            parts.port,
-            parts.suffix
+            parts.scheme, host, parts.port, parts.suffix
         ));
     }
     Err(AppError::Config(format!(
@@ -202,11 +199,41 @@ fn is_placeholder(value: &str) -> bool {
     upper.contains("CHANGE_ME") || upper.contains("REPLACE_WITH")
 }
 
-fn host_for_url(ip: IpAddr) -> String {
-    match ip {
-        IpAddr::V4(value) => value.to_string(),
-        IpAddr::V6(value) => format!("[{value}]"),
+pub fn validate_digiweb_host(value: &str) -> Result<String, AppError> {
+    let host = value.trim();
+    if host.is_empty() {
+        return Err(AppError::Config(
+            "DIGIweb host must not be empty".to_string(),
+        ));
     }
+    if host.contains("://") || host.contains('/') || host.contains('?') || host.contains('#') {
+        return Err(AppError::Config(
+            "DIGIweb host must be a host name or IP address, not a URL or path".to_string(),
+        ));
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(host.to_string());
+    }
+    if host.len() > 253
+        || !host.contains('.')
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || !host
+            .split('.')
+            .all(|label| valid_dns_label(label) && !label.is_empty())
+    {
+        return Err(AppError::Config(format!("invalid DIGIweb host: {host}")));
+    }
+    Ok(host.to_ascii_lowercase())
+}
+
+fn valid_dns_label(label: &str) -> bool {
+    label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
 }
 
 fn set_digiweb_string(config_text: &str, key: &str, value: &str) -> String {
@@ -275,9 +302,7 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    fn ip() -> IpAddr {
-        "192.168.0.150".parse().expect("ip")
-    }
+    const IPV4: &str = "192.168.0.150";
 
     fn secret(value: &str) -> SecretString {
         SecretString::new(value.to_string())
@@ -292,7 +317,7 @@ client_secret = "keep"
 "#;
 
         let (updated, fields) =
-            apply_customer_config_update_to_text(text, Some(ip()), None).expect("update");
+            apply_customer_config_update_to_text(text, Some(IPV4), None).expect("update");
 
         assert!(updated.contains("base_url = \"https://192.168.0.150:8443/app?x=1\""));
         assert!(
@@ -310,7 +335,7 @@ plu_upsert_path = "/api/v1/third-party/plus/write"
 "#;
 
         let (updated, fields) =
-            apply_customer_config_update_to_text(text, Some(ip()), None).expect("update");
+            apply_customer_config_update_to_text(text, Some(IPV4), None).expect("update");
 
         assert!(updated.contains("base_url = \"https://192.168.0.150\""));
         assert!(updated.contains(
@@ -329,7 +354,7 @@ store_number = 7
 "#;
 
         let (updated, fields) =
-            apply_customer_config_update_to_text(text, Some(ip()), None).expect("update");
+            apply_customer_config_update_to_text(text, Some(IPV4), None).expect("update");
 
         assert!(updated.contains("base_url = \"https://192.168.0.150\""));
         assert!(updated.contains("token_url = \"https://identity.example/token\""));
@@ -341,7 +366,7 @@ store_number = 7
     fn invalid_existing_url_fails_without_returning_modified_text() {
         let text = "[digiweb]\nbase_url = \"not a url\"\nclient_secret = \"keep\"\n";
 
-        let err = apply_customer_config_update_to_text(text, Some(ip()), None).expect_err("fail");
+        let err = apply_customer_config_update_to_text(text, Some(IPV4), None).expect_err("fail");
 
         assert!(err.to_string().contains("digiweb.base_url"));
     }
@@ -372,7 +397,7 @@ store_number = 7
         let source_path = dir.path().join("plu.mdb");
         fs::write(&source_path, "mdb").expect("source");
 
-        let result = apply_customer_config_update(&path, Some(ip()), Some(&secret("new-secret")))
+        let result = apply_customer_config_update(&path, Some(IPV4), Some(&secret("new-secret")))
             .expect("update");
         let config = AppConfig::load(&path).expect("load");
         let source = fs::read_to_string(source_path).expect("source unchanged");
@@ -395,7 +420,7 @@ store_number = 7
         let original = "[digiweb]\nbase_url = \"not a url\"\nclient_secret = \"old\"\n";
         fs::write(&path, original).expect("write");
 
-        let err = apply_customer_config_update(&path, Some(ip()), None).expect_err("fail");
+        let err = apply_customer_config_update(&path, Some(IPV4), None).expect_err("fail");
         let backups = fs::read_dir(dir.path())
             .expect("read dir")
             .filter_map(Result::ok)
@@ -415,5 +440,35 @@ store_number = 7
             .expect_err("fail");
 
         assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn hostname_updates_base_host_and_preserves_port_path_and_query() {
+        let text = r#"[digiweb]
+base_url = "https://192.168.0.100:8443/app?x=1"
+token_url = "https://192.168.0.100/auth/realms/skypro/protocol/openid-connect/token"
+"#;
+
+        let (updated, fields) =
+            apply_customer_config_update_to_text(text, Some("vps-51d2863e.vps.ovh.ca"), None)
+                .expect("update");
+
+        assert!(updated.contains("base_url = \"https://vps-51d2863e.vps.ovh.ca:8443/app?x=1\""));
+        assert!(updated.contains(
+            "token_url = \"https://vps-51d2863e.vps.ovh.ca/auth/realms/skypro/protocol/openid-connect/token\""
+        ));
+        assert_eq!(fields, vec!["digiweb.base_url", "digiweb.token_url"]);
+    }
+
+    #[test]
+    fn url_like_host_input_is_rejected() {
+        let err = validate_digiweb_host("https://vps-51d2863e.vps.ovh.ca").expect_err("fail");
+        assert!(err.to_string().contains("not a URL"));
+    }
+
+    #[test]
+    fn invalid_hostname_is_rejected() {
+        let err = validate_digiweb_host("-bad.example").expect_err("fail");
+        assert!(err.to_string().contains("invalid DIGIweb host"));
     }
 }

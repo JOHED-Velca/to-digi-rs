@@ -1,5 +1,3 @@
-use std::net::IpAddr;
-
 use crate::cli::{
     AnalyzeArgs, Cli, CliCommand, ConfirmArgs, ConfirmTarget, DiagnoseArgs, DryRunArgs, ImportArgs,
     VerifyArgs,
@@ -83,14 +81,14 @@ pub enum UiAction {
     ImportFirst { profile: Option<String> },
     ImportSpecific { profile: Option<String>, plu: u64 },
     ImportAll { profile: Option<String> },
-    ConfigIp(IpAddr),
+    ConfigHost(String),
     ConfigSecret,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiOperation {
     DeploymentCheck,
-    SaveIp(String),
+    SaveHost(String),
     SaveSecret(String),
     Analyze,
     Diagnose,
@@ -102,7 +100,7 @@ pub enum UiOperation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
-    ServerIp,
+    DigiwebHost,
     Secret,
     DryRunPlu,
     LivePlu,
@@ -147,6 +145,7 @@ pub struct DiagnosticsSummaryView {
 pub struct ReadinessSummaryView {
     pub readiness: ReadinessResult,
     pub authentication: AuthenticationReadinessStatus,
+    pub authentication_error: Option<String>,
     pub eligible: usize,
     pub excluded: usize,
     pub unverified_references: usize,
@@ -172,6 +171,19 @@ pub struct ImportSummaryView {
     pub unknown: usize,
     pub selected_plu: Option<u64>,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum DetailsContext {
+    #[default]
+    None,
+    Readiness,
+    Diagnostics,
+    DryRun,
+    SingleImport,
+    FullImport,
+    Configuration,
 }
 
 impl UiAction {
@@ -219,9 +231,9 @@ impl UiAction {
                 CliCommand::Import(import_args(profile, false, Some(plu)))
             }
             Self::ImportAll { profile } => CliCommand::Import(import_args(profile, false, None)),
-            Self::ConfigIp(ip) => {
+            Self::ConfigHost(host) => {
                 let mut args = import_args(None, true, None);
-                args.config_ip = Some(ip);
+                args.config_ip = Some(host);
                 CliCommand::Import(args)
             }
             Self::ConfigSecret => {

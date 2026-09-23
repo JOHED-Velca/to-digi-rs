@@ -5,11 +5,13 @@ use std::time::Duration;
 
 use super::app::TerminalApp;
 use super::model::{
-    AnalysisSummary, CANONICAL_MDB_DISPLAY_PATH, DeploymentSummary, DiagnosticsSummaryView,
-    DryRunSummaryView, ImportSummaryView, InputMode, ReadinessSummaryView, Screen,
-    TerminalUiOptions, UiAction, UiOperation,
+    AnalysisSummary, CANONICAL_MDB_DISPLAY_PATH, DeploymentSummary, DetailsContext,
+    DiagnosticsSummaryView, DryRunSummaryView, ImportSummaryView, InputMode, ReadinessSummaryView,
+    Screen, TerminalUiOptions, UiAction, UiOperation,
 };
-use super::render::{compact_references, render_app, render_full_import_progress_body};
+use super::render::{
+    compact_references, render_app, render_full_import_progress_body, status_line,
+};
 use super::should_launch_interactive;
 use crate::cli::CliCommand;
 use crate::digiweb::preflight::{AuthenticationReadinessStatus, ReadinessResult};
@@ -56,7 +58,7 @@ fn default_selection_is_guided_import_and_navigation_wraps() {
 }
 
 #[test]
-fn enter_selects_and_escape_returns() {
+fn enter_selects_and_escape_returns_and_main_menu_ignores_quit_keys() {
     let mut app = TerminalApp::new(TerminalUiOptions {
         default_profile: None,
     });
@@ -65,6 +67,11 @@ fn enter_selects_and_escape_returns() {
     app.handle_key(key(KeyCode::Esc));
     assert_eq!(app.screen, Screen::Main);
     app.handle_key(key(KeyCode::Char('q')));
+    assert!(!app.should_quit);
+    app.handle_key(key(KeyCode::Esc));
+    assert!(!app.should_quit);
+    app.selected_index = 7;
+    app.handle_key(key(KeyCode::Enter));
     assert!(app.should_quit);
 }
 
@@ -155,8 +162,11 @@ fn render_main_screen_contains_full_logo_and_selection() {
     });
     let rendered = render_to_string(&app, 100, 30);
     assert!(rendered.contains("DIGI"));
+    assert!(rendered.contains("████"));
+    assert!(!rendered.contains("============"));
     assert!(rendered.contains("> Guided Import"));
     assert!(rendered.contains("DIGIweb Import Tool"));
+    assert!(!rendered.contains("q quit"));
 }
 
 #[test]
@@ -165,7 +175,7 @@ fn render_narrow_screen_uses_compact_logo_without_panic() {
         default_profile: None,
     });
     let rendered = render_to_string(&app, 60, 20);
-    assert!(rendered.contains("v DIGI"));
+    assert!(rendered.contains("DIGI"));
     assert!(rendered.contains("> Guided Import"));
 }
 
@@ -189,6 +199,23 @@ fn secret_values_are_never_rendered() {
     assert!(rendered.contains("********"));
     assert!(!rendered.contains("super-secret-value"));
     assert!(!format!("{app:?}").contains("super-secret-value"));
+}
+
+#[test]
+fn digiweb_host_input_accepts_hostname_characters() {
+    let mut app = TerminalApp::new(TerminalUiOptions {
+        default_profile: None,
+    });
+    app.start_input(InputMode::DigiwebHost, "");
+    for ch in "vps-51d2863e.vps.ovh.ca".chars() {
+        app.handle_key(key(KeyCode::Char(ch)));
+    }
+    app.handle_key(key(KeyCode::Enter));
+
+    assert_eq!(
+        app.pending_operation,
+        Some(UiOperation::SaveHost("vps-51d2863e.vps.ovh.ca".to_string()))
+    );
 }
 
 #[test]
@@ -275,6 +302,37 @@ fn analysis_summary_render_uses_actual_counts_and_references() {
     assert!(rendered.contains("Departments: 1, 3"));
     assert!(rendered.contains("Department 01: 2, 997"));
     assert!(rendered.contains("Label formats: 1, 6"));
+    assert!(!rendered.contains("997Label formats"));
+}
+
+#[test]
+fn reference_layout_uses_separate_lines_at_common_terminal_widths() {
+    for (width, height) in [(80, 24), (100, 30), (121, 30), (120, 40)] {
+        let mut app = TerminalApp::new(TerminalUiOptions {
+            default_profile: Some("starsky".to_string()),
+        });
+        app.screen = Screen::References;
+        app.analysis = Some(AnalysisSummary {
+            source_plus: 5,
+            eligible: 4,
+            excluded: 1,
+            departments: vec![1, 2, 3],
+            groups: vec![(1, 1), (1, 2), (1, 997), (2, 1), (2, 998), (3, 7)],
+            label_formats: vec![21, 1, 6],
+            warning_count: 0,
+            blocking_count: 0,
+            first_valid_plu: Some(1),
+        });
+
+        let rendered = render_to_string(&app, width, height);
+        assert!(rendered.contains("Departments: 1, 2, 3"));
+        assert!(rendered.contains("Groups:"));
+        assert!(rendered.contains("Department 01:"));
+        assert!(rendered.contains("Department 02:"));
+        assert!(rendered.contains("Label formats:"));
+        assert!(!rendered.contains("3Groups"));
+        assert!(!rendered.contains("997Label"));
+    }
 }
 
 #[test]
@@ -343,14 +401,23 @@ fn not_ready_blocks_dry_run_continuation() {
     app.readiness = Some(ReadinessSummaryView {
         readiness: ReadinessResult::NotReady,
         authentication: AuthenticationReadinessStatus::Passed,
+        authentication_error: None,
         eligible: 10,
         excluded: 1,
         unverified_references: 2,
     });
 
-    assert_eq!(app.visible_items(), vec!["Review", "Back"]);
+    assert_eq!(
+        app.visible_items(),
+        vec!["Run Readiness Check", "View Details", "Back"]
+    );
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.pending_operation, Some(UiOperation::Verify));
+    app.pending_operation = None;
+    app.selected_index = 1;
     app.handle_key(key(KeyCode::Enter));
     assert_eq!(app.screen, Screen::Details);
+    assert_eq!(app.details_context, DetailsContext::Readiness);
 }
 
 #[test]
@@ -362,6 +429,7 @@ fn ready_with_skips_allows_dry_run_continuation() {
     app.readiness = Some(ReadinessSummaryView {
         readiness: ReadinessResult::ReadyWithSkips,
         authentication: AuthenticationReadinessStatus::Passed,
+        authentication_error: None,
         eligible: 10,
         excluded: 1,
         unverified_references: 0,
@@ -370,6 +438,19 @@ fn ready_with_skips_allows_dry_run_continuation() {
     assert_eq!(app.visible_items()[0], "Continue");
     app.handle_key(key(KeyCode::Enter));
     assert_eq!(app.screen, Screen::DryRun);
+}
+
+#[test]
+fn readiness_without_result_offers_run_check_not_review() {
+    let mut app = TerminalApp::new(TerminalUiOptions {
+        default_profile: None,
+    });
+    app.screen = Screen::ReadinessReady;
+
+    assert_eq!(app.visible_items(), vec!["Run Readiness Check", "Back"]);
+    let rendered = render_to_string(&app, 100, 30);
+    assert!(rendered.contains("No readiness check has been run."));
+    assert!(!rendered.contains("Readiness has not run yet."));
 }
 
 #[test]
@@ -499,4 +580,106 @@ fn completion_summary_separates_failed_and_unknown() {
     assert!(rendered.contains("Successful"));
     assert!(rendered.contains("Failed"));
     assert!(rendered.contains("Unknown"));
+}
+
+#[test]
+fn details_screens_render_structured_context_without_log_file_placeholder() {
+    let mut app = TerminalApp::new(TerminalUiOptions {
+        default_profile: None,
+    });
+    app.screen = Screen::Details;
+    app.details_context = DetailsContext::Readiness;
+    app.readiness = Some(ReadinessSummaryView {
+        readiness: ReadinessResult::NotReady,
+        authentication: AuthenticationReadinessStatus::Failed,
+        authentication_error: Some("DIGIweb returned HTTP 401 Unauthorized.".to_string()),
+        eligible: 4,
+        excluded: 1,
+        unverified_references: 2,
+    });
+    app.analysis = Some(AnalysisSummary {
+        departments: vec![1, 2],
+        groups: vec![(1, 997), (2, 998)],
+        label_formats: vec![21],
+        ..AnalysisSummary::default()
+    });
+
+    let rendered = render_to_string(&app, 100, 30);
+    assert!(rendered.contains("Readiness Details"));
+    assert!(rendered.contains("HTTP 401 Unauthorized"));
+    assert!(rendered.contains("Client ID:"));
+    assert!(rendered.contains("digi"));
+    assert!(rendered.contains("Missing references"));
+    assert!(!rendered.contains("Detailed reports remain"));
+}
+
+#[test]
+fn diagnostic_dry_run_and_import_details_are_structured() {
+    let mut app = TerminalApp::new(TerminalUiOptions {
+        default_profile: None,
+    });
+    app.screen = Screen::Details;
+    app.details_context = DetailsContext::Diagnostics;
+    app.diagnostics = Some(DiagnosticsSummaryView {
+        eligible: 3447,
+        excluded: 34,
+        missing_name_count: 5,
+        duplicate_barcode_count: 29,
+        problem_count: 34,
+    });
+    let diagnostics = render_to_string(&app, 100, 30);
+    assert!(diagnostics.contains("Diagnostics Details"));
+    assert!(diagnostics.contains("Missing PLU name:"));
+
+    app.details_context = DetailsContext::DryRun;
+    app.dry_run = Some(DryRunSummaryView {
+        selected: 1,
+        would_submit: 1,
+        api_write_requests: 0,
+        selected_plu: Some(7575),
+        eligible: 10,
+        excluded: 1,
+        success: true,
+    });
+    let dry_run = render_to_string(&app, 100, 30);
+    assert!(dry_run.contains("Dry-run Details"));
+    assert!(dry_run.contains("No API writes performed."));
+
+    app.details_context = DetailsContext::FullImport;
+    app.import_result = Some(ImportSummaryView {
+        selected: 3,
+        submitted: 3,
+        succeeded: 1,
+        failed: 1,
+        unknown: 1,
+        selected_plu: Some(1234),
+        status: "COMPLETED_WITH_ERRORS".to_string(),
+    });
+    let import = render_to_string(&app, 100, 30);
+    assert!(import.contains("Full Import Details"));
+    assert!(import.contains("Unknown:"));
+}
+
+#[test]
+fn details_scroll_keys_change_scroll_without_leaving_screen() {
+    let mut app = TerminalApp::new(TerminalUiOptions {
+        default_profile: None,
+    });
+    app.screen = Screen::Details;
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.details_scroll, 1);
+    assert_eq!(app.screen, Screen::Details);
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.details_scroll, 0);
+}
+
+#[test]
+fn semantic_status_styles_remain_textual() {
+    let ok = status_line(true, "Config", "Ready");
+    let warn = status_line(false, "Unknown", "Review");
+    let missing = status_line(false, "Config", "Missing");
+    assert!(ok.to_string().contains("OK"));
+    assert!(warn.to_string().contains("WARN"));
+    assert!(missing.to_string().contains("WARN"));
+    assert!(ok.spans[0].style.fg.is_some());
 }

@@ -3,9 +3,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::digiweb::preflight::ReadinessResult;
 use crate::selection::SelectionCriteria;
 
-use super::actions::current_server_ip_text;
+use super::actions::current_digiweb_host_text;
 use super::app::TerminalApp;
-use super::model::{DeploymentSummary, InputMode, Screen, UiOperation};
+use super::model::{DeploymentSummary, DetailsContext, InputMode, Screen, UiOperation};
 
 impl TerminalApp {
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -17,8 +17,14 @@ impl TerminalApp {
             return;
         }
         match key.code {
-            KeyCode::Char('q') | KeyCode::Char('Q') => self.should_quit = true,
+            KeyCode::Char('q') | KeyCode::Char('Q') => {}
             KeyCode::Esc => self.go_back(),
+            KeyCode::Up if self.screen == Screen::Details => {
+                self.details_scroll = self.details_scroll.saturating_sub(1)
+            }
+            KeyCode::Down if self.screen == Screen::Details => {
+                self.details_scroll = self.details_scroll.saturating_add(1)
+            }
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
             KeyCode::Enter => self.select_current(),
@@ -43,7 +49,9 @@ impl TerminalApp {
             self.screen = screen;
             self.selected_index = 0;
         } else if self.screen == Screen::Main {
-            self.should_quit = true;
+            self.selected_index = self
+                .selected_index
+                .min(self.visible_items().len().saturating_sub(1));
         } else {
             self.screen = Screen::Main;
             self.selected_index = 0;
@@ -54,9 +62,17 @@ impl TerminalApp {
         self.history.push(self.screen);
         self.screen = screen;
         self.selected_index = 0;
+        if screen == Screen::Details {
+            self.details_scroll = 0;
+        }
         if matches!(screen, Screen::References | Screen::FullImportConfirm) {
             self.selected_index = 0;
         }
+    }
+
+    pub(super) fn push_details(&mut self, context: DetailsContext) {
+        self.details_context = context;
+        self.push_screen(Screen::Details);
     }
 
     pub(super) fn push_screen_with_operation(&mut self, screen: Screen, operation: UiOperation) {
@@ -94,7 +110,7 @@ impl TerminalApp {
             },
             Screen::DigiwebConfig => match self.selected_index {
                 0 => self.push_screen(Screen::Profile),
-                1 => self.start_input(InputMode::ServerIp, current_server_ip_text()),
+                1 => self.start_input(InputMode::DigiwebHost, current_digiweb_host_text()),
                 2 => self.start_input(InputMode::Secret, ""),
                 _ => self.go_back(),
             },
@@ -107,12 +123,12 @@ impl TerminalApp {
             },
             Screen::Analysis => match self.selected_index {
                 0 => self.push_screen_with_operation(Screen::Diagnostics, UiOperation::Diagnose),
-                1 => self.push_screen(Screen::Details),
+                1 => self.push_details(DetailsContext::Diagnostics),
                 _ => self.go_back(),
             },
             Screen::Diagnostics => match self.selected_index {
                 0 => self.push_screen(Screen::References),
-                1 => self.push_screen(Screen::Details),
+                1 => self.push_details(DetailsContext::Diagnostics),
                 _ => self.go_back(),
             },
             Screen::References => match self.selected_index {
@@ -121,6 +137,7 @@ impl TerminalApp {
                 _ => {}
             },
             Screen::ReadinessReady => match self.selected_index {
+                0 if self.readiness.is_none() => self.pending_operation = Some(UiOperation::Verify),
                 0 if self
                     .readiness
                     .as_ref()
@@ -129,15 +146,15 @@ impl TerminalApp {
                     self.dry_run = None;
                     self.push_screen(Screen::DryRun)
                 }
-                0 => self.push_screen(Screen::Details),
-                1 => self.push_screen(Screen::Details),
+                0 => self.pending_operation = Some(UiOperation::Verify),
+                1 => self.push_details(DetailsContext::Readiness),
                 _ => self.go_back(),
             },
             Screen::DryRun => {
                 if self.dry_run.is_some() {
                     match self.selected_index {
                         0 => self.push_screen(Screen::SinglePlu),
-                        1 => self.push_screen(Screen::Details),
+                        1 => self.push_details(DetailsContext::DryRun),
                         _ => self.go_back(),
                     }
                 } else {
@@ -193,7 +210,11 @@ impl TerminalApp {
                     self.push_screen(Screen::FullImportConfirm);
                 }
                 0 => self.screen = Screen::Main,
-                1 => self.push_screen(Screen::Details),
+                1 => self.push_details(if self.last_live_import_was_single {
+                    DetailsContext::SingleImport
+                } else {
+                    DetailsContext::FullImport
+                }),
                 _ => self.should_quit = true,
             },
             Screen::Advanced => match self.selected_index {
@@ -219,8 +240,8 @@ impl TerminalApp {
                 self.input_buffer.pop();
             }
             KeyCode::Enter => match mode {
-                InputMode::ServerIp => {
-                    self.pending_operation = Some(UiOperation::SaveIp(self.input_buffer.clone()))
+                InputMode::DigiwebHost => {
+                    self.pending_operation = Some(UiOperation::SaveHost(self.input_buffer.clone()))
                 }
                 InputMode::Secret => {
                     let secret = std::mem::take(&mut self.input_buffer);
@@ -252,9 +273,7 @@ impl TerminalApp {
                     return;
                 }
                 match mode {
-                    InputMode::ServerIp if ch.is_ascii_digit() || ch == '.' => {
-                        self.input_buffer.push(ch)
-                    }
+                    InputMode::DigiwebHost => self.input_buffer.push(ch),
                     InputMode::Secret => self.input_buffer.push(ch),
                     InputMode::DryRunPlu | InputMode::LivePlu if ch.is_ascii_digit() => {
                         self.input_buffer.push(ch)

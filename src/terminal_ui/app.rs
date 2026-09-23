@@ -5,7 +5,7 @@ use crate::import::runner::ImportProgressSnapshot;
 use crate::selection::SelectionCriteria;
 
 use super::model::{
-    AnalysisSummary, DeploymentSummary, DiagnosticsSummaryView, DryRunSummaryView,
+    AnalysisSummary, DeploymentSummary, DetailsContext, DiagnosticsSummaryView, DryRunSummaryView,
     ImportSummaryView, InputMode, ReadinessSummaryView, Screen, TerminalUiOptions, UiAction,
     UiOperation,
 };
@@ -24,6 +24,8 @@ pub struct TerminalApp {
     pub dry_run: Option<DryRunSummaryView>,
     pub import_result: Option<ImportSummaryView>,
     pub import_progress: Option<ImportProgressSnapshot>,
+    pub details_context: DetailsContext,
+    pub details_scroll: u16,
     pub input_mode: Option<InputMode>,
     pub input_buffer: String,
     pub input_error: Option<String>,
@@ -51,6 +53,8 @@ impl TerminalApp {
             dry_run: None,
             import_result: None,
             import_progress: None,
+            details_context: DetailsContext::None,
+            details_scroll: 0,
             input_mode: None,
             input_buffer: String::new(),
             input_error: None,
@@ -99,7 +103,7 @@ impl TerminalApp {
             Screen::DigiwebConfig => {
                 vec![
                     "Continue",
-                    "Change Server IP",
+                    "Change DIGIweb Host",
                     "Change Client Secret",
                     "Back",
                 ]
@@ -115,17 +119,13 @@ impl TerminalApp {
             Screen::Analysis => vec!["Continue", "View Issues", "Back"],
             Screen::Diagnostics => vec!["Continue", "View Details", "Back"],
             Screen::References => vec!["No", "Yes, record confirmation", "Back"],
-            Screen::ReadinessReady => {
-                if self
-                    .readiness
-                    .as_ref()
-                    .is_some_and(|summary| summary.readiness != ReadinessResult::NotReady)
-                {
-                    vec!["Continue", "Review Skips", "Back"]
-                } else {
-                    vec!["Review", "Back"]
+            Screen::ReadinessReady => match &self.readiness {
+                None => vec!["Run Readiness Check", "Back"],
+                Some(summary) if summary.readiness == ReadinessResult::NotReady => {
+                    vec!["Run Readiness Check", "View Details", "Back"]
                 }
-            }
+                Some(_) => vec!["Continue", "View Details", "Back"],
+            },
             Screen::DryRun => {
                 if self.dry_run.is_some() {
                     vec!["Continue", "View Details", "Back"]
@@ -181,6 +181,8 @@ impl fmt::Debug for TerminalApp {
             .field("dry_run", &self.dry_run)
             .field("import_result", &self.import_result)
             .field("import_progress", &self.import_progress)
+            .field("details_context", &self.details_context)
+            .field("details_scroll", &self.details_scroll)
             .field("input_mode", &self.input_mode)
             .field(
                 "input_buffer",

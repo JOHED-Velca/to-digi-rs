@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::path::Path;
 use std::time::Instant;
 
@@ -7,7 +6,7 @@ use ratatui::backend::Backend;
 
 use crate::cli::ConfirmTarget;
 use crate::config::AppConfig;
-use crate::config_setup::apply_customer_config_update;
+use crate::config_setup::{apply_customer_config_update, validate_digiweb_host};
 use crate::confirm::{
     ConfirmationPlan, apply_confirmation_to_config_text, render_confirmation_preview,
     write_confirmed_config,
@@ -49,7 +48,7 @@ pub(super) async fn run_ui_operation<B: Backend>(
 ) {
     app.busy_message = Some(match operation {
         UiOperation::DeploymentCheck => "Checking deployment...".to_string(),
-        UiOperation::SaveIp(_) => "Saving server IP...".to_string(),
+        UiOperation::SaveHost(_) => "Saving DIGIweb host...".to_string(),
         UiOperation::SaveSecret(_) => "Saving client secret...".to_string(),
         UiOperation::Analyze => "Analyzing MDB...".to_string(),
         UiOperation::Diagnose => "Building diagnostics...".to_string(),
@@ -66,11 +65,11 @@ pub(super) async fn run_ui_operation<B: Backend>(
             app.deployment = Some(check_deployment());
             Ok("Deployment checked.".to_string())
         }
-        UiOperation::SaveIp(value) => match save_server_ip(&value) {
+        UiOperation::SaveHost(value) => match save_digiweb_host(&value) {
             Ok(()) => {
                 app.input_mode = None;
                 app.input_buffer.clear();
-                Ok("OK Server IP updated".to_string())
+                Ok("OK DIGIweb Host updated".to_string())
             }
             Err(err) => {
                 app.input_error = Some(short_error(&err));
@@ -110,8 +109,10 @@ pub(super) async fn run_ui_operation<B: Backend>(
         UiOperation::ConfirmReferences => {
             match run_confirm_service(app.selected_profile.clone(), logger) {
                 Ok(()) => {
-                    app.push_screen_with_operation(Screen::ReadinessReady, UiOperation::Verify);
-                    Ok("OK References recorded".to_string())
+                    app.history.clear();
+                    app.screen = Screen::Main;
+                    app.selected_index = 0;
+                    Ok("OK DIGIweb references recorded.".to_string())
                 }
                 Err(err) => Err(err),
             }
@@ -185,13 +186,9 @@ fn check_deployment() -> DeploymentSummary {
     }
 }
 
-fn save_server_ip(value: &str) -> Result<(), AppError> {
-    let ip: IpAddr = value.parse().map_err(|_| {
-        AppError::Config(
-            "Server IP must be an IP address such as 192.168.0.150, not a URL or path".to_string(),
-        )
-    })?;
-    apply_customer_config_update(Path::new("config.toml"), Some(ip), None)?;
+fn save_digiweb_host(value: &str) -> Result<(), AppError> {
+    let host = validate_digiweb_host(value)?;
+    apply_customer_config_update(Path::new("config.toml"), Some(&host), None)?;
     Ok(())
 }
 
@@ -206,7 +203,7 @@ fn save_client_secret(secret: String) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(super) fn current_server_ip_text() -> String {
+pub(super) fn current_digiweb_host_text() -> String {
     AppConfig::load(Path::new("config.toml"))
         .ok()
         .and_then(|config| {
@@ -424,6 +421,7 @@ async fn run_verify_service(
     let client_secret = load_client_secret(&config)?;
     let client = DigiwebClient::new(config.clone())?;
     let auth_result = authenticate(client.http(), &config, &client_secret).await;
+    let authentication_error = auth_result.as_ref().err().map(|err| short_error(err));
     let authentication = if auth_result.is_ok() {
         AuthenticationReadinessStatus::Passed
     } else {
@@ -450,6 +448,7 @@ async fn run_verify_service(
     Ok(ReadinessSummaryView {
         readiness,
         authentication,
+        authentication_error,
         eligible: source.valid_plus.len(),
         excluded: excluded_count,
         unverified_references: reference_readiness.unverified_reference_count,

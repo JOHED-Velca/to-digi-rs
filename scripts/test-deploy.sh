@@ -553,6 +553,7 @@ test_no_argument_tui_uses_tty_and_does_not_require_mdb() {
     assert_contains "$TEST_ROOT/fake-tui.log" "--tty"
     assert_contains "$output" "Command: tui"
     assert_not_contains "$TEST_ROOT/fake-tui.log" "$deploy_dir/plu.mdb,dst=/work/plu.mdb"
+    ! compgen -G "$deploy_dir/output/run-*-tui/.container-output.tmp" >/dev/null || fail "TUI stream was captured to .container-output.tmp"
 }
 
 test_launcher_archives_output_and_preserves_exit_code

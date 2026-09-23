@@ -162,7 +162,11 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
             ));
         }
         let secret = read_config_setup_secret(&config_setup)?;
-        let result = apply_customer_config_update(config_path, config_setup.ip, secret.as_ref())?;
+        let result = apply_customer_config_update(
+            config_path,
+            config_setup.host.as_deref(),
+            secret.as_ref(),
+        )?;
         logger.line("Customer configuration updated before command dispatch.")?;
         println!("Configuration updated.");
         if let Some(host) = &result.host {
@@ -396,7 +400,7 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
 fn import_config_setup_args(cli: &Cli) -> ConfigSetupArgs {
     match &cli.command {
         Some(CliCommand::Import(args)) => ConfigSetupArgs {
-            ip: args.config_ip,
+            host: args.config_ip.clone(),
             secret_prompt: args.config_secret,
             secret_stdin: args.config_secret_stdin,
         },

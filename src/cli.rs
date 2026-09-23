@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -200,8 +199,8 @@ pub struct ImportArgs {
     #[arg(long, value_name = "NAME", conflicts_with_all = ["resume", "sanitize_profile"])]
     pub profile: Option<String>,
     /// Update config.toml DIGIweb customer-host URL fields before continuing
-    #[arg(long, alias = "config_ip", value_parser = parse_ip_address)]
-    pub config_ip: Option<IpAddr>,
+    #[arg(long, alias = "config_ip", value_parser = parse_digiweb_host)]
+    pub config_ip: Option<String>,
     /// Prompt securely for the DIGIweb client secret and persist it before continuing
     #[arg(long, alias = "config_secret", conflicts_with = "config_secret_stdin")]
     pub config_secret: bool,
@@ -287,9 +286,9 @@ impl ProfileSelection {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConfigSetupArgs {
-    pub ip: Option<IpAddr>,
+    pub host: Option<String>,
     pub secret_prompt: bool,
     pub secret_stdin: bool,
 }
@@ -297,14 +296,14 @@ pub struct ConfigSetupArgs {
 impl ConfigSetupArgs {
     fn from_import_args(args: &ImportArgs) -> Self {
         Self {
-            ip: args.config_ip,
+            host: args.config_ip.clone(),
             secret_prompt: args.config_secret,
             secret_stdin: args.config_secret_stdin,
         }
     }
 
     pub fn is_requested(&self) -> bool {
-        self.ip.is_some() || self.secret_prompt || self.secret_stdin
+        self.host.is_some() || self.secret_prompt || self.secret_stdin
     }
 }
 
@@ -330,10 +329,8 @@ fn parse_positive_u64(value: &str) -> Result<u64, String> {
     }
 }
 
-fn parse_ip_address(value: &str) -> Result<IpAddr, String> {
-    value.parse::<IpAddr>().map_err(|_| {
-        "--config-ip expects an IP address such as 192.168.0.150, not a URL or path".to_string()
-    })
+fn parse_digiweb_host(value: &str) -> Result<String, String> {
+    crate::config_setup::validate_digiweb_host(value).map_err(|err| err.to_string())
 }
 
 fn parse_diagnostic_category(value: &str) -> Result<DiagnosticCategory, String> {
@@ -787,7 +784,7 @@ mod tests {
 
         match command {
             EffectiveCommand::Import { config_setup, .. } => {
-                assert_eq!(config_setup.ip, Some("192.168.0.150".parse().expect("ip")));
+                assert_eq!(config_setup.host.as_deref(), Some("192.168.0.150"));
                 assert!(config_setup.secret_prompt);
                 assert!(!config_setup.secret_stdin);
             }
@@ -796,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn config_secret_sources_conflict_and_ip_rejects_urls() {
+    fn config_secret_sources_conflict_and_host_rejects_urls() {
         assert!(
             Cli::try_parse_from([
                 "to-digi-rs",
@@ -816,7 +813,16 @@ mod tests {
             .is_err()
         );
         assert!(
-            Cli::try_parse_from(["to-digi-rs", "import", "--config-ip", "999.999.1.1"]).is_err()
+            Cli::try_parse_from([
+                "to-digi-rs",
+                "import",
+                "--config-ip",
+                "vps-51d2863e.vps.ovh.ca",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["to-digi-rs", "import", "--config-ip", "-bad.example"]).is_err()
         );
     }
 
