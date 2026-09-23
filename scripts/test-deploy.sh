@@ -395,7 +395,7 @@ test_launcher_allocates_tty_only_for_interactive_stdout() {
     FAKE_DOCKER_LOG="$TEST_ROOT/fake-tty-redirected.log" \
     TO_DIGI_RS_ALLOW_NON_LINUX_FOR_TESTS=1 \
     TO_DIGI_RS_TEST_HOME="$TEST_ROOT/home" \
-    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --test >"$output" 2>&1
+    PATH="$fake_dir:$PATH" "$deploy_dir/to-digi" import --test </dev/null >"$output" 2>&1
     assert_not_contains "$TEST_ROOT/fake-tty-redirected.log" "--interactive"
     assert_not_contains "$TEST_ROOT/fake-tty-redirected.log" "--tty"
 
@@ -489,18 +489,42 @@ test_package_archive_contains_expected_files_only() {
     assert_not_contains "$extract_dir/to-digi-rs-deploy/README.md" "0.9.0-rc.1"
     [ ! -f "$extract_dir/to-digi-rs-deploy/config.toml" ] || fail "archive unexpectedly contains config.toml"
     [ ! -f "$extract_dir/to-digi-rs-deploy/plu.mdb" ] || fail "archive unexpectedly contains plu.mdb"
+
+    local alpha_version="0.10.0-alpha.999"
+    local alpha_image="ghcr.io/johed-velca/to-digi-rs:$alpha_version"
+    local alpha_archive
+    alpha_archive="$(TO_DIGI_RS_VERSION="$alpha_version" TO_DIGI_RS_PACKAGE_IMAGE="$alpha_image" "$ROOT_DIR/scripts/package-deploy.sh")"
+    [ -f "$alpha_archive" ] || fail "alpha archive was not created"
+    [ "$(basename "$alpha_archive")" = "to-digi-rs-deploy-v$alpha_version.tar.gz" ] || fail "unexpected alpha archive name: $alpha_archive"
+    local alpha_extract_dir="$TEST_ROOT/alpha-archive-extract"
+    mkdir -p "$alpha_extract_dir"
+    tar -xzf "$alpha_archive" -C "$alpha_extract_dir"
+    assert_contains "$alpha_extract_dir/to-digi-rs-deploy/to-digi" "DEFAULT_IMAGE=\"$alpha_image\""
+    assert_contains "$alpha_extract_dir/to-digi-rs-deploy/compose.yaml" "image: \${TO_DIGI_RS_IMAGE:-$alpha_image}"
+    assert_contains "$alpha_extract_dir/to-digi-rs-deploy/README.md" "IMAGE=\"$alpha_image\""
+    rm -f "$alpha_archive"
 }
 
-test_publish_workflow_supports_release_candidates() {
+test_publish_workflow_supports_prereleases() {
     local workflow="$ROOT_DIR/.github/workflows/publish-container.yml"
+    local version_regex='^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$'
     assert_contains "$workflow" "tags:"
     assert_contains "$workflow" "- \"v*\""
-    assert_contains "$workflow" '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
+    assert_contains "$workflow" "$version_regex"
+    assert_not_contains "$workflow" '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
     assert_contains "$workflow" "TO_DIGI_RS_RELEASE_IMAGE=\${{ needs.release-metadata.outputs.image }}"
     assert_contains "$workflow" "platforms: linux/amd64"
     assert_contains "$workflow" "to-digi-rs-deploy-\${{ needs.release-metadata.outputs.tag }}.tar.gz"
     assert_not_contains "$workflow" "to-digi-rs-deploy-v0.8.0"
     assert_not_contains "$workflow" ":latest"
+
+    local version
+    for version in 0.10.0 0.10.0-alpha.1 0.10.0-alpha.25 0.10.0-beta.1 0.10.0-rc.1; do
+        [[ "$version" =~ $version_regex ]] || fail "expected workflow regex to accept $version"
+    done
+    for version in 0.10 0.10.0-alpha 0.10.0-alpha.foo 0.10.0-preview.1 v0.10.0; do
+        ! [[ "$version" =~ $version_regex ]] || fail "expected workflow regex to reject $version"
+    done
 }
 
 test_launcher_does_not_print_secrets() {
@@ -544,7 +568,7 @@ test_non_usage_exit_without_log_still_warns_as_missing_log
 test_launcher_allocates_tty_only_for_interactive_stdout
 test_launcher_allocates_interactive_stdin_independently
 test_package_archive_contains_expected_files_only
-test_publish_workflow_supports_release_candidates
+test_publish_workflow_supports_prereleases
 test_launcher_does_not_print_secrets
 test_no_argument_tui_uses_tty_and_does_not_require_mdb
 
