@@ -152,7 +152,7 @@ struct NormalizedBarcode {
 /// - DCA barcode mapping follows the working VB.NET `mod_dca_sms.vb` implementation:
 ///   raw `Barcode Format` is normalized through an integer-like conversion, blank format defaults to `5`,
 ///   `plubarcodetype` receives that normalized format, `plubarcoderefno` is `1` for blank/0/00 and otherwise the normalized format,
-///   `plubarcodedata` is `Flag Data` left-padded to 2 digits plus `Barcode` left-padded to 6 digits for format 4 or 5 digits otherwise.
+///   `plubarcodedata` is `Flag Data` left-padded to 2 digits plus `Barcode` left-padded to 6 digits for formats 4 and 20 or 5 digits otherwise.
 /// - `Pludata`.`PRINT FORMAT CODE` is retained as the raw label-format value on `Plu`;
 ///   effective DIGIweb `plulabelformat` is resolved through the shared PLU label-format helper, where raw `0` defaults to effective `1`.
 /// - DCA `TARE` follows the legacy importer's `FormattaTara` behavior: blank/0 maps to `0`, otherwise the source value is divided by 1000 before becoming DIGIweb `plutare`.
@@ -444,7 +444,13 @@ fn normalize_barcode(row: &SourceRow) -> Result<NormalizedBarcode, AppError> {
     let raw_flag = optional_raw_text(row, FLAG_DATA_COLUMNS).unwrap_or_default();
     let normalized_flag = normalize_non_negative_integer_text(&raw_flag, "Flag Data", "0")?;
 
-    let barcode_width = if normalized_format == "4" { 6 } else { 5 };
+    // Legacy DCA special-cases format 4. DIGIweb's confirmed format-20 contract
+    // uses the same eight-character payload shape: two flag plus six barcode digits.
+    let barcode_width = if matches!(normalized_format.as_str(), "4" | "20") {
+        6
+    } else {
+        5
+    };
     let data = format!(
         "{}{}",
         left_pad(&normalized_flag, 2),
@@ -1802,6 +1808,31 @@ mod tests {
     }
 
     #[test]
+    fn barcode_format_20_uses_required_eight_digit_payload() {
+        let mut row = dca_pludata_row("4351", "0", "1.99", "0", "");
+        row.values
+            .insert("Name 1".to_string(), "RAINBOW TROUT COLD SMKD".to_string());
+        row.values
+            .insert("Barcode Format".to_string(), "20".to_string());
+        row.values.insert("Barcode".to_string(), "4351".to_string());
+        row.values.insert("Flag Data".to_string(), String::new());
+        let dataset = SourceDataset {
+            plu_rows: vec![row],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+        let plu = &report.plus[0];
+
+        assert_eq!(plu.plu_number, 4351);
+        assert_eq!(plu.barcode_type.as_deref(), Some("20"));
+        assert_eq!(plu.barcode_ref_no.as_deref(), Some("20"));
+        assert_eq!(plu.barcode.as_deref(), Some("00004351"));
+        assert_eq!(plu.barcode.as_deref().map(str::len), Some(8));
+    }
+
+    #[test]
     fn invalid_barcode_format_is_blocked_before_submission() {
         let mut row = dca_pludata_row("1", "0", "1.99", "0", "");
         row.values
@@ -1820,6 +1851,26 @@ mod tests {
                 issue.field == "barcode" && issue.message.contains("Barcode Format")
             })
         );
+    }
+
+    #[test]
+    fn non_numeric_barcode_remains_blocked_before_submission() {
+        let mut row = dca_pludata_row("4351", "0", "1.99", "0", "");
+        row.values
+            .insert("Barcode Format".to_string(), "20".to_string());
+        row.values.insert("Barcode".to_string(), "43A1".to_string());
+        let dataset = SourceDataset {
+            plu_rows: vec![row],
+            ingredient_rows: Vec::new(),
+            nutrition_rows: Vec::new(),
+        };
+
+        let report = normalize_dataset(&dataset, &MappingConfig::default(), 1).expect("normalize");
+
+        assert!(report.plus.is_empty());
+        assert!(report.row_issues.iter().any(|issue| {
+            issue.field == "barcode" && issue.message.contains("must contain only digits")
+        }));
     }
 
     #[test]

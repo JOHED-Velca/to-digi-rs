@@ -30,6 +30,7 @@ pub enum Screen {
     ReadinessReady,
     DryRun,
     SinglePlu,
+    FullImportErrorHandling,
     FullImportConfirm,
     FullImportProgress,
     Completion,
@@ -52,6 +53,7 @@ impl Screen {
             Self::ReadinessReady => "Readiness",
             Self::DryRun => "Dry Run",
             Self::SinglePlu => "Single PLU Test",
+            Self::FullImportErrorHandling => "Full Import Error Handling",
             Self::FullImportConfirm => "Full Import",
             Self::FullImportProgress => "Full Import",
             Self::Completion => "Import Complete",
@@ -95,7 +97,10 @@ pub enum UiOperation {
     ConfirmReferences,
     Verify,
     DryRun(SelectionCriteria),
-    Import(SelectionCriteria),
+    Import {
+        selection: SelectionCriteria,
+        continue_on_error: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,8 +174,19 @@ pub struct ImportSummaryView {
     pub succeeded: usize,
     pub failed: usize,
     pub unknown: usize,
+    pub not_attempted: usize,
     pub selected_plu: Option<u64>,
+    pub continue_on_error: bool,
+    pub failures: Vec<ImportFailureView>,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImportFailureView {
+    pub plu_number: u64,
+    pub status: String,
+    pub stage: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

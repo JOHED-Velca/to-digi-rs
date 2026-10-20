@@ -1540,6 +1540,10 @@ fn summary_from_manifest(manifest: &ImportManifest, valid_count: usize) -> Impor
                     RecordStatus::Failed => ProcessingStatus::Fail,
                     _ => ProcessingStatus::SubmittedStatusUnknown,
                 },
+                failure_stage: record
+                    .attempts
+                    .last()
+                    .and_then(|attempt| attempt.error_stage.clone()),
                 failure_message: record.last_error.clone(),
                 duration_ms: 0,
             })

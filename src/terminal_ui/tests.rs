@@ -3,14 +3,16 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use std::time::Duration;
 
+use super::actions::concise_import_failure;
 use super::app::TerminalApp;
 use super::model::{
     AnalysisSummary, CANONICAL_MDB_DISPLAY_PATH, DeploymentSummary, DetailsContext,
-    DiagnosticsSummaryView, DryRunSummaryView, ImportSummaryView, InputMode, ReadinessSummaryView,
-    Screen, TerminalUiOptions, UiAction, UiOperation,
+    DiagnosticsSummaryView, DryRunSummaryView, ImportFailureView, ImportSummaryView, InputMode,
+    ReadinessSummaryView, Screen, TerminalUiOptions, UiAction, UiOperation,
 };
 use super::render::{
-    compact_references, render_app, render_full_import_progress_body, status_line,
+    compact_references, render_app, render_full_import_progress_body, render_import_details,
+    status_line,
 };
 use super::should_launch_interactive;
 use crate::cli::CliCommand;
@@ -525,7 +527,10 @@ fn single_live_completion_continue_moves_to_full_import_confirmation() {
         succeeded: 1,
         failed: 0,
         unknown: 0,
+        not_attempted: 0,
         selected_plu: Some(7575),
+        continue_on_error: false,
+        failures: Vec::new(),
         status: "SUCCESS".to_string(),
     });
 
@@ -535,10 +540,19 @@ fn single_live_completion_continue_moves_to_full_import_confirmation() {
     );
     app.handle_key(key(KeyCode::Enter));
 
-    assert_eq!(app.screen, Screen::FullImportConfirm);
+    assert_eq!(app.screen, Screen::FullImportErrorHandling);
     assert_eq!(app.live_selection, None);
     assert!(!app.last_live_import_was_single);
-    assert_eq!(app.visible_items(), vec!["Cancel", "Start Import"]);
+    assert_eq!(
+        app.visible_items(),
+        vec![
+            "Continue after individual PLU errors",
+            "Stop at first PLU error",
+            "Back"
+        ]
+    );
+    assert_eq!(app.selected_index, 0);
+    assert!(app.full_import_continue_on_error);
 }
 
 #[test]
@@ -566,12 +580,15 @@ fn completion_summary_separates_failed_and_unknown() {
     });
     app.screen = Screen::Completion;
     app.import_result = Some(ImportSummaryView {
-        selected: 3,
+        selected: 5,
         submitted: 3,
         succeeded: 1,
         failed: 1,
         unknown: 1,
-        selected_plu: None,
+        not_attempted: 2,
+        selected_plu: Some(40169),
+        continue_on_error: true,
+        failures: Vec::new(),
         status: "COMPLETED_WITH_ERRORS".to_string(),
     });
     let rendered = render_to_string(&app, 100, 30);
@@ -580,6 +597,8 @@ fn completion_summary_separates_failed_and_unknown() {
     assert!(rendered.contains("Successful"));
     assert!(rendered.contains("Failed"));
     assert!(rendered.contains("Unknown"));
+    assert!(rendered.contains("Not attempted 2"));
+    assert!(rendered.contains("COMPLETED_WITH_ERRORS"));
 }
 
 #[test]
@@ -652,12 +671,114 @@ fn diagnostic_dry_run_and_import_details_are_structured() {
         succeeded: 1,
         failed: 1,
         unknown: 1,
-        selected_plu: Some(1234),
+        not_attempted: 4,
+        selected_plu: None,
+        continue_on_error: false,
+        failures: vec![ImportFailureView {
+            plu_number: 4351,
+            status: "FAIL".to_string(),
+            stage: "DIGIweb processing".to_string(),
+            reason: "Barcode 0004351 has length 7; barcode type 20 requires length 8.".to_string(),
+        }],
         status: "COMPLETED_WITH_ERRORS".to_string(),
     });
-    let import = render_to_string(&app, 100, 30);
+    let import = render_import_details(&app, false)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(import.contains("Full Import Details"));
     assert!(import.contains("Unknown:"));
+    assert!(import.contains("Not attempted: 4"));
+    assert!(import.contains("PLU 4351"));
+    assert!(import.contains("barcode type 20 requires length 8"));
+    assert!(import.contains("Stop at first PLU error was enabled"));
+    assert!(!import.contains("PLU: 40169"));
+}
+
+#[test]
+fn full_import_error_handling_defaults_to_continue_and_sets_runner_option() {
+    let mut app = TerminalApp::new(TerminalUiOptions {
+        default_profile: Some("starsky".to_string()),
+    });
+    app.screen = Screen::FullImportErrorHandling;
+
+    assert_eq!(
+        app.visible_items()[app.selected_index],
+        "Continue after individual PLU errors"
+    );
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.screen, Screen::FullImportConfirm);
+    assert!(app.full_import_continue_on_error);
+    app.selected_index = 1;
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.pending_operation,
+        Some(UiOperation::Import {
+            selection: SelectionCriteria {
+                limit: None,
+                requested_plu: None,
+                test_mode: false,
+            },
+            continue_on_error: true,
+        })
+    );
+}
+
+#[test]
+fn full_import_error_handling_can_stop_at_first_error() {
+    let mut app = TerminalApp::new(TerminalUiOptions {
+        default_profile: Some("starsky".to_string()),
+    });
+    app.screen = Screen::FullImportErrorHandling;
+    app.selected_index = 1;
+    app.handle_key(key(KeyCode::Enter));
+    assert!(!app.full_import_continue_on_error);
+    assert_eq!(app.screen, Screen::FullImportConfirm);
+    app.selected_index = 1;
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.pending_operation,
+        Some(UiOperation::Import {
+            selection: SelectionCriteria {
+                limit: None,
+                requested_plu: None,
+                test_mode: false,
+            },
+            continue_on_error: false,
+        })
+    );
+}
+
+#[test]
+fn barcode_backend_error_is_rendered_as_concise_safe_reason() {
+    let raw = "Failed to update PLU general data. BadRequestException: The barcode: 0004351 has missing values associated to its type: F CCCCCCC PPPP C/D length barcode: 7, length needed: 8";
+    assert_eq!(
+        concise_import_failure(raw, Some("20")),
+        "Barcode 0004351 has length 7; barcode type 20 requires length 8."
+    );
+}
+
+#[test]
+fn concise_import_failure_redacts_credentials_and_headers() {
+    let rendered = concise_import_failure(
+        "Authorization Bearer top-secret access_token client_secret password",
+        None,
+    );
+    assert!(!rendered.contains("top-secret"));
+    assert!(!rendered.contains("Authorization"));
+    assert!(!rendered.contains("access_token"));
+    assert!(!rendered.contains("client_secret"));
+}
+
+#[test]
+fn first_valid_plu_wording_replaces_first_available() {
+    let mut app = TerminalApp::new(TerminalUiOptions {
+        default_profile: None,
+    });
+    app.screen = Screen::SinglePlu;
+    assert!(app.visible_items().contains(&"First valid PLU"));
+    assert!(!app.visible_items().contains(&"First available PLU"));
 }
 
 #[test]

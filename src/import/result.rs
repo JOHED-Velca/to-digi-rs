@@ -9,6 +9,7 @@ pub struct RecordImportResult {
     pub api_request_id: Option<String>,
     pub http_result: String,
     pub final_status: ProcessingStatus,
+    pub failure_stage: Option<String>,
     pub failure_message: Option<String>,
     pub duration_ms: u128,
 }

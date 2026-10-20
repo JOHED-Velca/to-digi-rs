@@ -133,6 +133,16 @@ pub fn validate_plus(plus: &[Plu]) -> ValidationReport {
                     "barcode exceeds 32 characters",
                 ));
             }
+            if plu.barcode_type.as_deref() == Some("20") && barcode.len() != 8 {
+                issues.push(ValidationIssue::error(
+                    Some(plu.plu_number),
+                    "barcode",
+                    format!(
+                        "DIGIweb barcode type 20 requires exactly 8 digits; derived barcode has {}",
+                        barcode.len()
+                    ),
+                ));
+            }
             if let Some(previous_plu) = seen_barcodes.get(barcode).copied() {
                 issues.push(ValidationIssue::error(
                     Some(plu.plu_number),
@@ -364,6 +374,23 @@ mod tests {
                 .iter()
                 .any(|issue| issue.field == "price" && issue.severity == Severity::Error)
         );
+    }
+
+    #[test]
+    fn barcode_format_20_requires_eight_digit_payload() {
+        let mut plu = valid_plu(4351);
+        plu.barcode = Some("0004351".to_string());
+        plu.barcode_type = Some("20".to_string());
+        plu.barcode_ref_no = Some("20".to_string());
+
+        let report = validate_plus(&[plu]);
+
+        assert!(report.issues.iter().any(|issue| {
+            issue.plu_number == Some(4351)
+                && issue.field == "barcode"
+                && issue.severity == Severity::Error
+                && issue.message.contains("requires exactly 8 digits")
+        }));
     }
 
     #[test]

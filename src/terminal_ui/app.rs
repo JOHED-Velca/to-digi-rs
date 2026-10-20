@@ -33,6 +33,7 @@ pub struct TerminalApp {
     pub busy_message: Option<String>,
     pub live_selection: Option<SelectionCriteria>,
     pub last_live_import_was_single: bool,
+    pub full_import_continue_on_error: bool,
 }
 impl TerminalApp {
     pub fn new(options: TerminalUiOptions) -> Self {
@@ -62,6 +63,7 @@ impl TerminalApp {
             busy_message: None,
             live_selection: None,
             last_live_import_was_single: false,
+            full_import_continue_on_error: true,
         }
     }
 
@@ -131,7 +133,7 @@ impl TerminalApp {
                     vec!["Continue", "View Details", "Back"]
                 } else {
                     vec![
-                        "First available PLU",
+                        "First valid PLU",
                         "Specific PLU",
                         "All eligible PLUs",
                         "Skip",
@@ -139,7 +141,12 @@ impl TerminalApp {
                     ]
                 }
             }
-            Screen::SinglePlu => vec!["First available PLU", "Specific PLU", "Back"],
+            Screen::SinglePlu => vec!["First valid PLU", "Specific PLU", "Back"],
+            Screen::FullImportErrorHandling => vec![
+                "Continue after individual PLU errors",
+                "Stop at first PLU error",
+                "Back",
+            ],
             Screen::FullImportConfirm => {
                 if self.live_selection.is_some() {
                     vec!["Cancel", "Import"]
@@ -199,6 +206,10 @@ impl fmt::Debug for TerminalApp {
             .field(
                 "last_live_import_was_single",
                 &self.last_live_import_was_single,
+            )
+            .field(
+                "full_import_continue_on_error",
+                &self.full_import_continue_on_error,
             )
             .finish()
     }

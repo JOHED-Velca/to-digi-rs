@@ -37,7 +37,7 @@ use crate::{
 use super::app::TerminalApp;
 use super::model::{
     AnalysisSummary, DeploymentSummary, DiagnosticsSummaryView, DryRunSummaryView,
-    ImportSummaryView, ReadinessSummaryView, Screen, UiOperation,
+    ImportFailureView, ImportSummaryView, ReadinessSummaryView, Screen, UiOperation,
 };
 use super::render::render_app;
 pub(super) async fn run_ui_operation<B: Backend>(
@@ -55,7 +55,7 @@ pub(super) async fn run_ui_operation<B: Backend>(
         UiOperation::ConfirmReferences => "Recording confirmations...".to_string(),
         UiOperation::Verify => "Verifying readiness...".to_string(),
         UiOperation::DryRun(_) => "Running dry run...".to_string(),
-        UiOperation::Import(_) => "Importing PLUs...".to_string(),
+        UiOperation::Import { .. } => "Importing PLUs...".to_string(),
     });
     app.status_message = None;
     app.input_error = None;
@@ -134,7 +134,10 @@ pub(super) async fn run_ui_operation<B: Backend>(
                 Err(err) => Err(err),
             }
         }
-        UiOperation::Import(selection) => {
+        UiOperation::Import {
+            selection,
+            continue_on_error,
+        } => {
             let selected_profile = app.selected_profile.clone();
             app.screen = Screen::FullImportProgress;
             app.selected_index = 0;
@@ -150,6 +153,7 @@ pub(super) async fn run_ui_operation<B: Backend>(
             match run_import_service(
                 selected_profile,
                 selection,
+                continue_on_error,
                 logger,
                 Some(&mut progress_observer),
             )
@@ -549,6 +553,7 @@ fn run_dry_run_service(
 async fn run_import_service(
     profile: Option<String>,
     selection: SelectionCriteria,
+    continue_on_error: bool,
     logger: &mut AuditLogger,
     progress_observer: Option<&mut dyn FnMut(ImportProgressSnapshot)>,
 ) -> Result<ImportSummaryView, AppError> {
@@ -572,7 +577,7 @@ async fn run_import_service(
     let options = crate::import::runner::ImportRunOptions {
         limit: selection.limit,
         requested_plu: selection.requested_plu,
-        continue_after_record_failure: false,
+        continue_after_record_failure: continue_on_error,
         test_mode: selection.test_mode,
         retry_failed: false,
     };
@@ -626,17 +631,79 @@ async fn run_import_service(
         unknown_plu_numbers: &[],
         dry_run: false,
     })?;
+    let failures = summary
+        .records
+        .iter()
+        .filter(|record| record.failure_message.is_some())
+        .take(50)
+        .map(|record| {
+            let barcode_type = source
+                .valid_plus
+                .iter()
+                .find(|plu| plu.plu_number == record.plu_number)
+                .and_then(|plu| plu.barcode_type.as_deref());
+            ImportFailureView {
+                plu_number: record.plu_number,
+                status: record.final_status.as_str().to_string(),
+                stage: record
+                    .failure_stage
+                    .clone()
+                    .unwrap_or_else(|| "DIGIweb processing".to_string()),
+                reason: concise_import_failure(
+                    record.failure_message.as_deref().unwrap_or("Import failed"),
+                    barcode_type,
+                ),
+            }
+        })
+        .collect();
     Ok(ImportSummaryView {
         selected: summary.selected,
         submitted: summary.submitted,
         succeeded: summary.succeeded,
         failed: summary.failed,
         unknown: summary.unknown,
-        selected_plu: selection
-            .requested_plu
-            .or_else(|| summary.records.first().map(|record| record.plu_number)),
+        not_attempted: summary.not_attempted_after_stop,
+        selected_plu: selection.requested_plu.or_else(|| {
+            selection
+                .test_mode
+                .then(|| summary.records.first().map(|record| record.plu_number))
+                .flatten()
+        }),
+        continue_on_error,
+        failures,
         status,
     })
+}
+
+pub(super) fn concise_import_failure(message: &str, barcode_type: Option<&str>) -> String {
+    let sanitized = crate::recovery::sanitize_manifest_error(message);
+    let barcode = value_after_label(&sanitized, "the barcode:")
+        .or_else(|| value_after_label(&sanitized, "barcode:"));
+    let actual_length = value_after_label(&sanitized, "length barcode:");
+    let required_length = value_after_label(&sanitized, "length needed:");
+    if let (Some(barcode), Some(actual_length), Some(required_length), Some(barcode_type)) =
+        (barcode, actual_length, required_length, barcode_type)
+    {
+        return format!(
+            "Barcode {barcode} has length {actual_length}; barcode type {barcode_type} requires length {required_length}."
+        );
+    }
+
+    let concise = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if concise.chars().count() <= 240 {
+        concise
+    } else {
+        concise.chars().take(237).collect::<String>() + "..."
+    }
+}
+
+fn value_after_label<'a>(message: &'a str, label: &str) -> Option<&'a str> {
+    let lower = message.to_ascii_lowercase();
+    let start = lower.find(label)? + label.len();
+    message[start..]
+        .trim_start()
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | '.'))
+        .find(|value| !value.is_empty())
 }
 
 fn short_error(err: &AppError) -> String {

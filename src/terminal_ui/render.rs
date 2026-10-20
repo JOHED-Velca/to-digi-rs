@@ -122,6 +122,7 @@ fn render_screen(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TerminalApp) 
             Screen::SinglePlu => vec![Line::from(
                 "Choose one live PLU test before considering a full import.",
             )],
+            Screen::FullImportErrorHandling => render_error_handling_body(app),
             Screen::FullImportConfirm => render_full_import_confirm_body(app),
             Screen::FullImportProgress => render_full_import_progress_body(app),
             Screen::Completion => render_completion_body(app),
@@ -405,7 +406,7 @@ fn render_readiness_body(app: &TerminalApp) -> Vec<Line<'static>> {
 fn render_dry_run_body(app: &TerminalApp) -> Vec<Line<'static>> {
     let Some(summary) = &app.dry_run else {
         return vec![Line::from(
-            "First available uses --test. Specific PLU uses exact --plu. All eligible submits zero API writes.",
+            "First valid uses --test. Specific PLU uses exact --plu. All eligible submits zero API writes.",
         )];
     };
     let mut lines = Vec::new();
@@ -458,13 +459,41 @@ fn render_full_import_confirm_body(app: &TerminalApp) -> Vec<Line<'static>> {
         if let Some(plu) = selection.requested_plu {
             lines.push(Line::from(format!("PLU:         {plu}")));
         } else if selection.test_mode {
-            lines.push(Line::from("PLU:         First available"));
+            lines.push(Line::from("PLU:         First valid"));
         }
+    }
+    if !is_single {
+        lines.push(Line::from(format!(
+            "PLU errors:  {}",
+            if app.full_import_continue_on_error {
+                "Continue after individual errors"
+            } else {
+                "Stop at first error"
+            }
+        )));
     }
     lines.push(Line::from(""));
     lines.push(Line::from("This will modify DIGIweb."));
     lines.push(Line::from("Cancel is selected by default."));
     lines
+}
+
+fn render_error_handling_body(app: &TerminalApp) -> Vec<Line<'static>> {
+    vec![
+        heading_line("Full Import Error Handling"),
+        Line::from(""),
+        Line::from("Choose how individual PLU processing failures are handled."),
+        Line::from(""),
+        status_line(
+            app.full_import_continue_on_error,
+            "Default",
+            "Continue after individual PLU errors",
+        ),
+        Line::from(""),
+        Line::from("Authentication, configuration, readiness, durability, and"),
+        Line::from("ambiguous-submission failures still stop the import safely."),
+        Line::from("Failed PLUs are recorded and are not retried automatically."),
+    ]
 }
 
 pub(super) fn render_full_import_progress_body(app: &TerminalApp) -> Vec<Line<'static>> {
@@ -536,12 +565,14 @@ fn render_completion_body(app: &TerminalApp) -> Vec<Line<'static>> {
             Line::from(format!("Unknown {}", summary.unknown)),
         ];
     }
-    let mut lines = vec![
-        Line::from(if summary.failed == 0 && summary.unknown == 0 {
-            "Import Complete"
-        } else {
-            "Import Completed With Issues"
-        }),
+    let lines = vec![
+        Line::from(
+            if summary.failed == 0 && summary.unknown == 0 && summary.not_attempted == 0 {
+                "Import Complete"
+            } else {
+                "Import Completed With Issues"
+            },
+        ),
         Line::from(""),
         status_line(true, "Successful", &summary.succeeded.to_string()),
         status_line(summary.failed == 0, "Failed", &summary.failed.to_string()),
@@ -552,11 +583,9 @@ fn render_completion_body(app: &TerminalApp) -> Vec<Line<'static>> {
         ),
         Line::from(format!("Submitted {}", summary.submitted)),
         Line::from(format!("Selected {}", summary.selected)),
+        Line::from(format!("Not attempted {}", summary.not_attempted)),
         Line::from(format!("Status {}", summary.status)),
     ];
-    if let Some(plu) = summary.selected_plu {
-        lines.push(Line::from(format!("PLU {plu}")));
-    }
     lines
 }
 
@@ -650,7 +679,7 @@ fn render_dry_run_details(app: &TerminalApp) -> Vec<Line<'static>> {
     ]
 }
 
-fn render_import_details(app: &TerminalApp, single: bool) -> Vec<Line<'static>> {
+pub(super) fn render_import_details(app: &TerminalApp, single: bool) -> Vec<Line<'static>> {
     let Some(summary) = &app.import_result else {
         return vec![Line::from("No import result is available.")];
     };
@@ -662,7 +691,7 @@ fn render_import_details(app: &TerminalApp, single: bool) -> Vec<Line<'static>> 
         }),
         Line::from(""),
     ];
-    if let Some(plu) = summary.selected_plu {
+    if single && let Some(plu) = summary.selected_plu {
         lines.push(Line::from(format!("PLU: {plu}")));
         lines.push(Line::from(""));
     }
@@ -672,16 +701,37 @@ fn render_import_details(app: &TerminalApp, single: bool) -> Vec<Line<'static>> 
         Line::from(format!("Successful: {}", summary.succeeded)),
         Line::from(format!("Failed:     {}", summary.failed)),
         Line::from(format!("Unknown:    {}", summary.unknown)),
+        Line::from(format!("Not attempted: {}", summary.not_attempted)),
         Line::from(""),
         Line::from("Status:"),
         status_value_line(&summary.status),
     ]);
-    if summary.failed > 0 || summary.unknown > 0 {
+    if !summary.failures.is_empty() {
         lines.push(Line::from(""));
-        lines.push(heading_line("Issues:"));
-        lines.push(Line::from(
-            "See the import manifest for bounded per-PLU records.",
-        ));
+        lines.push(heading_line("Failed PLUs:"));
+        for failure in &summary.failures {
+            lines.extend([
+                Line::from(""),
+                Line::from(format!("PLU {}", failure.plu_number)),
+                Line::from(format!("Status: {}", failure.status)),
+                Line::from(format!("Stage: {}", failure.stage)),
+                Line::from("Reason:"),
+                Line::from(failure.reason.clone()),
+            ]);
+        }
+        if summary.failures.len() < summary.failed + summary.unknown {
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!(
+                "Showing {} of {} failed or unknown records.",
+                summary.failures.len(),
+                summary.failed + summary.unknown
+            )));
+        }
+    }
+    if summary.not_attempted > 0 && !summary.continue_on_error {
+        lines.push(Line::from(""));
+        lines.push(Line::from("Import stopped because:"));
+        lines.push(Line::from("Stop at first PLU error was enabled."));
     }
     lines
 }

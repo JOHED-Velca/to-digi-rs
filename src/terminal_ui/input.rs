@@ -199,7 +199,25 @@ impl TerminalApp {
                         test_mode: false,
                     });
                     self.last_live_import_was_single = self.live_selection.is_some();
-                    self.pending_operation = Some(UiOperation::Import(selection));
+                    self.pending_operation = Some(UiOperation::Import {
+                        selection,
+                        continue_on_error: if self.live_selection.is_some() {
+                            false
+                        } else {
+                            self.full_import_continue_on_error
+                        },
+                    });
+                }
+                _ => self.go_back(),
+            },
+            Screen::FullImportErrorHandling => match self.selected_index {
+                0 => {
+                    self.full_import_continue_on_error = true;
+                    self.push_screen(Screen::FullImportConfirm);
+                }
+                1 => {
+                    self.full_import_continue_on_error = false;
+                    self.push_screen(Screen::FullImportConfirm);
                 }
                 _ => self.go_back(),
             },
@@ -207,7 +225,8 @@ impl TerminalApp {
                 0 if self.last_live_import_was_single => {
                     self.live_selection = None;
                     self.last_live_import_was_single = false;
-                    self.push_screen(Screen::FullImportConfirm);
+                    self.full_import_continue_on_error = true;
+                    self.push_screen(Screen::FullImportErrorHandling);
                 }
                 0 => self.screen = Screen::Main,
                 1 => self.push_details(if self.last_live_import_was_single {
