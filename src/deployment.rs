@@ -288,10 +288,10 @@ fn install_asset(
     logger: &mut AuditLogger,
 ) -> Result<(), AppError> {
     let path = Path::new(asset.path);
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            ensure_directory(parent, 0o755)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        ensure_directory(parent, 0o755)?;
     }
     if path.exists() {
         if fs::symlink_metadata(path)
@@ -563,8 +563,7 @@ mod tests {
     #[test]
     fn init_creates_expected_files_and_preserves_customer_files() {
         let dir = tempdir().expect("tempdir");
-        let previous = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(dir.path()).expect("cd");
+        let _cwd = crate::test_support::CurrentDirGuard::enter(dir.path());
         fs::write("plu.mdb", b"customer").expect("plu");
 
         let mut logger = AuditLogger::create(Path::new("logs.txt")).expect("logger");
@@ -600,8 +599,6 @@ mod tests {
             "customer-config"
         );
         assert!(config.contains("CHANGE_ME"));
-
-        std::env::set_current_dir(previous).expect("restore");
     }
 
     #[test]

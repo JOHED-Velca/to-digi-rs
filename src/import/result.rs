@@ -50,6 +50,7 @@ pub struct ImportSummary {
     pub unknown: usize,
     pub intentionally_skipped_by_limit: usize,
     pub not_attempted_after_stop: usize,
+    pub needs_manual_check: Vec<u64>,
     pub records: Vec<RecordImportResult>,
 }
 
@@ -86,6 +87,7 @@ mod tests {
             unknown: 0,
             intentionally_skipped_by_limit: 0,
             not_attempted_after_stop: 0,
+            needs_manual_check: Vec::new(),
             records: Vec::new(),
         };
 
@@ -104,6 +106,7 @@ mod tests {
             unknown: 0,
             intentionally_skipped_by_limit: 0,
             not_attempted_after_stop: 0,
+            needs_manual_check: Vec::new(),
             records: Vec::new(),
         };
 
@@ -122,6 +125,7 @@ mod tests {
             unknown: 1,
             intentionally_skipped_by_limit: 0,
             not_attempted_after_stop: 0,
+            needs_manual_check: Vec::new(),
             records: Vec::new(),
         };
 
@@ -140,6 +144,7 @@ mod tests {
             unknown: 0,
             intentionally_skipped_by_limit: 0,
             not_attempted_after_stop: 0,
+            needs_manual_check: Vec::new(),
             records: Vec::new(),
         };
 
@@ -159,6 +164,7 @@ mod tests {
             unknown: 0,
             intentionally_skipped_by_limit: 3,
             not_attempted_after_stop: 0,
+            needs_manual_check: Vec::new(),
             records: Vec::new(),
         };
 
@@ -178,6 +184,7 @@ mod tests {
             unknown: 0,
             intentionally_skipped_by_limit: 0,
             not_attempted_after_stop: 0,
+            needs_manual_check: Vec::new(),
             records: Vec::new(),
         };
 
@@ -197,6 +204,7 @@ mod tests {
             unknown: 0,
             intentionally_skipped_by_limit: 0,
             not_attempted_after_stop: 3,
+            needs_manual_check: Vec::new(),
             records: Vec::new(),
         };
 
@@ -218,6 +226,7 @@ mod tests {
             unknown: 0,
             intentionally_skipped_by_limit: 0,
             not_attempted_after_stop: 0,
+            needs_manual_check: Vec::new(),
             records: Vec::new(),
         };
 

@@ -257,13 +257,13 @@ fn sanitize_profile_name(name: &str) -> Result<String, AppError> {
 
 fn human_review_items(fields: &[FieldDiscovery]) -> Vec<String> {
     let mut items = Vec::new();
-    if let Some(group) = fields.iter().find(|field| field.field == "Main Group Code") {
-        if group.human_decision_required > 0 {
-            items.push(format!(
+    if let Some(group) = fields.iter().find(|field| field.field == "Main Group Code")
+        && group.human_decision_required > 0
+    {
+        items.push(format!(
                 "Main Group Code has {} empty, invalid, or ambiguous values; no active profile rule was generated.",
                 group.human_decision_required
             ));
-        }
     }
     for field in fields {
         if field.human_decision_required > 0 && field.field != "Main Group Code" {
@@ -288,21 +288,11 @@ fn blank(out: &mut String) {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::{Mutex, OnceLock};
 
     use tempfile::tempdir;
 
     use super::*;
     use crate::source::SourceRow;
-
-    static CURRENT_DIR_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn cwd_lock() -> std::sync::MutexGuard<'static, ()> {
-        CURRENT_DIR_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("cwd lock")
-    }
 
     fn row(plu: &str, group: &str, best_before: &str) -> SourceRow {
         SourceRow {
@@ -352,10 +342,8 @@ mod tests {
 
     #[test]
     fn suggestion_refuses_to_overwrite_existing_draft() {
-        let _guard = cwd_lock();
         let dir = tempdir().expect("tempdir");
-        let original = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(dir.path()).expect("chdir");
+        let _cwd = crate::test_support::CurrentDirGuard::enter(dir.path());
         fs::create_dir("profiles").expect("profiles");
         fs::write("profiles/bigway.draft.toml", "existing").expect("write");
         let dataset = SourceDataset::default();
@@ -371,7 +359,6 @@ mod tests {
             timings: Vec::new(),
         });
 
-        std::env::set_current_dir(original).expect("restore");
         assert!(result.is_err());
     }
 }

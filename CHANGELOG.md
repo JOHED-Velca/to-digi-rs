@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.10.0 (unreleased)
+
+- Added a guided terminal UI that launches when `to-digi-rs` runs without a subcommand in an interactive terminal
+- The guided UI import now shares the CLI import setup, so it applies the same no-valid-PLU stop, validation warning log, startup config validation, and per-record failure log lines
+- Imports and resumes now end with a `NEEDS MANUAL CHECK IN DIGIWEB` list of PLUs that resume will not resend or re-poll, in `logs.txt`, the console, and the guided UI completion screen
+- A missing `mdb-tables` or `mdb-export` binary is now reported as an mdbtools error with the install hint
+- Removed the empty Advanced Tools menu from the guided UI
+- Redesigned the guided flow with bounded analysis details, explicit error recovery, malformed-configuration checks, a technical DIGI wordmark, and a complete About/workflow screen
+- CI now runs `cargo fmt --check`, `cargo clippy -D warnings`, and the tests on every push and pull request; packaging and publishing still run only for `v*` tags and manual dispatch
+- Added tests for a crash during an in-flight submission, a manifest lock held by another process, and manifest write failures
+
 ## v0.9.0
 
 - Added `to-digi-rs init` to generate a complete deployment directory from the Docker image

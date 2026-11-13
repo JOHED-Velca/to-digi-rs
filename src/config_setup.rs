@@ -53,15 +53,13 @@ pub fn apply_customer_config_update_to_text(
         updated = set_digiweb_string(&updated, "base_url", &new_base);
         fields_updated.push("digiweb.base_url");
 
-        if let Some(token_url) = digiweb_string(&parsed, "token_url")? {
-            if is_absolute_url(token_url) {
-                if should_update_absolute_endpoint(token_url, old_base_host.as_deref())? {
-                    let new_token_url =
-                        replace_absolute_url_host("digiweb.token_url", token_url, &host)?;
-                    updated = set_digiweb_string(&updated, "token_url", &new_token_url);
-                    fields_updated.push("digiweb.token_url");
-                }
-            }
+        if let Some(token_url) = digiweb_string(&parsed, "token_url")?
+            && is_absolute_url(token_url)
+            && should_update_absolute_endpoint(token_url, old_base_host.as_deref())?
+        {
+            let new_token_url = replace_absolute_url_host("digiweb.token_url", token_url, &host)?;
+            updated = set_digiweb_string(&updated, "token_url", &new_token_url);
+            fields_updated.push("digiweb.token_url");
         }
     }
     if let Some(secret) = client_secret {
@@ -169,9 +167,7 @@ fn placeholder_url_parts(value: &str) -> Option<PlaceholderUrlParts<'_>> {
     if !matches!(scheme, "http" | "https") {
         return None;
     }
-    let authority_end = rest
-        .find(|ch| matches!(ch, '/' | '?' | '#'))
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     if !is_placeholder(authority) {
         return None;

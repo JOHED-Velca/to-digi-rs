@@ -171,23 +171,25 @@ pub fn validate_plus(plus: &[Plu]) -> ValidationReport {
             plu.barcode_ref_no.as_deref(),
             &mut issues,
         );
-        if let Some(expiration_days) = plu.expiration_days {
-            if expiration_days > MAX_EXPIRATION_DAYS {
-                issues.push(ValidationIssue::error(
-                    Some(plu.plu_number),
-                    "expiration_days",
-                    format!("expiration days exceeds {MAX_EXPIRATION_DAYS}"),
-                ));
-            }
+        if let Some(expiration_days) = plu.expiration_days
+            && expiration_days > MAX_EXPIRATION_DAYS
+        {
+            issues.push(ValidationIssue::error(
+                Some(plu.plu_number),
+                "expiration_days",
+                format!("expiration days exceeds {MAX_EXPIRATION_DAYS}"),
+            ));
         }
-        if let Some(term) = plu.selling_date_term {
-            if term > MAX_SELLING_DATE_TERM {
-                issues.push(ValidationIssue::error(
-                    Some(plu.plu_number),
-                    "selling_date_term",
-                    format!("DIGIweb plusellingdateterm must be 0 or in range 1..{MAX_SELLING_DATE_TERM}"),
-                ));
-            }
+        if let Some(term) = plu.selling_date_term
+            && term > MAX_SELLING_DATE_TERM
+        {
+            issues.push(ValidationIssue::error(
+                Some(plu.plu_number),
+                "selling_date_term",
+                format!(
+                    "DIGIweb plusellingdateterm must be 0 or in range 1..{MAX_SELLING_DATE_TERM}"
+                ),
+            ));
         }
         if let Some(tare) = plu.tare {
             if tare < Decimal::ZERO {
@@ -204,32 +206,32 @@ pub fn validate_plus(plus: &[Plu]) -> ValidationReport {
                 ));
             }
         }
-        if let Some(short_description) = &plu.short_description {
-            if short_description.chars().count() > MAX_SHORT_DESCRIPTION_LEN {
-                issues.push(ValidationIssue::warning(
-                    Some(plu.plu_number),
-                    "short_description",
-                    format!("short description exceeds {MAX_SHORT_DESCRIPTION_LEN} characters"),
-                ));
-            }
+        if let Some(short_description) = &plu.short_description
+            && short_description.chars().count() > MAX_SHORT_DESCRIPTION_LEN
+        {
+            issues.push(ValidationIssue::warning(
+                Some(plu.plu_number),
+                "short_description",
+                format!("short description exceeds {MAX_SHORT_DESCRIPTION_LEN} characters"),
+            ));
         }
-        if let Some(key_label) = &plu.key_label {
-            if key_label.chars().count() > MAX_KEY_LABEL_LEN {
-                issues.push(ValidationIssue::warning(
-                    Some(plu.plu_number),
-                    "key_label",
-                    format!("key label exceeds {MAX_KEY_LABEL_LEN} characters"),
-                ));
-            }
+        if let Some(key_label) = &plu.key_label
+            && key_label.chars().count() > MAX_KEY_LABEL_LEN
+        {
+            issues.push(ValidationIssue::warning(
+                Some(plu.plu_number),
+                "key_label",
+                format!("key label exceeds {MAX_KEY_LABEL_LEN} characters"),
+            ));
         }
-        if let Some(ingredients) = &plu.ingredients {
-            if ingredients.chars().count() > MAX_INGREDIENTS_LEN {
-                issues.push(ValidationIssue::error(
-                    Some(plu.plu_number),
-                    "ingredients",
-                    format!("DIGIweb pluingredients exceeds {MAX_INGREDIENTS_LEN} characters"),
-                ));
-            }
+        if let Some(ingredients) = &plu.ingredients
+            && ingredients.chars().count() > MAX_INGREDIENTS_LEN
+        {
+            issues.push(ValidationIssue::error(
+                Some(plu.plu_number),
+                "ingredients",
+                format!("DIGIweb pluingredients exceeds {MAX_INGREDIENTS_LEN} characters"),
+            ));
         }
         for fact in &plu.nutrition_facts {
             if fact.name.trim().is_empty() {

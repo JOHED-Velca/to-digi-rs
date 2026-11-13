@@ -98,10 +98,10 @@ pub fn atomic_write_manifest(path: &Path, manifest: &ImportManifest) -> Result<(
         ))
     })?;
     set_restrictive_permissions(path)?;
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = File::open(parent)
+    {
+        let _ = dir.sync_all();
     }
     Ok(())
 }
@@ -236,5 +236,53 @@ mod tests {
 
         assert!(err.to_string().contains("invalid"));
         assert_eq!(fs::read_to_string(&path).expect("read"), "{not-json");
+    }
+
+    #[test]
+    fn stale_temp_manifest_from_a_crash_does_not_block_the_next_write() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("import-results.json");
+        fs::write(temp_path_for(&path), "{half-written").expect("stale temp");
+
+        atomic_write_manifest(&path, &manifest()).expect("write over stale temp");
+
+        assert_eq!(load_manifest(&path).expect("load").records.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_write_keeps_previous_manifest_and_backup_valid() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("import-results.json");
+        let mut manifest = manifest();
+        atomic_write_manifest(&path, &manifest).expect("first write");
+        manifest.records[0].status = crate::recovery::model::RecordStatus::Success;
+        manifest.recalculate_summary();
+        atomic_write_manifest(&path, &manifest).expect("second write");
+
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o500)).expect("chmod");
+        // shortcut: root ignores directory permissions, so the failure cannot be provoked there.
+        let writable = fs::write(temp.path().join("probe"), "").is_ok();
+        manifest.records[0].status = crate::recovery::model::RecordStatus::Failed;
+        manifest.recalculate_summary();
+        let result = atomic_write_manifest(&path, &manifest);
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).expect("restore");
+        if writable {
+            return;
+        }
+
+        assert!(result.is_err());
+        assert_eq!(
+            load_manifest(&path)
+                .expect("previous manifest")
+                .summary
+                .success,
+            1
+        );
+        let backup = fs::read_to_string(backup_path_for(&path)).expect("backup");
+        let backup = serde_json::from_str::<ImportManifest>(&backup).expect("backup parses");
+        assert_eq!(backup.summary.success, 0);
     }
 }

@@ -91,8 +91,7 @@ impl TerminalApp {
                 2 => self.push_screen_with_operation(Screen::Diagnostics, UiOperation::Diagnose),
                 3 => self.push_screen(Screen::DigiwebConfig),
                 4 => self.push_screen_with_operation(Screen::ReadinessReady, UiOperation::Verify),
-                5 => self.push_screen(Screen::Advanced),
-                6 => self.push_screen(Screen::Version),
+                5 => self.push_screen(Screen::Version),
                 _ => self.should_quit = true,
             },
             Screen::DeploymentCheck => match self.selected_index {
@@ -118,12 +117,12 @@ impl TerminalApp {
                 0 => self.selected_profile = None,
                 1 => self.selected_profile = Some("bigway".to_string()),
                 2 => self.selected_profile = Some("starsky".to_string()),
-                4 => self.push_screen_with_operation(Screen::Analysis, UiOperation::Analyze),
+                3 => self.push_screen_with_operation(Screen::Analysis, UiOperation::Analyze),
                 _ => {}
             },
             Screen::Analysis => match self.selected_index {
                 0 => self.push_screen_with_operation(Screen::Diagnostics, UiOperation::Diagnose),
-                1 => self.push_details(DetailsContext::Diagnostics),
+                1 => self.push_details(DetailsContext::Analysis),
                 _ => self.go_back(),
             },
             Screen::Diagnostics => match self.selected_index {
@@ -133,7 +132,7 @@ impl TerminalApp {
             },
             Screen::References => match self.selected_index {
                 1 => self.pending_operation = Some(UiOperation::ConfirmReferences),
-                2 => self.go_back(),
+                0 | 2 => self.go_back(),
                 _ => {}
             },
             Screen::ReadinessReady => match self.selected_index {
@@ -193,6 +192,15 @@ impl TerminalApp {
             },
             Screen::FullImportConfirm => match self.selected_index {
                 1 => {
+                    if self.live_selection.is_none() && !self.single_import_success_eligible {
+                        self.error_operation = Some("Full import".to_string());
+                        self.error_message = Some(
+                            "A successful single-PLU live test is required before full import."
+                                .to_string(),
+                        );
+                        self.push_screen(Screen::Error);
+                        return;
+                    }
                     let selection = self.live_selection.unwrap_or(SelectionCriteria {
                         limit: None,
                         requested_plu: None,
@@ -222,7 +230,7 @@ impl TerminalApp {
                 _ => self.go_back(),
             },
             Screen::Completion => match self.selected_index {
-                0 if self.last_live_import_was_single => {
+                0 if self.last_live_import_was_single && self.single_import_success_eligible => {
                     self.live_selection = None;
                     self.last_live_import_was_single = false;
                     self.full_import_continue_on_error = true;
@@ -236,11 +244,15 @@ impl TerminalApp {
                 }),
                 _ => self.should_quit = true,
             },
-            Screen::Advanced => match self.selected_index {
-                0 => self.push_screen(Screen::Version),
-                _ => self.go_back(),
+            Screen::Error => match self.selected_index {
+                0 => self.go_back(),
+                _ => {
+                    self.history.clear();
+                    self.screen = Screen::Main;
+                    self.selected_index = 0;
+                }
             },
-            Screen::Version | Screen::Details | Screen::Resume => self.go_back(),
+            Screen::Version | Screen::Details => self.go_back(),
             Screen::FullImportProgress => {}
         }
     }

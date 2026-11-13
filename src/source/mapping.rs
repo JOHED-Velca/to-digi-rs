@@ -756,7 +756,7 @@ fn byte_len_for_chars(value: &str, chars: usize) -> usize {
 fn nutrition_from_pluing(row: &SourceRow) -> Result<Vec<NutritionFact>, AppError> {
     let mut facts = Vec::new();
     for (name, amount_column, data2_column) in PLUING_NUTRITION_COLUMNS {
-        let Some(amount) = row.get(*amount_column).and_then(normalize_nutrition_value) else {
+        let Some(amount) = row.get(amount_column).and_then(normalize_nutrition_value) else {
             continue;
         };
         facts.push(NutritionFact {
@@ -853,10 +853,10 @@ fn normalize_nutrition_value(value: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    if !trimmed.contains('.') {
-        if let Ok(number) = trimmed.parse::<i64>() {
-            return Some(number.to_string());
-        }
+    if !trimmed.contains('.')
+        && let Ok(number) = trimmed.parse::<i64>()
+    {
+        return Some(number.to_string());
     }
     Some(trimmed.to_string())
 }
@@ -1281,8 +1281,10 @@ mod tests {
 
     #[test]
     fn missing_name_1_column_is_schema_failure() {
-        let mut schema = MdbSchema::default();
-        schema.tables = vec!["Pludata".to_string()];
+        let mut schema = MdbSchema {
+            tables: vec!["Pludata".to_string()],
+            ..Default::default()
+        };
         schema.set_columns(
             "Pludata",
             vec![
@@ -1300,8 +1302,10 @@ mod tests {
 
     #[test]
     fn missing_main_group_code_column_is_schema_failure() {
-        let mut schema = MdbSchema::default();
-        schema.tables = vec!["Pludata".to_string()];
+        let mut schema = MdbSchema {
+            tables: vec!["Pludata".to_string()],
+            ..Default::default()
+        };
         schema.set_columns(
             "Pludata",
             vec![

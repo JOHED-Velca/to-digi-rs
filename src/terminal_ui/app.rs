@@ -6,8 +6,7 @@ use crate::selection::SelectionCriteria;
 
 use super::model::{
     AnalysisSummary, DeploymentSummary, DetailsContext, DiagnosticsSummaryView, DryRunSummaryView,
-    ImportSummaryView, InputMode, ReadinessSummaryView, Screen, TerminalUiOptions, UiAction,
-    UiOperation,
+    ImportSummaryView, InputMode, ReadinessSummaryView, Screen, TerminalUiOptions, UiOperation,
 };
 pub struct TerminalApp {
     pub screen: Screen,
@@ -15,7 +14,6 @@ pub struct TerminalApp {
     pub(super) history: Vec<Screen>,
     pub selected_profile: Option<String>,
     pub should_quit: bool,
-    pub pending_action: Option<UiAction>,
     pub pending_operation: Option<UiOperation>,
     pub deployment: Option<DeploymentSummary>,
     pub analysis: Option<AnalysisSummary>,
@@ -31,8 +29,11 @@ pub struct TerminalApp {
     pub input_error: Option<String>,
     pub status_message: Option<String>,
     pub busy_message: Option<String>,
+    pub error_operation: Option<String>,
+    pub error_message: Option<String>,
     pub live_selection: Option<SelectionCriteria>,
     pub last_live_import_was_single: bool,
+    pub single_import_success_eligible: bool,
     pub full_import_continue_on_error: bool,
 }
 impl TerminalApp {
@@ -45,7 +46,6 @@ impl TerminalApp {
                 .default_profile
                 .filter(|value| !value.trim().is_empty()),
             should_quit: false,
-            pending_action: None,
             pending_operation: None,
             deployment: None,
             analysis: None,
@@ -61,8 +61,11 @@ impl TerminalApp {
             input_error: None,
             status_message: None,
             busy_message: None,
+            error_operation: None,
+            error_message: None,
             live_selection: None,
             last_live_import_was_single: false,
+            single_import_success_eligible: false,
             full_import_continue_on_error: true,
         }
     }
@@ -87,7 +90,6 @@ impl TerminalApp {
                 "Diagnostics",
                 "DIGIweb Configuration",
                 "Readiness / Verification",
-                "Advanced Tools",
                 "Version / About",
                 "Exit",
             ],
@@ -110,14 +112,7 @@ impl TerminalApp {
                     "Back",
                 ]
             }
-            Screen::Profile => vec![
-                "Generic",
-                "Bigway",
-                "Starsky",
-                "Custom...",
-                "Continue",
-                "Back",
-            ],
+            Screen::Profile => vec!["Generic", "Bigway", "Starsky", "Continue", "Back"],
             Screen::Analysis => vec!["Continue", "View Issues", "Back"],
             Screen::Diagnostics => vec!["Continue", "View Details", "Back"],
             Screen::References => vec!["No", "Yes, record confirmation", "Back"],
@@ -154,16 +149,15 @@ impl TerminalApp {
                     vec!["Cancel", "Start Import"]
                 }
             }
-            Screen::FullImportProgress => vec!["View Details"],
+            Screen::FullImportProgress => Vec::new(),
             Screen::Completion => {
-                if self.last_live_import_was_single {
+                if self.last_live_import_was_single && self.single_import_success_eligible {
                     vec!["Continue", "View Details", "Back"]
                 } else {
                     vec!["Main Menu", "View Details", "Exit"]
                 }
             }
-            Screen::Advanced => vec!["Version", "Back"],
-            Screen::Resume => vec!["Back"],
+            Screen::Error => vec!["Back", "Main Menu"],
             Screen::Version => vec!["Back"],
             Screen::Details => vec!["Back"],
         }
@@ -179,7 +173,6 @@ impl fmt::Debug for TerminalApp {
             .field("history", &self.history)
             .field("selected_profile", &self.selected_profile)
             .field("should_quit", &self.should_quit)
-            .field("pending_action", &self.pending_action)
             .field("pending_operation", &self.pending_operation)
             .field("deployment", &self.deployment)
             .field("analysis", &self.analysis)

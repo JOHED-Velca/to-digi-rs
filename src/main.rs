@@ -18,6 +18,8 @@ mod sanitization;
 mod selection;
 mod source;
 mod terminal_ui;
+#[cfg(test)]
+mod test_support;
 mod validation;
 
 use std::fs;
@@ -55,7 +57,7 @@ use digiweb::preflight::{
 };
 use discovery::{DiscoveryInput, PhaseTiming, render_discovery_console, write_discovery_reports};
 use error::AppError;
-use import::runner::{ImportRunOptions, run_import};
+use import::runner::{ImportRunOptions, run_import_with_stdout};
 use logging::{AuditLogger, FinalImportLog};
 use mapping_audit::{MappingAuditInput, render_mapping_console, write_mapping_reports};
 use models::plu::Plu;
@@ -109,11 +111,7 @@ async fn main() {
             )
             .await
             {
-                Ok(terminal_ui::TerminalExit::Quit) => std::process::exit(0),
-                Ok(terminal_ui::TerminalExit::Command(cli)) => {
-                    let exit_code = run(&cli, &mut logger).await;
-                    std::process::exit(exit_code);
-                }
+                Ok(()) => std::process::exit(0),
                 Err(err) => {
                     let _ = logger.error(err.to_string());
                     eprintln!("failed to run interactive menu: {err}");
@@ -1827,13 +1825,50 @@ async fn run_import_command(
 ) -> Result<i32, AppError> {
     println!("Starting import...");
     println!("Outputs will be written under output/ when launched with ./to-digi.");
-    let profile = profile_for_import_or_resume(resume_manifest, sanitize_profile_path)?;
-    let source = read_source_context(config, logger, profile, true)?;
     let selection = SelectionCriteria {
         limit,
         requested_plu,
         test_mode,
     };
+    let Some(run) = prepare_and_run_import(
+        config,
+        selection,
+        continue_on_error,
+        resume_manifest,
+        retry_failed,
+        sanitize_profile_path,
+        logger,
+        true,
+        None,
+    )
+    .await?
+    else {
+        return Ok(2);
+    };
+    let final_status = run.summary.final_status();
+    println!("Final status: {}", final_status.as_str());
+    Ok(final_status.exit_code())
+}
+
+struct ImportRun {
+    source: SourceContext,
+    summary: import::result::ImportSummary,
+}
+
+/// Shared by the CLI and the TUI. Returns `None` when no valid PLUs remain (already logged).
+async fn prepare_and_run_import(
+    config: &AppConfig,
+    selection: SelectionCriteria,
+    continue_on_error: bool,
+    resume_manifest: Option<&Path>,
+    retry_failed: bool,
+    sanitize_profile_path: Option<&ProfileSelection>,
+    logger: &mut AuditLogger,
+    stdout_enabled: bool,
+    progress_observer: Option<&mut dyn FnMut(import::runner::ImportProgressSnapshot)>,
+) -> Result<Option<ImportRun>, AppError> {
+    let profile = profile_for_import_or_resume(resume_manifest, sanitize_profile_path)?;
+    let source = read_source_context(config, logger, profile, true)?;
     if resume_manifest.is_none() {
         select_eligible_plus(
             &source.plus,
@@ -1850,7 +1885,7 @@ async fn run_import_command(
     }
     if source.valid_plus.is_empty() {
         logger.final_failure("validation", "no valid PLUs are available to send", true)?;
-        return Ok(2);
+        return Ok(None);
     }
     if source
         .validation_report
@@ -1867,7 +1902,7 @@ async fn run_import_command(
         logger.kv("Import manifest", &manifest_path.display().to_string())?;
     }
 
-    let summary = run_import(
+    let summary = run_import_with_stdout(
         config.clone(),
         &source.valid_plus,
         source.source_identity.clone(),
@@ -1876,13 +1911,15 @@ async fn run_import_command(
         resume_manifest,
         source.sanitization.clone(),
         ImportRunOptions {
-            limit,
-            requested_plu,
+            limit: selection.limit,
+            requested_plu: selection.requested_plu,
             continue_after_record_failure: continue_on_error,
-            test_mode,
+            test_mode: selection.test_mode,
             retry_failed,
         },
         logger,
+        stdout_enabled,
+        progress_observer,
     )
     .await?;
     for record in &summary.records {
@@ -1960,8 +1997,7 @@ async fn run_import_command(
         unknown_plu_numbers: &unknown_plu_numbers,
         dry_run: false,
     })?;
-    println!("Final status: {}", final_status.as_str());
-    Ok(final_status.exit_code())
+    Ok(Some(ImportRun { source, summary }))
 }
 
 async fn run_test_connection(

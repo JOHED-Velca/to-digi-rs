@@ -3,19 +3,19 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use std::time::Duration;
 
-use super::actions::concise_import_failure;
+use super::actions::{check_deployment_at, concise_import_failure};
 use super::app::TerminalApp;
 use super::model::{
     AnalysisSummary, CANONICAL_MDB_DISPLAY_PATH, DeploymentSummary, DetailsContext,
     DiagnosticsSummaryView, DryRunSummaryView, ImportFailureView, ImportSummaryView, InputMode,
-    ReadinessSummaryView, Screen, TerminalUiOptions, UiAction, UiOperation,
+    ReadinessSummaryView, Screen, TerminalUiOptions, UiOperation,
 };
+use super::operations::{operation_status, single_import_success_eligible};
 use super::render::{
     compact_references, render_app, render_full_import_progress_body, render_import_details,
     status_line,
 };
 use super::should_launch_interactive;
-use crate::cli::CliCommand;
 use crate::digiweb::preflight::{AuthenticationReadinessStatus, ReadinessResult};
 use crate::import::runner::ImportProgressSnapshot;
 use crate::selection::SelectionCriteria;
@@ -72,7 +72,7 @@ fn enter_selects_and_escape_returns_and_main_menu_ignores_quit_keys() {
     assert!(!app.should_quit);
     app.handle_key(key(KeyCode::Esc));
     assert!(!app.should_quit);
-    app.selected_index = 7;
+    app.selected_index = 6;
     app.handle_key(key(KeyCode::Enter));
     assert!(app.should_quit);
 }
@@ -85,7 +85,6 @@ fn destructive_full_import_confirmation_defaults_to_cancel() {
     app.screen = Screen::FullImportConfirm;
     assert_eq!(app.visible_items()[app.selected_index], "Cancel");
     app.handle_key(key(KeyCode::Enter));
-    assert!(app.pending_action.is_none());
     assert_eq!(app.screen, Screen::Main);
 }
 
@@ -97,37 +96,6 @@ fn reference_confirmation_defaults_to_no() {
     app.screen = Screen::References;
     assert_eq!(app.visible_items()[app.selected_index], "No");
     app.handle_key(key(KeyCode::Enter));
-    assert!(app.pending_action.is_none());
-}
-
-#[test]
-fn ui_actions_reuse_existing_cli_selection_semantics() {
-    let cli = UiAction::DryRunFirst {
-        profile: Some("bigway".to_string()),
-    }
-    .into_cli();
-    match cli.command {
-        Some(CliCommand::DryRun(args)) => {
-            assert!(args.test);
-            assert_eq!(args.plu, None);
-            assert_eq!(args.profile.as_deref(), Some("bigway"));
-        }
-        other => panic!("unexpected command: {other:?}"),
-    }
-
-    let cli = UiAction::ImportSpecific {
-        profile: Some("starsky".to_string()),
-        plu: 7575,
-    }
-    .into_cli();
-    match cli.command {
-        Some(CliCommand::Import(args)) => {
-            assert_eq!(args.plu, Some(7575));
-            assert!(!args.test);
-            assert_eq!(args.profile.as_deref(), Some("starsky"));
-        }
-        other => panic!("unexpected command: {other:?}"),
-    }
 }
 
 #[test]
@@ -162,13 +130,15 @@ fn render_main_screen_contains_full_logo_and_selection() {
     let app = TerminalApp::new(TerminalUiOptions {
         default_profile: None,
     });
-    let rendered = render_to_string(&app, 100, 30);
-    assert!(rendered.contains("DIGI"));
-    assert!(rendered.contains("████"));
-    assert!(!rendered.contains("============"));
-    assert!(rendered.contains("> Guided Import"));
-    assert!(rendered.contains("DIGIweb Import Tool"));
-    assert!(!rendered.contains("q quit"));
+    for (width, height) in [(80, 24), (100, 30)] {
+        let rendered = render_to_string(&app, width, height);
+        assert!(rendered.contains("DIGI"));
+        assert!(rendered.contains("████"));
+        assert!(!rendered.contains("============"));
+        assert!(rendered.contains("> Guided Import"));
+        assert!(rendered.contains("DIGIweb PLU Importer"));
+        assert!(!rendered.contains("q quit"));
+    }
 }
 
 #[test]
@@ -294,6 +264,9 @@ fn analysis_summary_render_uses_actual_counts_and_references() {
         label_formats: vec![6, 1],
         warning_count: 2,
         blocking_count: 0,
+        warning_messages: Vec::new(),
+        blocking_messages: Vec::new(),
+        artifact_paths: Vec::new(),
         first_valid_plu: Some(7575),
     });
 
@@ -323,6 +296,9 @@ fn reference_layout_uses_separate_lines_at_common_terminal_widths() {
             label_formats: vec![21, 1, 6],
             warning_count: 0,
             blocking_count: 0,
+            warning_messages: Vec::new(),
+            blocking_messages: Vec::new(),
+            artifact_paths: Vec::new(),
             first_valid_plu: Some(1),
         });
 
@@ -521,6 +497,7 @@ fn single_live_completion_continue_moves_to_full_import_confirmation() {
         test_mode: true,
     });
     app.last_live_import_was_single = true;
+    app.single_import_success_eligible = true;
     app.import_result = Some(ImportSummaryView {
         selected: 1,
         submitted: 1,
@@ -531,7 +508,10 @@ fn single_live_completion_continue_moves_to_full_import_confirmation() {
         selected_plu: Some(7575),
         continue_on_error: false,
         failures: Vec::new(),
+        needs_manual_check: Vec::new(),
         status: "SUCCESS".to_string(),
+        artifact_paths: Vec::new(),
+        single_success_eligible: true,
     });
 
     assert_eq!(
@@ -556,6 +536,179 @@ fn single_live_completion_continue_moves_to_full_import_confirmation() {
 }
 
 #[test]
+fn single_import_gate_accepts_first_or_specific_plu_only_after_exact_success() {
+    let first = SelectionCriteria {
+        limit: Some(1),
+        requested_plu: None,
+        test_mode: true,
+    };
+    let specific = SelectionCriteria {
+        limit: None,
+        requested_plu: Some(7575),
+        test_mode: false,
+    };
+    let full = SelectionCriteria {
+        limit: None,
+        requested_plu: None,
+        test_mode: false,
+    };
+
+    assert!(single_import_success_eligible(first, 1, 1, 0, 0, 0));
+    assert!(single_import_success_eligible(specific, 1, 1, 0, 0, 0));
+    assert!(!single_import_success_eligible(specific, 1, 0, 1, 0, 0));
+    assert!(!single_import_success_eligible(specific, 1, 0, 0, 1, 0));
+    assert!(!single_import_success_eligible(specific, 1, 0, 0, 0, 1));
+    assert!(!single_import_success_eligible(full, 1, 1, 0, 0, 0));
+}
+
+#[test]
+fn failed_unknown_or_unattempted_single_result_never_offers_continue() {
+    for (failed, unknown, not_attempted) in [(1, 0, 0), (0, 1, 0), (0, 0, 1)] {
+        let mut app = TerminalApp::new(TerminalUiOptions {
+            default_profile: None,
+        });
+        app.screen = Screen::Completion;
+        app.last_live_import_was_single = true;
+        app.single_import_success_eligible = false;
+        app.import_result = Some(ImportSummaryView {
+            selected: 1,
+            submitted: usize::from(not_attempted == 0),
+            succeeded: 0,
+            failed,
+            unknown,
+            not_attempted,
+            selected_plu: Some(7575),
+            status: "REVIEW".to_string(),
+            ..ImportSummaryView::default()
+        });
+
+        assert_eq!(
+            app.visible_items(),
+            vec!["Main Menu", "View Details", "Exit"]
+        );
+    }
+}
+
+#[test]
+fn operation_status_preserves_primary_and_logging_failures() {
+    assert_eq!(
+        operation_status(
+            Some("Import failed".to_string()),
+            Some("disk full".to_string())
+        ),
+        "Import failed (logging also failed: disk full)"
+    );
+    assert_eq!(
+        operation_status(None, Some("disk full".to_string())),
+        "Logging error: disk full"
+    );
+}
+
+#[test]
+fn analysis_details_show_bounded_messages_and_resolved_report_paths() {
+    let mut app = TerminalApp::new(TerminalUiOptions {
+        default_profile: None,
+    });
+    app.screen = Screen::Details;
+    app.details_context = DetailsContext::Analysis;
+    app.analysis = Some(AnalysisSummary {
+        warning_count: 1,
+        blocking_count: 1,
+        warning_messages: vec!["Nutrition row needs review".to_string()],
+        blocking_messages: vec!["Required PLU table is missing".to_string()],
+        artifact_paths: vec!["/work/analysis-report.txt".to_string()],
+        ..AnalysisSummary::default()
+    });
+
+    let rendered = render_to_string(&app, 100, 30);
+    assert!(rendered.contains("WARNING: Nutrition row needs review"));
+    assert!(rendered.contains("BLOCKING: Required PLU table is missing"));
+    assert!(rendered.contains("/work/analysis-report.txt"));
+}
+
+#[test]
+fn completion_shows_only_the_current_resolved_artifact_paths() {
+    let mut app = TerminalApp::new(TerminalUiOptions {
+        default_profile: None,
+    });
+    app.screen = Screen::Completion;
+    app.import_result = Some(ImportSummaryView {
+        selected: 1,
+        submitted: 1,
+        succeeded: 1,
+        status: "SUCCESS".to_string(),
+        artifact_paths: vec![
+            "/work/logs.txt".to_string(),
+            "/work/output/run-123/import-results.json".to_string(),
+        ],
+        ..ImportSummaryView::default()
+    });
+
+    let rendered = render_to_string(&app, 100, 30);
+    assert!(rendered.contains("/work/logs.txt"));
+    assert!(rendered.contains("/work/output/run-123/import-results.json"));
+    assert!(!rendered.contains("import-manifest.json"));
+}
+
+#[test]
+fn about_screen_at_recommended_size_has_workflow_safety_and_real_target_state() {
+    let mut app = TerminalApp::new(TerminalUiOptions {
+        default_profile: None,
+    });
+    app.screen = Screen::Version;
+    let rendered = render_to_string(&app, 80, 24);
+
+    assert!(rendered.contains("Guided Import"));
+    assert!(rendered.contains("Review Results"));
+    assert!(rendered.contains("Safety: ambiguous submissions"));
+    assert!(rendered.contains("retried"));
+    assert!(rendered.contains("Target:"));
+    assert!(!rendered.contains("Target: configured DIGIweb host"));
+}
+
+#[test]
+fn deployment_check_distinguishes_missing_malformed_and_valid_config() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("plu.mdb"), b"test").expect("source");
+    std::fs::create_dir(dir.path().join("profiles")).expect("profiles");
+
+    let missing = check_deployment_at(dir.path());
+    assert!(!missing.config_ready);
+    assert!(missing.config_error.is_none());
+
+    std::fs::write(dir.path().join("config.toml"), "[digiweb\ninvalid").expect("malformed config");
+    let malformed = check_deployment_at(dir.path());
+    assert!(!malformed.config_ready);
+    assert!(malformed.config_error.is_some());
+
+    std::fs::write(
+        dir.path().join("config.toml"),
+        include_str!("../../deploy/config.example.toml"),
+    )
+    .expect("valid config");
+    let valid = check_deployment_at(dir.path());
+    assert!(valid.config_ready);
+    assert!(valid.config_error.is_none());
+}
+
+#[test]
+fn error_screen_can_return_to_previous_screen_or_main_menu() {
+    let mut app = TerminalApp::new(TerminalUiOptions {
+        default_profile: None,
+    });
+    app.push_screen(Screen::Analysis);
+    app.push_screen(Screen::Error);
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.screen, Screen::Analysis);
+
+    app.push_screen(Screen::Error);
+    app.selected_index = 1;
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.screen, Screen::Main);
+    assert!(app.history.is_empty());
+}
+
+#[test]
 fn deployment_missing_mdb_has_concise_message() {
     let mut app = TerminalApp::new(TerminalUiOptions {
         default_profile: None,
@@ -565,6 +718,7 @@ fn deployment_missing_mdb_has_concise_message() {
         mdb_found: false,
         config_ready: true,
         profiles_ready: true,
+        config_error: None,
     });
     let rendered = render_to_string(&app, 100, 30);
 
@@ -589,7 +743,10 @@ fn completion_summary_separates_failed_and_unknown() {
         selected_plu: Some(40169),
         continue_on_error: true,
         failures: Vec::new(),
+        needs_manual_check: Vec::new(),
         status: "COMPLETED_WITH_ERRORS".to_string(),
+        artifact_paths: Vec::new(),
+        single_success_eligible: false,
     });
     let rendered = render_to_string(&app, 100, 30);
 
@@ -680,7 +837,10 @@ fn diagnostic_dry_run_and_import_details_are_structured() {
             stage: "DIGIweb processing".to_string(),
             reason: "Barcode 0004351 has length 7; barcode type 20 requires length 8.".to_string(),
         }],
+        needs_manual_check: vec![9001],
         status: "COMPLETED_WITH_ERRORS".to_string(),
+        artifact_paths: Vec::new(),
+        single_success_eligible: false,
     });
     let import = render_import_details(&app, false)
         .into_iter()
@@ -694,6 +854,11 @@ fn diagnostic_dry_run_and_import_details_are_structured() {
     assert!(import.contains("barcode type 20 requires length 8"));
     assert!(import.contains("Stop at first PLU error was enabled"));
     assert!(!import.contains("PLU: 40169"));
+
+    app.screen = Screen::Completion;
+    let completion = render_to_string(&app, 100, 30);
+    assert!(completion.contains("Check in DIGIweb (not resent on resume)"));
+    assert!(completion.contains("PLU 9001"));
 }
 
 #[test]
@@ -702,6 +867,7 @@ fn full_import_error_handling_defaults_to_continue_and_sets_runner_option() {
         default_profile: Some("starsky".to_string()),
     });
     app.screen = Screen::FullImportErrorHandling;
+    app.single_import_success_eligible = true;
 
     assert_eq!(
         app.visible_items()[app.selected_index],
@@ -731,6 +897,7 @@ fn full_import_error_handling_can_stop_at_first_error() {
         default_profile: Some("starsky".to_string()),
     });
     app.screen = Screen::FullImportErrorHandling;
+    app.single_import_success_eligible = true;
     app.selected_index = 1;
     app.handle_key(key(KeyCode::Enter));
     assert!(!app.full_import_continue_on_error);
@@ -802,5 +969,7 @@ fn semantic_status_styles_remain_textual() {
     assert!(ok.to_string().contains("OK"));
     assert!(warn.to_string().contains("WARN"));
     assert!(missing.to_string().contains("WARN"));
-    assert!(ok.spans[0].style.fg.is_some());
+    if std::env::var_os("NO_COLOR").is_none() {
+        assert!(ok.spans[0].style.fg.is_some());
+    }
 }

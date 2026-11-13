@@ -159,10 +159,9 @@ pub fn apply_profile(
             .selling_date_term
             .as_ref()
             .filter(|rule| rule.enabled)
+            && let Some(change) = apply_selling_date_term_rule(row, rule, &mut report)?
         {
-            if let Some(change) = apply_selling_date_term_rule(row, rule, &mut report)? {
-                changes.push(change);
-            }
+            changes.push(change);
         }
         if !changes.is_empty() {
             changed_numbers.insert(plu_number);

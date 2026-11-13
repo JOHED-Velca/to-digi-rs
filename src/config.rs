@@ -16,6 +16,7 @@ const DEFAULT_REQUEST_STATUS_PATH_TEMPLATE: &str =
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct AppConfig {
     pub digiweb: DigiwebConfig,
     pub timeouts: TimeoutConfig,
@@ -105,6 +106,7 @@ pub struct MappingConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct ProfileConfig {
     pub default: String,
 }
@@ -115,19 +117,6 @@ pub struct VerificationConfig {
     pub confirmed_departments: Vec<u32>,
     pub confirmed_groups: Vec<String>,
     pub confirmed_label_formats: Vec<u32>,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            digiweb: DigiwebConfig::default(),
-            timeouts: TimeoutConfig::default(),
-            import: ImportConfig::default(),
-            mapping: MappingConfig::default(),
-            profiles: ProfileConfig::default(),
-            verification: VerificationConfig::default(),
-        }
-    }
 }
 
 impl Default for DigiwebConfig {
@@ -177,14 +166,6 @@ impl Default for MappingConfig {
             main_plu_table: "Pludata".to_string(),
             ingredient_table: "PluIng".to_string(),
             nutrition_table: String::new(),
-        }
-    }
-}
-
-impl Default for ProfileConfig {
-    fn default() -> Self {
-        Self {
-            default: String::new(),
         }
     }
 }

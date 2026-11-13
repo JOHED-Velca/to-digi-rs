@@ -7,7 +7,9 @@ use crate::validation::validator::ValidationReport;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SelectionMode {
+    #[default]
     All,
     Limit,
     Test,
@@ -22,12 +24,6 @@ impl SelectionMode {
             Self::Test => "test",
             Self::Plu => "plu",
         }
-    }
-}
-
-impl Default for SelectionMode {
-    fn default() -> Self {
-        Self::All
     }
 }
 

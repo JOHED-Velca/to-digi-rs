@@ -85,32 +85,19 @@ pub struct SourceDataset {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
 
     use tempfile::tempdir;
 
     use super::*;
 
-    static CURRENT_DIR_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn cwd_lock() -> std::sync::MutexGuard<'static, ()> {
-        CURRENT_DIR_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("cwd lock")
-    }
-
     #[test]
     fn accepts_exact_plu_path() {
-        let _guard = cwd_lock();
         let dir = tempdir().expect("tempdir");
-        let original = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(dir.path()).expect("chdir");
+        let _cwd = crate::test_support::CurrentDirGuard::enter(dir.path());
         fs::write(FIXED_SOURCE_FILE, b"not a real mdb").expect("write");
 
         let result = VerifiedSourceFile::verify(Path::new(FIXED_SOURCE_FILE));
 
-        std::env::set_current_dir(original).expect("restore");
         assert!(result.is_ok());
     }
 
@@ -125,16 +112,13 @@ mod tests {
     fn rejects_symbolic_link() {
         use std::os::unix::fs::symlink;
 
-        let _guard = cwd_lock();
         let dir = tempdir().expect("tempdir");
-        let original = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(dir.path()).expect("chdir");
+        let _cwd = crate::test_support::CurrentDirGuard::enter(dir.path());
         fs::write("actual.mdb", b"not a real mdb").expect("write");
         symlink("actual.mdb", FIXED_SOURCE_FILE).expect("symlink");
 
         let result = VerifiedSourceFile::verify(Path::new(FIXED_SOURCE_FILE));
 
-        std::env::set_current_dir(original).expect("restore");
         assert!(result.is_err());
     }
 }

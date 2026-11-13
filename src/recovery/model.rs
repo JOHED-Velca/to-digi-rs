@@ -250,6 +250,16 @@ pub enum ResumePlanItemKind {
 }
 
 impl ImportManifest {
+    /// Records resume will neither resend nor re-poll (planner `SkipAmbiguous`); an operator must check them in DIGIweb.
+    pub fn needs_manual_check(&self) -> impl Iterator<Item = &PluManifestRecord> {
+        self.records.iter().filter(|record| {
+            matches!(
+                record.status,
+                RecordStatus::AmbiguousSubmission | RecordStatus::SubmissionStarted
+            ) || (record.status == RecordStatus::UnknownStatus && record.request_id.is_none())
+        })
+    }
+
     pub fn new(
         source: SourceIdentity,
         target: TargetIdentity,

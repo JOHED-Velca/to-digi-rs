@@ -11,7 +11,9 @@ use crate::config::AppConfig;
 use crate::digiweb::preflight::{AuthenticationReadinessStatus, ReadinessResult};
 
 use super::app::TerminalApp;
-use super::model::{CANONICAL_MDB_DISPLAY_PATH, DetailsContext, InputMode, LogoMode, Screen};
+use super::model::{
+    CANONICAL_MDB_DISPLAY_PATH, DetailsContext, ImportSummaryView, InputMode, LogoMode, Screen,
+};
 pub(super) fn render_app(frame: &mut ratatui::Frame<'_>, app: &TerminalApp) {
     let area = frame.area();
     frame.render_widget(Clear, area);
@@ -63,7 +65,12 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, screen: Screen, wid
                 if no_color {
                     Line::from(line)
                 } else {
-                    Line::from(Span::styled(line, Style::default().fg(Color::Cyan)))
+                    Line::from(Span::styled(
+                        line,
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ))
                 }
             })
             .collect::<Vec<_>>();
@@ -96,11 +103,7 @@ fn render_screen(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TerminalApp) 
         render_input_body(app, mode)
     } else {
         match app.screen {
-            Screen::Main => vec![
-                Line::from("DIGIweb Import Tool"),
-                Line::from(""),
-                Line::from("Choose a workflow."),
-            ],
+            Screen::Main => vec![Line::from("Choose a workflow.")],
             Screen::DeploymentCheck => render_deployment_body(app),
             Screen::DigiwebConfig => render_config_body(app),
             Screen::Profile => vec![
@@ -126,18 +129,27 @@ fn render_screen(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TerminalApp) 
             Screen::FullImportConfirm => render_full_import_confirm_body(app),
             Screen::FullImportProgress => render_full_import_progress_body(app),
             Screen::Completion => render_completion_body(app),
-            Screen::Resume => vec![Line::from(
-                "Resume is hidden from the main menu in this pass.",
-            )],
-            Screen::Advanced => vec![Line::from("No advanced TUI tools are enabled yet.")],
             Screen::Version => vec![
-                Line::from(format!("to-digi-rs {}", env!("CARGO_PKG_VERSION"))),
-                Line::from("No v0.10 tag is created by this UI."),
+                Line::from(format!("to-digi-rs v{}", env!("CARGO_PKG_VERSION"))),
+                Line::from("Purpose: one-shot MDB → DIGIweb PLU import"),
+                Line::from("Source: ~/digi/plu.mdb"),
+                Line::from(format!("Target: {}", configured_target())),
+                Line::from("Artifacts: logs, reports, recovery manifest"),
+                Line::from("Safety: ambiguous submissions are never blindly retried."),
+                Line::from(""),
+                Line::from("Guided Import → Deployment Check"),
+                Line::from("→ DIGIweb Configuration → Customer Profile"),
+                Line::from("→ MDB Analysis → Diagnostics"),
+                Line::from("→ Confirm References → Readiness Verification"),
+                Line::from("→ Dry Run → Single-PLU Live Test"),
+                Line::from("→ Error Handling → Full Import"),
+                Line::from("→ Review Results"),
             ],
             Screen::Details => render_details_body(app, body_width),
+            Screen::Error => render_error_body(app),
         }
     };
-    let body = if !app.busy_message.is_some()
+    let body = if app.busy_message.is_none()
         && app.input_mode.is_none()
         && app.screen == Screen::References
     {
@@ -233,6 +245,8 @@ fn render_deployment_body(app: &TerminalApp) -> Vec<Line<'static>> {
                         "Config",
                         if summary.config_ready {
                             "Ready"
+                        } else if summary.config_error.is_some() {
+                            "Unreadable"
                         } else {
                             "Missing"
                         },
@@ -246,6 +260,11 @@ fn render_deployment_body(app: &TerminalApp) -> Vec<Line<'static>> {
                             "Missing"
                         },
                     ),
+                    summary
+                        .config_error
+                        .as_ref()
+                        .map(|error| Line::from(format!("Config error: {error}")))
+                        .unwrap_or_else(|| Line::from("")),
                 ]
             } else {
                 vec![
@@ -260,8 +279,29 @@ fn render_deployment_body(app: &TerminalApp) -> Vec<Line<'static>> {
     }
 }
 
+fn render_error_body(app: &TerminalApp) -> Vec<Line<'static>> {
+    vec![
+        heading_line(
+            app.error_operation
+                .clone()
+                .unwrap_or_else(|| "Operation failed".to_string()),
+        ),
+        Line::from(""),
+        Line::from(
+            app.error_message
+                .clone()
+                .unwrap_or_else(|| "The operation failed.".to_string()),
+        ),
+    ]
+}
+
 fn render_config_body(app: &TerminalApp) -> Vec<Line<'static>> {
-    let config = AppConfig::load(Path::new("config.toml")).unwrap_or_default();
+    let Ok(config) = AppConfig::load(Path::new("config.toml")) else {
+        return vec![
+            Line::from("Configuration is missing or unreadable."),
+            Line::from("Fix config.toml and try again."),
+        ];
+    };
     let secret_configured = !config.digiweb.client_secret.trim().is_empty()
         && config.digiweb.client_secret.trim() != "CHANGE_ME";
     let mut lines = vec![
@@ -433,7 +473,11 @@ fn render_dry_run_body(app: &TerminalApp) -> Vec<Line<'static>> {
 }
 
 fn render_full_import_confirm_body(app: &TerminalApp) -> Vec<Line<'static>> {
-    let config = AppConfig::load(Path::new("config.toml")).unwrap_or_default();
+    let config = AppConfig::load(Path::new("config.toml"));
+    let host = config
+        .as_ref()
+        .map(|config| host_from_base_url(&config.digiweb.base_url))
+        .unwrap_or_else(|_| "unavailable".to_string());
     let is_single = app.live_selection.is_some();
     let mut lines = vec![
         Line::from(if is_single {
@@ -442,10 +486,7 @@ fn render_full_import_confirm_body(app: &TerminalApp) -> Vec<Line<'static>> {
             "Full Import"
         }),
         Line::from(""),
-        Line::from(format!(
-            "DIGIweb Host: {}",
-            host_from_base_url(&config.digiweb.base_url)
-        )),
+        Line::from(format!("DIGIweb Host: {}", host)),
         Line::from(format!(
             "Profile:     {}",
             app.selected_profile.as_deref().unwrap_or("Generic")
@@ -547,7 +588,7 @@ fn render_completion_body(app: &TerminalApp) -> Vec<Line<'static>> {
             .selected_plu
             .map(|plu| plu.to_string())
             .unwrap_or_else(|| "selected".to_string());
-        return vec![
+        let mut lines = vec![
             Line::from(format!("PLU {plu}")),
             Line::from(""),
             status_line(
@@ -564,8 +605,11 @@ fn render_completion_body(app: &TerminalApp) -> Vec<Line<'static>> {
             Line::from(format!("Failed {}", summary.failed)),
             Line::from(format!("Unknown {}", summary.unknown)),
         ];
+        lines.extend(manual_check_lines(summary));
+        lines.extend(artifact_lines(summary));
+        return lines;
     }
-    let lines = vec![
+    let mut lines = vec![
         Line::from(
             if summary.failed == 0 && summary.unknown == 0 && summary.not_attempted == 0 {
                 "Import Complete"
@@ -586,23 +630,92 @@ fn render_completion_body(app: &TerminalApp) -> Vec<Line<'static>> {
         Line::from(format!("Not attempted {}", summary.not_attempted)),
         Line::from(format!("Status {}", summary.status)),
     ];
+    lines.extend(manual_check_lines(summary));
+    lines.extend(artifact_lines(summary));
     lines
+}
+
+fn artifact_lines(summary: &ImportSummaryView) -> Vec<Line<'static>> {
+    if summary.artifact_paths.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![Line::from(""), Line::from("Current run artifacts:")];
+    lines.extend(
+        summary
+            .artifact_paths
+            .iter()
+            .map(|path| Line::from(format!("  {path}"))),
+    );
+    lines
+}
+
+fn manual_check_lines(summary: &ImportSummaryView) -> Vec<Line<'static>> {
+    const SHOWN: usize = 20;
+    if summary.needs_manual_check.is_empty() {
+        return Vec::new();
+    }
+    let mut plus = summary
+        .needs_manual_check
+        .iter()
+        .take(SHOWN)
+        .map(|plu| format!("PLU {plu}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if summary.needs_manual_check.len() > SHOWN {
+        plus.push_str(&format!(
+            " and {} more (see logs.txt)",
+            summary.needs_manual_check.len() - SHOWN
+        ));
+    }
+    vec![
+        Line::from(""),
+        Line::from("Check in DIGIweb (not resent on resume):"),
+        Line::from(plus),
+    ]
 }
 
 fn render_details_body(app: &TerminalApp, width: u16) -> Vec<Line<'static>> {
     match app.details_context {
+        DetailsContext::Analysis => render_analysis_details(app),
         DetailsContext::Readiness => render_readiness_details(app, width),
         DetailsContext::Diagnostics => render_diagnostics_details(app),
         DetailsContext::DryRun => render_dry_run_details(app),
         DetailsContext::SingleImport => render_import_details(app, true),
         DetailsContext::FullImport => render_import_details(app, false),
-        DetailsContext::Configuration => render_config_body(app),
         DetailsContext::None => vec![Line::from("No additional details available.")],
     }
 }
 
+fn render_analysis_details(app: &TerminalApp) -> Vec<Line<'static>> {
+    let Some(summary) = &app.analysis else {
+        return vec![Line::from("No analysis result is available.")];
+    };
+    let mut lines = vec![
+        heading_line("Analysis Details"),
+        Line::from(""),
+        Line::from(format!("Warnings: {}", summary.warning_count)),
+        Line::from(format!("Blocking: {}", summary.blocking_count)),
+    ];
+    for message in &summary.blocking_messages {
+        lines.push(Line::from(format!("BLOCKING: {message}")));
+    }
+    for message in &summary.warning_messages {
+        lines.push(Line::from(format!("WARNING: {message}")));
+    }
+    if !summary.artifact_paths.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("Complete reports:"));
+        lines.extend(
+            summary
+                .artifact_paths
+                .iter()
+                .map(|path| Line::from(format!("  {path}"))),
+        );
+    }
+    lines
+}
+
 fn render_readiness_details(app: &TerminalApp, width: u16) -> Vec<Line<'static>> {
-    let config = AppConfig::load(Path::new("config.toml")).unwrap_or_default();
     let Some(summary) = &app.readiness else {
         return vec![Line::from("No readiness check has been run.")];
     };
@@ -619,14 +732,18 @@ fn render_readiness_details(app: &TerminalApp, width: u16) -> Vec<Line<'static>>
         lines.push(heading_line("Reason:"));
         lines.push(Line::from(error.clone()));
     }
-    lines.extend([
-        Line::from(""),
-        heading_line("Host:"),
-        value_line(host_from_base_url(&config.digiweb.base_url)),
-        Line::from(""),
-        heading_line("Client ID:"),
-        value_line(config.digiweb.client_id.clone()),
-    ]);
+    if let Ok(config) = AppConfig::load(Path::new("config.toml")) {
+        lines.extend([
+            Line::from(""),
+            heading_line("Host:"),
+            value_line(host_from_base_url(&config.digiweb.base_url)),
+            Line::from(""),
+            heading_line("Client ID:"),
+            value_line(config.digiweb.client_id.clone()),
+        ]);
+    } else {
+        lines.extend([Line::from(""), Line::from("Configuration is unavailable.")]);
+    }
     if summary.unverified_references > 0 {
         lines.push(Line::from(""));
         lines.push(heading_line("Missing references:"));
@@ -871,14 +988,24 @@ fn status_value_line(value: &str) -> Line<'static> {
 pub fn logo_lines(mode: LogoMode) -> Vec<String> {
     match mode {
         LogoMode::Full => vec![
-            "████████▸        DIGI".to_string(),
-            "  ██████▸     to-digi-rs".to_string(),
-            "    ████▸     DIGIweb Import Tool".to_string(),
-            "      ██▸".to_string(),
-            "       ▀".to_string(),
+            "████    ███   ██████   ███".to_string(),
+            "██ ██    ██  ██        ██".to_string(),
+            "██  ██   ██  ██  ███   ██".to_string(),
+            "██ ██    ██  ██   ██   ██".to_string(),
+            "████    ███   ██████   ███".to_string(),
+            format!(
+                "DIGIweb PLU Importer · to-digi-rs v{}",
+                env!("CARGO_PKG_VERSION")
+            ),
         ],
-        LogoMode::Compact => vec!["▸ DIGI   to-digi-rs".to_string()],
+        LogoMode::Compact => vec![format!("DIGI · to-digi-rs v{}", env!("CARGO_PKG_VERSION"))],
     }
+}
+
+fn configured_target() -> String {
+    AppConfig::load(Path::new("config.toml"))
+        .map(|config| host_from_base_url(&config.digiweb.base_url))
+        .unwrap_or_else(|_| "unavailable (check config.toml)".to_string())
 }
 
 pub fn reference_lines(

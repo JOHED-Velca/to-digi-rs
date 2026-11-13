@@ -19,16 +19,10 @@ impl MdbTools {
 
     pub fn verify_required_commands() -> Result<(), AppError> {
         for command in Self::required_commands() {
-            match Command::new(command).arg("--help").output() {
-                Ok(_) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(AppError::MdbToolsUnavailable(format!(
-                        "{command} was not found. Install with: sudo apt install mdbtools"
-                    )));
-                }
-                Err(err) => {
-                    return Err(AppError::MdbToolsUnavailable(format!("{command}: {err}")));
-                }
+            if let Err(err) = Command::new(command).arg("--help").output() {
+                return Err(spawn_error(command, err, |message| {
+                    AppError::MdbToolsUnavailable(format!("{command}: {message}"))
+                }));
             }
         }
         Ok(())
@@ -39,7 +33,7 @@ impl MdbTools {
             .arg("-1")
             .arg(path)
             .output()
-            .map_err(|err| AppError::MdbSchema(err.to_string()))?;
+            .map_err(|err| spawn_error("mdb-tables", err, AppError::MdbSchema))?;
         if !output.status.success() {
             return Err(AppError::MdbSchema(stderr_or_status(&output)));
         }
@@ -64,7 +58,7 @@ impl MdbTools {
             .arg(path)
             .arg(table)
             .output()
-            .map_err(|err| AppError::MdbExport(err.to_string()))?;
+            .map_err(|err| spawn_error("mdb-export", err, AppError::MdbExport))?;
         if !output.status.success() {
             return Err(AppError::MdbExport(stderr_or_status(&output)));
         }
@@ -175,6 +169,29 @@ pub fn nutrition_table_to_export<'a>(
     }
 }
 
+fn spawn_error(
+    command: &str,
+    err: std::io::Error,
+    other: impl FnOnce(String) -> AppError,
+) -> AppError {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        AppError::MdbToolsUnavailable(format!(
+            "{command} was not found. Install with: sudo apt install mdbtools"
+        ))
+    } else {
+        other(err.to_string())
+    }
+}
+
+fn stderr_or_status(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        format!("command exited with status {}", output.status)
+    } else {
+        stderr
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,13 +223,23 @@ mod tests {
 
         MdbTools::verify_required_commands().expect("mdbtools commands should be available");
     }
-}
 
-fn stderr_or_status(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        format!("command exited with status {}", output.status)
-    } else {
-        stderr
+    #[test]
+    fn missing_mdbtools_binary_reports_install_hint() {
+        let missing = spawn_error(
+            "mdb-export",
+            std::io::ErrorKind::NotFound.into(),
+            AppError::MdbExport,
+        );
+        let other = spawn_error(
+            "mdb-export",
+            std::io::ErrorKind::PermissionDenied.into(),
+            AppError::MdbExport,
+        );
+
+        assert!(
+            matches!(missing, AppError::MdbToolsUnavailable(message) if message.contains("sudo apt install mdbtools"))
+        );
+        assert!(matches!(other, AppError::MdbExport(_)));
     }
 }

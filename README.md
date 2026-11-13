@@ -25,22 +25,66 @@ First-download TODOs:
 3. Set the DIGIweb client secret.
 4. Choose the customer profile when needed, such as `bigway` or `starsky`.
 5. Confirm required departments, groups, and label formats in DIGIweb.
-6. Run analysis, diagnostics, dry-run, and a one-PLU live test before a full import.
+6. Follow the guided flow: analysis, diagnostics, reference confirmation, readiness verification, dry-run, one-PLU live test, error handling, full import, and result review.
 
-## Download the GHCR Image
+## Install and Run on Another Device
 
-Use the release tag provided for the customer:
+The destination device needs a Linux shell and Docker. It does not need Git, Rust, or a copy of this repository. The commands below target Ubuntu or Debian; WSL 2 users may use Docker Desktop's WSL integration instead of installing `docker.io` inside WSL.
+
+### 1. Install and start Docker
+
+Run these commands as the normal user who will run imports:
 
 ```bash
-IMAGE="ghcr.io/johed-velca/to-digi-rs:0.9.0"
+sudo apt-get update
+sudo apt-get install -y docker.io
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+Apply the new Docker group membership by signing out and back in, or run:
+
+```bash
+newgrp docker
+```
+
+Membership in the `docker` group grants root-equivalent control of the device. Only add trusted users; otherwise keep Docker restricted and use an administrator-managed deployment.
+
+Confirm that the Docker daemon is reachable without `sudo`:
+
+```bash
+docker info
+```
+
+Do not initialize the deployment with `sudo`; doing so creates root-owned files that `./to-digi` may not be able to update.
+
+### 2. Authenticate to GHCR if the image is private
+
+Public images do not require login. If `docker pull` reports `denied`, create a GitHub personal access token with `read:packages`, then log in without placing the token in shell history:
+
+```bash
+export GHCR_USER="YOUR_GITHUB_USERNAME"
+read -rsp "GHCR token: " GHCR_TOKEN; echo
+printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+unset GHCR_TOKEN
+```
+
+### 3. Pull the release image
+
+Use the release tag supplied for the customer. For the current release documented here:
+
+```bash
+export IMAGE="ghcr.io/johed-velca/to-digi-rs:0.9.0"
 docker pull "$IMAGE"
 ```
 
-Initialize a deployment directory:
+### 4. Generate the local deployment files
+
+Create an empty deployment directory, then run the image's `init` command. This generates `to-digi`, `config.toml`, profiles, compatibility scripts, and the output directory on the host:
 
 ```bash
-mkdir -p ~/digi/to-digi-rs-deploy
-cd ~/digi/to-digi-rs-deploy
+mkdir -p "$HOME/digi/to-digi-rs-deploy"
+cd "$HOME/digi/to-digi-rs-deploy"
 
 docker run --rm \
   --user "$(id -u):$(id -g)" \
@@ -48,6 +92,53 @@ docker run --rm \
   --workdir /work \
   "$IMAGE" \
   init
+```
+
+Confirm that the launcher exists and is executable:
+
+```bash
+test -x ./to-digi && echo "to-digi launcher is ready"
+```
+
+Pulling the image alone does not create `./to-digi`; the `init` command above is required on every new device or deployment directory.
+
+### 5. Place the customer MDB in the required location
+
+Copy the Access database to the exact lowercase path `~/digi/plu.mdb`. Replace `/path/to/customer/plu.mdb` with its real location:
+
+```bash
+mkdir -p "$HOME/digi"
+install -m 600 /path/to/customer/plu.mdb "$HOME/digi/plu.mdb"
+test -r "$HOME/digi/plu.mdb" && echo "MDB source is ready"
+```
+
+The source must be a regular file, not a symbolic link. It is mounted read-only inside the importer.
+
+### 6. Launch the guided importer
+
+Run the launcher from the deployment directory:
+
+```bash
+cd "$HOME/digi/to-digi-rs-deploy"
+./to-digi
+```
+
+On first launch, use the guided screens to:
+
+1. Check the deployment and `~/digi/plu.mdb`.
+2. Enter the DIGIweb host and client secret.
+3. Choose `Generic`, `Bigway`, or `Starsky` as appropriate.
+4. Run analysis and diagnostics.
+5. Confirm required departments, groups, and label formats in DIGIweb.
+6. Run readiness verification and a dry run.
+7. Complete a successful single-PLU live test before allowing a full import.
+8. Review the completion result and files under `output/`.
+
+For later image updates, return to the deployment directory and run:
+
+```bash
+./to-digi pull
+./to-digi
 ```
 
 The generated `to-digi` launcher mounts:
@@ -136,7 +227,7 @@ The source reader never sends HTTP requests. The DIGIweb client never parses MDB
 
 ```text
 src/cli.rs             command-line parsing
-src/terminal_ui.rs     guided terminal UI
+src/terminal_ui/       guided terminal UI
 src/config.rs          configuration and secret resolution
 src/config_setup.rs    IP and secret config updates
 src/source/            MDB validation, schema inspection, export, mapping

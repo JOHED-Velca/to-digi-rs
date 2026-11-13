@@ -955,14 +955,14 @@ fn interpret_plu_submission(
         };
     }
 
-    if response.status == StatusCode::ACCEPTED {
-        if let Some(request_id) = request_id {
-            return Ok(SubmissionInterpretation::Async {
-                request_id,
-                status_path,
-                message,
-            });
-        }
+    if response.status == StatusCode::ACCEPTED
+        && let Some(request_id) = request_id
+    {
+        return Ok(SubmissionInterpretation::Async {
+            request_id,
+            status_path,
+            message,
+        });
     }
 
     if matches!(response.status, StatusCode::OK | StatusCode::CREATED) {

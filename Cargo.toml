@@ -26,3 +26,8 @@ zeroize = "1.8"
 
 [dev-dependencies]
 tempfile = "3.14"
+
+[lints.clippy]
+# Signature-shape lints; refactoring these would change many call sites for no behavior gain.
+too_many_arguments = "allow"
+type_complexity = "allow"

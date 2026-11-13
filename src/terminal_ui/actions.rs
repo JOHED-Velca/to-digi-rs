@@ -22,14 +22,13 @@ use crate::digiweb::preflight::{AuthenticationReadinessStatus, evaluate_referenc
 use crate::error::AppError;
 use crate::import::runner::ImportProgressSnapshot;
 use crate::logging::{AuditLogger, FinalImportLog};
-use crate::recovery::validator::target_identity;
 use crate::selection::{SelectionCriteria, select_eligible_plus, selection_error};
 use crate::source::FIXED_SOURCE_FILE;
 use crate::{
-    VerifyReportInput, build_analysis_report, build_verify_report, dry_run_selected_success,
-    excluded_plu_numbers, final_readiness_result, load_client_secret,
+    ImportRun, VerifyReportInput, build_analysis_report, build_verify_report,
+    dry_run_selected_success, excluded_plu_numbers, final_readiness_result, load_client_secret,
     load_optional_sanitization_profile, log_duplicate_barcode_section,
-    manifest_path_from_environment, profile_for_import_or_resume, read_source_context,
+    manifest_path_from_environment, prepare_and_run_import, read_source_context,
     skipped_duplicate_barcode_count, write_dry_run_payload_previews, write_json_report,
     write_text_report, write_verify_reports,
 };
@@ -39,6 +38,7 @@ use super::model::{
     AnalysisSummary, DeploymentSummary, DiagnosticsSummaryView, DryRunSummaryView,
     ImportFailureView, ImportSummaryView, ReadinessSummaryView, Screen, UiOperation,
 };
+use super::operations::{operation_status, single_import_success_eligible};
 use super::render::render_app;
 pub(super) async fn run_ui_operation<B: Backend>(
     terminal: &mut Terminal<B>,
@@ -59,6 +59,11 @@ pub(super) async fn run_ui_operation<B: Backend>(
     });
     app.status_message = None;
     app.input_error = None;
+    let operation_name = app
+        .busy_message
+        .clone()
+        .unwrap_or_else(|| "Operation".to_string());
+    let _ = terminal.draw(|frame| render_app(frame, app));
 
     let result = match operation {
         UiOperation::DeploymentCheck => {
@@ -109,9 +114,10 @@ pub(super) async fn run_ui_operation<B: Backend>(
         UiOperation::ConfirmReferences => {
             match run_confirm_service(app.selected_profile.clone(), logger) {
                 Ok(()) => {
-                    app.history.clear();
-                    app.screen = Screen::Main;
+                    app.screen = Screen::ReadinessReady;
                     app.selected_index = 0;
+                    app.history.clear();
+                    app.pending_operation = Some(UiOperation::Verify);
                     Ok("OK DIGIweb references recorded.".to_string())
                 }
                 Err(err) => Err(err),
@@ -163,30 +169,57 @@ pub(super) async fn run_ui_operation<B: Backend>(
                     app.import_result = Some(summary);
                     app.screen = Screen::Completion;
                     app.selected_index = 0;
+                    app.single_import_success_eligible = app
+                        .import_result
+                        .as_ref()
+                        .is_some_and(|result| result.single_success_eligible);
                     if let Some(err) = draw_error {
                         Err(AppError::Internal(err))
                     } else {
                         Ok("Import complete.".to_string())
                     }
                 }
-                Err(err) => Err(err),
+                Err(err) => {
+                    app.error_operation = Some(operation_name.clone());
+                    app.error_message = Some(short_error(&err));
+                    app.screen = Screen::Error;
+                    app.selected_index = 0;
+                    Err(err)
+                }
             }
         }
     };
 
     app.busy_message = None;
-    if let Err(err) = logger.flush() {
-        app.status_message = Some(format!("Logging error: {err}"));
-    } else {
-        app.status_message = Some(result.unwrap_or_else(|err| short_error(&err)));
+    if result.is_err() && app.screen != Screen::Error {
+        app.error_operation = Some(operation_name);
+        app.error_message = result.as_ref().err().map(short_error);
+        app.screen = Screen::Error;
+        app.selected_index = 0;
     }
+    let primary = result.err().map(|err| short_error(&err));
+    let logging = logger.flush().err().map(|err| err.to_string());
+    app.status_message = Some(operation_status(primary, logging));
 }
 
-fn check_deployment() -> DeploymentSummary {
+pub(super) fn check_deployment() -> DeploymentSummary {
+    check_deployment_at(Path::new("."))
+}
+
+pub(super) fn check_deployment_at(root: &Path) -> DeploymentSummary {
+    let config_path = root.join("config.toml");
+    let config_error = if config_path.is_file() {
+        AppConfig::load(&config_path)
+            .err()
+            .map(|err| short_error(&err))
+    } else {
+        None
+    };
     DeploymentSummary {
-        mdb_found: Path::new(FIXED_SOURCE_FILE).is_file(),
-        config_ready: Path::new("config.toml").is_file(),
-        profiles_ready: Path::new("profiles").is_dir(),
+        mdb_found: root.join(FIXED_SOURCE_FILE).is_file(),
+        config_ready: config_path.is_file() && config_error.is_none(),
+        profiles_ready: root.join("profiles").is_dir(),
+        config_error,
     }
 }
 
@@ -294,6 +327,22 @@ fn run_analysis_service(
             .collect(),
         warning_count: report.warnings.len(),
         blocking_count: report.blocking_errors.len(),
+        warning_messages: report
+            .warnings
+            .iter()
+            .take(10)
+            .map(|warning| warning.message.clone())
+            .collect(),
+        blocking_messages: report
+            .blocking_errors
+            .iter()
+            .take(10)
+            .map(|error| error.message.clone())
+            .collect(),
+        artifact_paths: ["analysis-report.txt", "analysis-report.json"]
+            .into_iter()
+            .map(resolved_path)
+            .collect(),
         first_valid_plu: report.summary.valid_plu_numbers.first().copied(),
     })
 }
@@ -425,7 +474,7 @@ async fn run_verify_service(
     let client_secret = load_client_secret(&config)?;
     let client = DigiwebClient::new(config.clone())?;
     let auth_result = authenticate(client.http(), &config, &client_secret).await;
-    let authentication_error = auth_result.as_ref().err().map(|err| short_error(err));
+    let authentication_error = auth_result.as_ref().err().map(short_error);
     let authentication = if auth_result.is_ok() {
         AuthenticationReadinessStatus::Passed
     } else {
@@ -557,80 +606,28 @@ async fn run_import_service(
     logger: &mut AuditLogger,
     progress_observer: Option<&mut dyn FnMut(ImportProgressSnapshot)>,
 ) -> Result<ImportSummaryView, AppError> {
-    let config = AppConfig::load(Path::new("config.toml"))?;
-    let profile_selection = profile_selection(profile);
-    let profile = profile_for_import_or_resume(None, profile_selection.as_ref())?;
-    let source = read_source_context(&config, logger, profile, false)?;
-    select_eligible_plus(
-        &source.plus,
-        &source.valid_plus,
-        &source.row_issues,
-        &source.validation_report,
-        selection,
-    )
-    .map_err(|failure| {
-        let message = failure.message();
-        let _ = logger.error(&message);
-        selection_error(&failure)
-    })?;
     let manifest_path = manifest_path_from_environment(None)?;
-    let options = crate::import::runner::ImportRunOptions {
-        limit: selection.limit,
-        requested_plu: selection.requested_plu,
-        continue_after_record_failure: continue_on_error,
-        test_mode: selection.test_mode,
-        retry_failed: false,
-    };
-    let summary = if let Some(observer) = progress_observer {
-        crate::import::runner::run_import_quiet_with_progress(
-            config.clone(),
-            &source.valid_plus,
-            source.source_identity.clone(),
-            target_identity(&config),
-            &manifest_path,
-            None,
-            source.sanitization.clone(),
-            options,
-            logger,
-            observer,
-        )
-        .await?
-    } else {
-        crate::import::runner::run_import_quiet(
-            config.clone(),
-            &source.valid_plus,
-            source.source_identity.clone(),
-            target_identity(&config),
-            &manifest_path,
-            None,
-            source.sanitization.clone(),
-            options,
-            logger,
-        )
-        .await?
+    let config = AppConfig::load(Path::new("config.toml"))?;
+    config.validate_startup()?;
+    let profile_selection = profile_selection(profile);
+    let Some(ImportRun { source, summary }) = prepare_and_run_import(
+        &config,
+        selection,
+        continue_on_error,
+        None,
+        false,
+        profile_selection.as_ref(),
+        logger,
+        false,
+        progress_observer,
+    )
+    .await?
+    else {
+        return Err(AppError::ValidationPayload(
+            "no valid PLUs are available to send".to_string(),
+        ));
     };
     let status = summary.final_status().as_str().to_string();
-    logger.final_import_summary(FinalImportLog {
-        status: &status,
-        source_discovered: source.dataset.plu_rows.len(),
-        placeholders_ignored: source.placeholder_ignored,
-        invalid_source_rows: source.invalid_source_rows,
-        validation_skipped: source.validation_skipped,
-        skipped_duplicate_barcode: skipped_duplicate_barcode_count(&source),
-        normalized: source.plus.len(),
-        valid: summary.discovered,
-        selected: summary.selected,
-        submitted: summary.submitted,
-        succeeded: summary.succeeded,
-        failed: summary.failed,
-        unknown: summary.unknown,
-        not_attempted: summary.not_attempted_after_stop,
-        intentionally_skipped_by_limit: summary.intentionally_skipped_by_limit,
-        successful_plu_numbers: &[],
-        failed_plu_numbers: &[],
-        unknown_plu_numbers: &[],
-        dry_run: false,
-    })?;
     let failures = summary
         .records
         .iter()
@@ -671,8 +668,29 @@ async fn run_import_service(
         }),
         continue_on_error,
         failures,
+        needs_manual_check: summary.needs_manual_check,
         status,
+        artifact_paths: [Path::new("logs.txt"), manifest_path.as_path()]
+            .into_iter()
+            .map(resolved_path)
+            .collect(),
+        single_success_eligible: single_import_success_eligible(
+            selection,
+            summary.selected,
+            summary.succeeded,
+            summary.failed,
+            summary.unknown,
+            summary.not_attempted_after_stop,
+        ),
     })
+}
+
+fn resolved_path(path: impl AsRef<Path>) -> String {
+    let path = path.as_ref();
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
 }
 
 pub(super) fn concise_import_failure(message: &str, barcode_type: Option<&str>) -> String {

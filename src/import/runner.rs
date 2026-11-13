@@ -99,6 +99,7 @@ struct ProgressReporter<'a> {
     observer: Option<&'a mut dyn FnMut(ImportProgressSnapshot)>,
 }
 
+#[cfg(test)]
 pub async fn run_import(
     config: AppConfig,
     plus: &[Plu],
@@ -126,62 +127,7 @@ pub async fn run_import(
     .await
 }
 
-pub async fn run_import_quiet(
-    config: AppConfig,
-    plus: &[Plu],
-    source_identity: SourceIdentity,
-    target_identity: TargetIdentity,
-    manifest_path: &Path,
-    resume_manifest: Option<&Path>,
-    sanitization: Option<SanitizationIntegration>,
-    options: ImportRunOptions,
-    logger: &mut AuditLogger,
-) -> Result<ImportSummary, AppError> {
-    run_import_with_stdout(
-        config,
-        plus,
-        source_identity,
-        target_identity,
-        manifest_path,
-        resume_manifest,
-        sanitization,
-        options,
-        logger,
-        false,
-        None,
-    )
-    .await
-}
-
-pub async fn run_import_quiet_with_progress(
-    config: AppConfig,
-    plus: &[Plu],
-    source_identity: SourceIdentity,
-    target_identity: TargetIdentity,
-    manifest_path: &Path,
-    resume_manifest: Option<&Path>,
-    sanitization: Option<SanitizationIntegration>,
-    options: ImportRunOptions,
-    logger: &mut AuditLogger,
-    progress_observer: &mut dyn FnMut(ImportProgressSnapshot),
-) -> Result<ImportSummary, AppError> {
-    run_import_with_stdout(
-        config,
-        plus,
-        source_identity,
-        target_identity,
-        manifest_path,
-        resume_manifest,
-        sanitization,
-        options,
-        logger,
-        false,
-        Some(progress_observer),
-    )
-    .await
-}
-
-async fn run_import_with_stdout(
+pub async fn run_import_with_stdout(
     config: AppConfig,
     plus: &[Plu],
     source_identity: SourceIdentity,
@@ -445,7 +391,7 @@ async fn run_import_with_stdout(
             run_timer.elapsed(),
             auth_session.refresh_count(),
         );
-        atomic_write_manifest(&active_manifest_path, &manifest)?;
+        atomic_write_manifest(active_manifest_path, &manifest)?;
     }
     let status = manifest.run_status;
     logger.line(if resume_manifest.is_some() {
@@ -486,6 +432,27 @@ async fn run_import_with_stdout(
             manifest.metrics.max_in_flight_observed,
             manifest.metrics.average_plus_per_second
         );
+    }
+    let manual_check = manifest.needs_manual_check().collect::<Vec<_>>();
+    if !manual_check.is_empty() {
+        let heading = "NEEDS MANUAL CHECK IN DIGIWEB (will not be resent on resume)";
+        logger.line(heading)?;
+        if stdout_enabled {
+            println!("\n{heading}");
+        }
+        for record in manual_check {
+            let line = format!(
+                "PLU {} status={} request_id={} error={}",
+                record.plu_number,
+                record.status.as_text(),
+                record.request_id.as_deref().unwrap_or("n/a"),
+                record.last_error.as_deref().unwrap_or("n/a")
+            );
+            logger.line(&line)?;
+            if stdout_enabled {
+                println!("{line}");
+            }
+        }
     }
     Ok(summary_from_manifest(&manifest, plus.len()))
 }
@@ -1520,6 +1487,10 @@ fn summary_from_manifest(manifest: &ImportManifest, valid_count: usize) -> Impor
         unknown,
         intentionally_skipped_by_limit: manifest.selection.excluded_by_limit,
         not_attempted_after_stop: manifest.summary.not_attempted,
+        needs_manual_check: manifest
+            .needs_manual_check()
+            .map(|record| record.plu_number)
+            .collect(),
         records: manifest
             .records
             .iter()
@@ -2819,6 +2790,107 @@ mod tests {
                 .count(),
             0
         );
+        assert_eq!(summary.needs_manual_check, vec![1]);
+        logger.flush().expect("flush");
+        let log = std::fs::read_to_string(&log_path).expect("log");
+        assert!(log.contains("NEEDS MANUAL CHECK IN DIGIWEB"));
+        assert!(log.contains("PLU 1 status=AMBIGUOUS_SUBMISSION request_id=n/a"));
+    }
+
+    #[tokio::test]
+    async fn crash_during_in_flight_post_resumes_as_ambiguous_without_repost() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Answers every token request, records every request line, and never answers a PLU POST.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base_url = format!("http://{}", listener.local_addr().expect("addr"));
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (post_seen_tx, post_seen_rx) = tokio::sync::oneshot::channel();
+        let request_log = requests.clone();
+        tokio::spawn(async move {
+            let mut post_seen_tx = Some(post_seen_tx);
+            let mut held = Vec::new();
+            while let Ok((mut stream, _peer)) = listener.accept().await {
+                let mut buffer = [0_u8; 4096];
+                let size = stream.read(&mut buffer).await.unwrap_or_default();
+                let line = String::from_utf8_lossy(&buffer[..size])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                request_log.lock().expect("request log").push(line.clone());
+                if line.starts_with("POST /token") {
+                    let _ = stream.write_all(token_response("token-a").as_bytes()).await;
+                } else {
+                    if let Some(tx) = post_seen_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    held.push(stream);
+                }
+            }
+        });
+        let posts = || {
+            requests
+                .lock()
+                .expect("request log")
+                .iter()
+                .filter(|line| line.starts_with("POST /api/v1/third-party/plus/write"))
+                .count()
+        };
+
+        let mut config = test_import_config(&base_url);
+        config.import.write_payload_preview = false;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = temp.path().join("import-results.json");
+        let mut logger = AuditLogger::create(&temp.path().join("logs.txt")).expect("logger");
+        let options = ImportRunOptions {
+            limit: None,
+            requested_plu: None,
+            continue_after_record_failure: false,
+            test_mode: false,
+            retry_failed: false,
+        };
+
+        let plus = [plu(1)];
+        // Dropping the import future while its POST is in flight stands in for a killed process.
+        tokio::select! {
+            result = run_import(
+                config.clone(),
+                &plus,
+                source_identity(),
+                target_identity(&base_url),
+                &manifest_path,
+                None,
+                None,
+                options,
+                &mut logger,
+            ) => panic!("import finished although its POST never got a response: {result:?}"),
+            _ = post_seen_rx => {}
+        }
+        let crashed = load_manifest(&manifest_path).expect("manifest after crash");
+        assert_eq!(crashed.records[0].status, RecordStatus::SubmissionStarted);
+        assert_eq!(posts(), 1);
+
+        let summary = run_import(
+            config,
+            &plus,
+            source_identity(),
+            target_identity(&base_url),
+            &manifest_path,
+            Some(&manifest_path),
+            None,
+            options,
+            &mut logger,
+        )
+        .await
+        .expect("resume");
+
+        let resumed = load_manifest(&manifest_path).expect("manifest after resume");
+        assert_eq!(resumed.records[0].status, RecordStatus::AmbiguousSubmission);
+        assert_eq!(summary.needs_manual_check, vec![1]);
+        assert_eq!(posts(), 1, "resume must not resend an ambiguous PLU");
     }
 
     #[tokio::test]

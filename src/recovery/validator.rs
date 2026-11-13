@@ -157,13 +157,11 @@ fn validate_record(record: &PluManifestRecord) -> Result<(), AppError> {
                 ));
             }
         }
-        RecordStatus::NotAttempted => {
-            if record.request_id.is_some() {
-                return invalid_manifest(format!(
-                    "PLU {} cannot have a request_id while NOT_ATTEMPTED",
-                    record.plu_number
-                ));
-            }
+        RecordStatus::NotAttempted if record.request_id.is_some() => {
+            return invalid_manifest(format!(
+                "PLU {} cannot have a request_id while NOT_ATTEMPTED",
+                record.plu_number
+            ));
         }
         _ => {}
     }
