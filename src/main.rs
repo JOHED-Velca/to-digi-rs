@@ -322,7 +322,6 @@ async fn run_inner(cli: &Cli, logger: &mut AuditLogger) -> Result<i32, AppError>
             resume,
             retry_failed,
             sanitize_profile,
-            config_setup: _,
             ..
         } => {
             if config.import.dry_run_inspect_only {
