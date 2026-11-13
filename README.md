@@ -71,10 +71,10 @@ unset GHCR_TOKEN
 
 ### 3. Pull the release image
 
-Use the release tag supplied for the customer. For the current release documented here:
+Use the release tag supplied for the customer. To test the current guided-UI prerelease:
 
 ```bash
-export IMAGE="ghcr.io/johed-velca/to-digi-rs:0.9.0"
+export IMAGE="ghcr.io/johed-velca/to-digi-rs:0.10.0-alpha.6"
 docker pull "$IMAGE"
 ```
 
