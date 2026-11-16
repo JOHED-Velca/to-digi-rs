@@ -33,6 +33,9 @@ jobs:
       image: ${{ steps.resolve.outputs.image }}
       is_rc: ${{ steps.resolve.outputs.is_rc }}
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Resolve and validate version
         id: resolve
         shell: bash
@@ -61,6 +64,16 @@ jobs:
             echo "image=$image"
             echo "is_rc=$is_rc"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Verify README release image
+        shell: bash
+        run: |
+          expected="export IMAGE=\"${IMAGE_NAME}:${{ steps.resolve.outputs.version }}\""
+          section="$(sed -n '/^### 3\. Pull the release image$/,/^### 4\./p' README.md)"
+          grep -Fqx "$expected" <<< "$section" || {
+            echo "README step 3 must contain: $expected" >&2
+            exit 1
+          }
 
   test:
     name: Test

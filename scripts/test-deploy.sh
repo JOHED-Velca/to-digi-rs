@@ -513,6 +513,8 @@ test_publish_workflow_supports_prereleases() {
     assert_contains "$workflow" "$version_regex"
     assert_not_contains "$workflow" '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
     assert_contains "$workflow" "TO_DIGI_RS_RELEASE_IMAGE=\${{ needs.release-metadata.outputs.image }}"
+    assert_contains "$workflow" "Verify README release image"
+    assert_contains "$workflow" "README step 3 must contain"
     assert_contains "$workflow" "platforms: linux/amd64"
     assert_contains "$workflow" "to-digi-rs-deploy-\${{ needs.release-metadata.outputs.tag }}.tar.gz"
     assert_not_contains "$workflow" "to-digi-rs-deploy-v0.8.0"

@@ -74,7 +74,7 @@ unset GHCR_TOKEN
 Use the release tag supplied for the customer. To test the current guided-UI prerelease:
 
 ```bash
-export IMAGE="ghcr.io/johed-velca/to-digi-rs:0.10.0-alpha.6"
+export IMAGE="ghcr.io/johed-velca/to-digi-rs:0.10.0-alpha.7"
 docker pull "$IMAGE"
 ```
 
@@ -134,12 +134,27 @@ On first launch, use the guided screens to:
 7. Complete a successful single-PLU live test before allowing a full import.
 8. Review the completion result and files under `output/`.
 
-For later image updates, return to the deployment directory and run:
+### Update an existing device to the latest release
+
+When the version shown in step 3 changes, pull that exact image and refresh the generated launcher. The refresh preserves `config.toml`, `plu.mdb`, custom files, and previous output; changed generated files are backed up.
 
 ```bash
-./to-digi pull
+export IMAGE="ghcr.io/johed-velca/to-digi-rs:0.10.0-alpha.7"
+docker pull "$IMAGE"
+
+cd "$HOME/digi/to-digi-rs-deploy"
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src="$PWD",dst=/work \
+  --workdir /work \
+  "$IMAGE" \
+  init --refresh-generated-files
+
+./to-digi version
 ./to-digi
 ```
+
+Check that `./to-digi version` reports the expected release before importing. Repeat these commands whenever the pinned image in step 3 changes; `docker pull` alone does not update an existing launcher's pinned image.
 
 The generated `to-digi` launcher mounts:
 
