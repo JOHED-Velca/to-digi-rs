@@ -207,6 +207,16 @@ printf '%s' "$DIGI_SECRET" |
 
 Do not put real secrets directly in shell history.
 
+### Destination store selection
+
+`digiweb.store_number` remains compatible with existing configurations, but it is now a preference rather than an assumption that store 1 exists. Before any live single-PLU or bulk import, to-digi reads the active stores from DIGIweb's authenticated Registry API.
+
+1. If exactly one active store exists, that store is selected automatically even when its number differs from `store_number`. The TUI and logs show the selected number and name.
+2. If multiple active stores exist, the TUI requires an explicit choice. A valid configured `store_number` is highlighted, but it is not silently accepted. Non-interactive CLI imports use `store_number` only when it matches an active store; otherwise they stop and tell you to update the config or use the TUI.
+3. If no active stores exist, or the store list cannot be read safely, the import stops before submitting a PLU.
+
+The chosen store is applied to the dry-run payload, every PLU in the live operation, and the recovery manifest. Re-run readiness if DIGIweb store configuration changes before importing.
+
 ## Architecture
 
 ```text

@@ -17,6 +17,7 @@ use super::render::{
 };
 use super::should_launch_interactive;
 use crate::digiweb::preflight::{AuthenticationReadinessStatus, ReadinessResult};
+use crate::digiweb::store::DigiwebStore;
 use crate::import::runner::ImportProgressSnapshot;
 use crate::selection::SelectionCriteria;
 
@@ -383,6 +384,11 @@ fn not_ready_blocks_dry_run_continuation() {
         eligible: 10,
         excluded: 1,
         unverified_references: 2,
+        available_stores: Vec::new(),
+        selected_store_number: None,
+        store_selection_required: false,
+        preferred_store_index: 0,
+        store_error: None,
     });
 
     assert_eq!(
@@ -411,11 +417,59 @@ fn ready_with_skips_allows_dry_run_continuation() {
         eligible: 10,
         excluded: 1,
         unverified_references: 0,
+        available_stores: vec![DigiwebStore::new(2, "Starsky")],
+        selected_store_number: Some(2),
+        store_selection_required: false,
+        preferred_store_index: 0,
+        store_error: None,
     });
 
     assert_eq!(app.visible_items()[0], "Continue");
     app.handle_key(key(KeyCode::Enter));
     assert_eq!(app.screen, Screen::DryRun);
+}
+
+#[test]
+fn multiple_stores_require_an_explicit_tui_selection() {
+    let mut app = TerminalApp::new(TerminalUiOptions {
+        default_profile: None,
+    });
+    app.screen = Screen::ReadinessReady;
+    app.readiness = Some(ReadinessSummaryView {
+        readiness: ReadinessResult::Ready,
+        authentication: AuthenticationReadinessStatus::Passed,
+        authentication_error: None,
+        eligible: 10,
+        excluded: 0,
+        unverified_references: 0,
+        available_stores: vec![
+            DigiwebStore::new(2, "Starsky"),
+            DigiwebStore::new(8, "Third Location"),
+        ],
+        selected_store_number: None,
+        store_selection_required: true,
+        preferred_store_index: 1,
+        store_error: None,
+    });
+
+    app.handle_key(key(KeyCode::Enter));
+
+    assert_eq!(app.screen, Screen::StoreSelection);
+    assert_eq!(app.selected_index, 1);
+    assert_eq!(app.menu_items()[1], "Store 8 — Third Location");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.selected_store_number, Some(8));
+    assert_eq!(app.screen, Screen::DryRun);
+}
+
+#[test]
+fn inactive_shop_kafka_error_is_shortened_for_the_tui() {
+    let message = "java.lang.IllegalStateException: No active shops found. Submitted storeNo: 1\n\tat eu.digi.skyproject.registry.service.PluConsumerService";
+
+    assert_eq!(
+        concise_import_failure(message, None),
+        "DIGIweb could not find active store 1. Run readiness and select an active destination store."
+    );
 }
 
 #[test]
@@ -772,6 +826,11 @@ fn details_screens_render_structured_context_without_log_file_placeholder() {
         eligible: 4,
         excluded: 1,
         unverified_references: 2,
+        available_stores: Vec::new(),
+        selected_store_number: None,
+        store_selection_required: false,
+        preferred_store_index: 0,
+        store_error: Some("Store discovery was not run.".to_string()),
     });
     app.analysis = Some(AnalysisSummary {
         departments: vec![1, 2],

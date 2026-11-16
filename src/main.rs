@@ -55,6 +55,7 @@ use digiweb::preflight::{
     AuthenticationReadinessStatus, ReadinessResult, ReferenceConfirmationStatus,
     ReferenceReadiness, collect_required_references, evaluate_reference_readiness,
 };
+use digiweb::store::{StoreResolution, resolve_store};
 use discovery::{DiscoveryInput, PhaseTiming, render_discovery_console, write_discovery_reports};
 use error::AppError;
 use import::runner::{ImportRunOptions, run_import_with_stdout};
@@ -1839,6 +1840,8 @@ async fn run_import_command(
         logger,
         true,
         None,
+        None,
+        false,
     )
     .await?
     else {
@@ -1865,9 +1868,19 @@ async fn prepare_and_run_import(
     logger: &mut AuditLogger,
     stdout_enabled: bool,
     progress_observer: Option<&mut dyn FnMut(import::runner::ImportProgressSnapshot)>,
+    selected_store_number: Option<u32>,
+    require_explicit_store_selection: bool,
 ) -> Result<Option<ImportRun>, AppError> {
+    let config = resolved_import_config(
+        config,
+        selected_store_number,
+        require_explicit_store_selection,
+        logger,
+        stdout_enabled,
+    )
+    .await?;
     let profile = profile_for_import_or_resume(resume_manifest, sanitize_profile_path)?;
-    let source = read_source_context(config, logger, profile, true)?;
+    let source = read_source_context(&config, logger, profile, true)?;
     if resume_manifest.is_none() {
         select_eligible_plus(
             &source.plus,
@@ -1895,14 +1908,14 @@ async fn prepare_and_run_import(
         logger.line("Validation warnings are present; continuing because no blocking validation errors were found.")?;
     }
 
-    let target_identity = target_identity(config);
+    let target_identity = target_identity(&config);
     let manifest_path = manifest_path_from_environment(resume_manifest)?;
     if resume_manifest.is_none() {
         logger.kv("Import manifest", &manifest_path.display().to_string())?;
     }
 
     let summary = run_import_with_stdout(
-        config.clone(),
+        config,
         &source.valid_plus,
         source.source_identity.clone(),
         target_identity,
@@ -1999,6 +2012,55 @@ async fn prepare_and_run_import(
     Ok(Some(ImportRun { source, summary }))
 }
 
+async fn resolved_import_config(
+    config: &AppConfig,
+    selected_store_number: Option<u32>,
+    require_explicit_store_selection: bool,
+    logger: &mut AuditLogger,
+    stdout_enabled: bool,
+) -> Result<AppConfig, AppError> {
+    validate_connection_urls(config)?;
+    let client_secret = load_client_secret(config)?;
+    let client = DigiwebClient::new(config.clone())?;
+    let token = authenticate(client.http(), config, &client_secret).await?;
+    let stores = client.list_active_stores(&token).await?;
+    let resolution = resolve_store(
+        &stores,
+        config.digiweb.store_number,
+        selected_store_number,
+        require_explicit_store_selection,
+    )?;
+    let store = match resolution {
+        StoreResolution::Automatic(store) => {
+            logger.line(format!(
+                "Automatically selected {} because it is the only active DIGIweb store.",
+                store.label()
+            ))?;
+            store
+        }
+        StoreResolution::Configured(store) => {
+            logger.line(format!("Using configured {}.", store.label()))?;
+            store
+        }
+        StoreResolution::Explicit(store) => {
+            logger.line(format!("Using selected {}.", store.label()))?;
+            store
+        }
+        StoreResolution::ChoiceRequired { .. } => {
+            return Err(AppError::Config(
+                "DIGIweb has multiple active stores. Select the destination store before importing."
+                    .to_string(),
+            ));
+        }
+    };
+    if stdout_enabled {
+        println!("Import destination: {}", store.label());
+    }
+    let mut resolved = config.clone();
+    resolved.digiweb.store_number = store.number;
+    Ok(resolved)
+}
+
 async fn run_test_connection(
     config: &AppConfig,
     logger: &mut AuditLogger,
@@ -2074,6 +2136,19 @@ async fn run_verify(
     )?;
     let client = DigiwebClient::new(config.clone())?;
     let auth_result = authenticate(client.http(), config, &client_secret).await;
+    let store_result = match &auth_result {
+        Ok(token) => client.list_active_stores(token).await.and_then(|stores| {
+            let resolution = resolve_store(&stores, config.digiweb.store_number, None, false)?;
+            let store = match resolution {
+                StoreResolution::Automatic(store) | StoreResolution::Configured(store) => store,
+                StoreResolution::Explicit(_) | StoreResolution::ChoiceRequired { .. } => {
+                    unreachable!("non-interactive store resolution cannot return this variant")
+                }
+            };
+            Ok(store)
+        }),
+        Err(err) => Err(AppError::Auth(err.to_string())),
+    };
     let authentication = if auth_result.is_ok() {
         AuthenticationReadinessStatus::Passed
     } else {
@@ -2096,10 +2171,18 @@ async fn run_verify(
     logger.kv("Write operation attempted", "NO")?;
     logger.kv("PLU write requests", "0")?;
     let finished_at = chrono::Local::now();
-    let readiness_result = final_readiness_result(authentication, &reference_readiness);
+    let mut readiness_result = final_readiness_result(authentication, &reference_readiness);
+    let mut report_config = config.clone();
+    if let Ok(store) = &store_result {
+        report_config.digiweb.store_number = store.number;
+        logger.kv("Import destination", &store.label())?;
+        println!("Import destination: {}", store.label());
+    } else {
+        readiness_result = ReadinessResult::NotReady;
+    }
     let verify_report = build_verify_report(VerifyReportInput {
         source: &source,
-        config,
+        config: &report_config,
         authentication,
         reference_readiness: &reference_readiness,
         readiness_result,
@@ -2112,6 +2195,11 @@ async fn run_verify(
     logger.kv("Verify JSON report", "verify-report.json")?;
 
     if let Err(err) = auth_result {
+        logger.kv("IMPORT READINESS", readiness_result.as_str())?;
+        logger.flush()?;
+        return Err(err);
+    }
+    if let Err(err) = store_result {
         logger.kv("IMPORT READINESS", readiness_result.as_str())?;
         logger.flush()?;
         return Err(err);

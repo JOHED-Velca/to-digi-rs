@@ -19,6 +19,7 @@ use crate::digiweb::auth::authenticate;
 use crate::digiweb::client::DigiwebClient;
 use crate::digiweb::payload::DigiwebPluPayload;
 use crate::digiweb::preflight::{AuthenticationReadinessStatus, evaluate_reference_readiness};
+use crate::digiweb::store::{StoreResolution, resolve_store};
 use crate::error::AppError;
 use crate::import::runner::ImportProgressSnapshot;
 use crate::logging::{AuditLogger, FinalImportLog};
@@ -126,13 +127,19 @@ pub(super) async fn run_ui_operation<B: Backend>(
         UiOperation::Verify => match run_verify_service(app.selected_profile.clone(), logger).await
         {
             Ok(summary) => {
+                app.selected_store_number = summary.selected_store_number;
                 app.readiness = Some(summary);
                 Ok("Readiness checked.".to_string())
             }
             Err(err) => Err(err),
         },
         UiOperation::DryRun(selection) => {
-            match run_dry_run_service(app.selected_profile.clone(), selection, logger) {
+            match run_dry_run_service(
+                app.selected_profile.clone(),
+                selection,
+                app.selected_store_number,
+                logger,
+            ) {
                 Ok(summary) => {
                     app.dry_run = Some(summary);
                     Ok("Dry run complete.".to_string())
@@ -145,6 +152,7 @@ pub(super) async fn run_ui_operation<B: Backend>(
             continue_on_error,
         } => {
             let selected_profile = app.selected_profile.clone();
+            let selected_store_number = app.selected_store_number;
             app.screen = Screen::FullImportProgress;
             app.selected_index = 0;
             app.import_progress = None;
@@ -160,6 +168,7 @@ pub(super) async fn run_ui_operation<B: Backend>(
                 selected_profile,
                 selection,
                 continue_on_error,
+                selected_store_number,
                 logger,
                 Some(&mut progress_observer),
             )
@@ -474,17 +483,53 @@ async fn run_verify_service(
     let client_secret = load_client_secret(&config)?;
     let client = DigiwebClient::new(config.clone())?;
     let auth_result = authenticate(client.http(), &config, &client_secret).await;
+    let store_result = match &auth_result {
+        Ok(token) => client.list_active_stores(token).await.and_then(|stores| {
+            let resolution = resolve_store(&stores, config.digiweb.store_number, None, true)?;
+            Ok((stores, resolution))
+        }),
+        Err(err) => Err(AppError::Auth(short_error(err))),
+    };
     let authentication_error = auth_result.as_ref().err().map(short_error);
     let authentication = if auth_result.is_ok() {
         AuthenticationReadinessStatus::Passed
     } else {
         AuthenticationReadinessStatus::Failed
     };
-    let readiness = final_readiness_result(authentication, &reference_readiness);
+    let mut readiness = final_readiness_result(authentication, &reference_readiness);
+    let (
+        available_stores,
+        selected_store_number,
+        store_selection_required,
+        preferred_store_index,
+        store_error,
+    ) = match store_result {
+        Ok((stores, StoreResolution::Automatic(store))) => {
+            logger.line(format!(
+                "Automatically selected {} because it is the only active DIGIweb store.",
+                store.label()
+            ))?;
+            (stores, Some(store.number), false, 0, None)
+        }
+        Ok((stores, StoreResolution::ChoiceRequired { preferred_index })) => {
+            (stores, None, true, preferred_index, None)
+        }
+        Ok((stores, StoreResolution::Configured(store) | StoreResolution::Explicit(store))) => {
+            (stores, Some(store.number), false, 0, None)
+        }
+        Err(err) => {
+            readiness = crate::digiweb::preflight::ReadinessResult::NotReady;
+            (Vec::new(), None, false, 0, Some(short_error(&err)))
+        }
+    };
+    let mut report_config = config.clone();
+    if let Some(store_number) = selected_store_number {
+        report_config.digiweb.store_number = store_number;
+    }
     let finished_at = chrono::Local::now();
     let verify_report = build_verify_report(VerifyReportInput {
         source: &source,
-        config: &config,
+        config: &report_config,
         authentication,
         reference_readiness: &reference_readiness,
         readiness_result: readiness,
@@ -505,16 +550,25 @@ async fn run_verify_service(
         eligible: source.valid_plus.len(),
         excluded: excluded_count,
         unverified_references: reference_readiness.unverified_reference_count,
+        available_stores,
+        selected_store_number,
+        store_selection_required,
+        preferred_store_index,
+        store_error,
     })
 }
 
 fn run_dry_run_service(
     profile: Option<String>,
     selection: SelectionCriteria,
+    selected_store_number: Option<u32>,
     logger: &mut AuditLogger,
 ) -> Result<DryRunSummaryView, AppError> {
     logger.line("TUI DRY RUN")?;
-    let config = config_for_offline_operation()?;
+    let mut config = config_for_offline_operation()?;
+    if let Some(store_number) = selected_store_number {
+        config.digiweb.store_number = store_number;
+    }
     let profile_selection = profile_selection(profile);
     let profile = load_optional_sanitization_profile(profile_selection.as_ref())?;
     let started_at = chrono::Local::now();
@@ -603,6 +657,7 @@ async fn run_import_service(
     profile: Option<String>,
     selection: SelectionCriteria,
     continue_on_error: bool,
+    selected_store_number: Option<u32>,
     logger: &mut AuditLogger,
     progress_observer: Option<&mut dyn FnMut(ImportProgressSnapshot)>,
 ) -> Result<ImportSummaryView, AppError> {
@@ -620,6 +675,8 @@ async fn run_import_service(
         logger,
         false,
         progress_observer,
+        selected_store_number,
+        true,
     )
     .await?
     else {
@@ -695,6 +752,15 @@ fn resolved_path(path: impl AsRef<Path>) -> String {
 
 pub(super) fn concise_import_failure(message: &str, barcode_type: Option<&str>) -> String {
     let sanitized = crate::recovery::sanitize_manifest_error(message);
+    if sanitized
+        .to_ascii_lowercase()
+        .contains("no active shops found")
+    {
+        let store = value_after_label(&sanitized, "submitted storeno:").unwrap_or("configured");
+        return format!(
+            "DIGIweb could not find active store {store}. Run readiness and select an active destination store."
+        );
+    }
     let barcode = value_after_label(&sanitized, "the barcode:")
         .or_else(|| value_after_label(&sanitized, "barcode:"));
     let actual_length = value_after_label(&sanitized, "length barcode:");

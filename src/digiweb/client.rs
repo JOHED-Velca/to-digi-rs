@@ -10,6 +10,7 @@ use crate::config::AppConfig;
 use crate::digiweb::auth::{AccessToken, AuthSession, MAX_AUTHENTICATED_REQUEST_ATTEMPTS};
 use crate::digiweb::payload::DigiwebPluPayload;
 use crate::digiweb::status::ProcessingStatus;
+use crate::digiweb::store::{DigiwebStore, parse_store_page};
 use crate::error::AppError;
 use crate::logging::AuditLogger;
 
@@ -110,6 +111,61 @@ impl DigiwebClient {
 
     pub fn http(&self) -> &reqwest::Client {
         &self.http
+    }
+
+    pub async fn list_active_stores(
+        &self,
+        token: &AccessToken,
+    ) -> Result<Vec<DigiwebStore>, AppError> {
+        const PAGE_SIZE: usize = 1000;
+        let mut start_row = 0usize;
+        let mut stores = Vec::new();
+        let mut previous_page = None;
+        loop {
+            let url = self.join_base_path(&format!(
+                "/api/registry/api/v1/shops?startRow={start_row}&pageSize={PAGE_SIZE}"
+            ))?;
+            let response = self
+                .http
+                .get(&url)
+                .header("Authorization", token.bearer_value())
+                .send()
+                .await
+                .map_err(|err| AppError::Network(err.to_string()))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(AppError::Http(format!(
+                    "active store lookup returned HTTP {status}"
+                )));
+            }
+            let value = response
+                .json::<Value>()
+                .await
+                .map_err(|err| AppError::Http(format!("invalid DIGIweb store response: {err}")))?;
+            if previous_page.as_ref() == Some(&value) {
+                return Err(AppError::Http(
+                    "DIGIweb store lookup repeated the same page; refusing an incomplete store list"
+                        .to_string(),
+                ));
+            }
+            previous_page = Some(value.clone());
+            let page = parse_store_page(value)?;
+            stores.extend(page.stores);
+            if page.record_count < PAGE_SIZE {
+                break;
+            }
+            start_row = start_row.saturating_add(page.record_count);
+        }
+        stores.sort_by_key(|store| store.number);
+        if stores
+            .windows(2)
+            .any(|pair| pair[0].number == pair[1].number)
+        {
+            return Err(AppError::Http(
+                "DIGIweb returned duplicate active store reference numbers".to_string(),
+            ));
+        }
+        Ok(stores)
     }
 
     #[allow(dead_code)]
@@ -1318,6 +1374,34 @@ mod tests {
 
         assert_eq!(response.processing_status(), Some(ProcessingStatus::Fail));
         assert_eq!(response.message.as_deref(), Some("bad PLU"));
+    }
+
+    #[tokio::test]
+    async fn active_store_lookup_uses_registry_api_and_bearer_token() {
+        let server = TestServer::start(vec![raw_response(
+            200,
+            "OK",
+            &[("Content-Type", "application/json")],
+            r#"[{"shopno":2,"name":"Starsky","active":true}]"#,
+        )])
+        .await;
+        let client = DigiwebClient::new(test_config(&server.base_url, "", 1, 5)).expect("client");
+
+        let stores = client
+            .list_active_stores(&test_token())
+            .await
+            .expect("stores");
+
+        assert_eq!(
+            stores,
+            vec![crate::digiweb::store::DigiwebStore::new(2, "Starsky")]
+        );
+        let requests = server.request_texts().await;
+        assert!(
+            requests[0]
+                .starts_with("GET /api/registry/api/v1/shops?startRow=0&pageSize=1000 HTTP/1.1")
+        );
+        assert!(request_has_authorization(&requests[0], "Bearer token"));
     }
 
     #[tokio::test]

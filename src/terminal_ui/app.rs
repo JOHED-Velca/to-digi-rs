@@ -35,6 +35,7 @@ pub struct TerminalApp {
     pub last_live_import_was_single: bool,
     pub single_import_success_eligible: bool,
     pub full_import_continue_on_error: bool,
+    pub selected_store_number: Option<u32>,
 }
 impl TerminalApp {
     pub fn new(options: TerminalUiOptions) -> Self {
@@ -67,6 +68,7 @@ impl TerminalApp {
             last_live_import_was_single: false,
             single_import_success_eligible: false,
             full_import_continue_on_error: true,
+            selected_store_number: None,
         }
     }
 
@@ -123,6 +125,7 @@ impl TerminalApp {
                 }
                 Some(_) => vec!["Continue", "View Details", "Back"],
             },
+            Screen::StoreSelection => Vec::new(),
             Screen::DryRun => {
                 if self.dry_run.is_some() {
                     vec!["Continue", "View Details", "Back"]
@@ -160,6 +163,29 @@ impl TerminalApp {
             Screen::Error => vec!["Back", "Main Menu"],
             Screen::Version => vec!["Back"],
             Screen::Details => vec!["Back"],
+        }
+    }
+
+    pub(super) fn menu_items(&self) -> Vec<String> {
+        if self.screen == Screen::StoreSelection {
+            let mut items = self
+                .readiness
+                .as_ref()
+                .map(|summary| {
+                    summary
+                        .available_stores
+                        .iter()
+                        .map(|store| store.label())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            items.push("Back".to_string());
+            items
+        } else {
+            self.visible_items()
+                .into_iter()
+                .map(ToString::to_string)
+                .collect()
         }
     }
 }

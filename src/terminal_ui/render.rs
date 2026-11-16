@@ -121,6 +121,10 @@ fn render_screen(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TerminalApp) 
                 Line::from(""),
             ],
             Screen::ReadinessReady => render_readiness_body(app),
+            Screen::StoreSelection => vec![
+                Line::from("Choose the store that will receive every PLU in this import."),
+                Line::from("The configured store is highlighted when it is active."),
+            ],
             Screen::DryRun => render_dry_run_body(app),
             Screen::SinglePlu => vec![Line::from(
                 "Choose one live PLU test before considering a full import.",
@@ -325,7 +329,7 @@ fn render_config_body(app: &TerminalApp) -> Vec<Line<'static>> {
             },
         ),
         Line::from(""),
-        heading_line("Store:"),
+        heading_line("Configured store preference:"),
         value_line(format!("  {}", config.digiweb.store_number)),
     ];
     if let Some(message) = &app.status_message {
@@ -440,6 +444,22 @@ fn render_readiness_body(app: &TerminalApp) -> Vec<Line<'static>> {
     if summary.readiness == ReadinessResult::NotReady {
         lines.push(Line::from("Live import is blocked."));
     }
+    if let Some(error) = &summary.store_error {
+        lines.push(Line::from(format!("Store: {error}")));
+    } else if summary.store_selection_required {
+        lines.push(Line::from(format!(
+            "Destination: choose 1 of {} active stores",
+            summary.available_stores.len()
+        )));
+    } else if let Some(number) = summary.selected_store_number {
+        let label = summary
+            .available_stores
+            .iter()
+            .find(|store| store.number == number)
+            .map(|store| store.label())
+            .unwrap_or_else(|| format!("Store {number}"));
+        lines.push(Line::from(format!("Destination: {label} (automatic)")));
+    }
     lines
 }
 
@@ -492,6 +512,9 @@ fn render_full_import_confirm_body(app: &TerminalApp) -> Vec<Line<'static>> {
             app.selected_profile.as_deref().unwrap_or("Generic")
         )),
     ];
+    if let Some(store_number) = app.selected_store_number {
+        lines.push(Line::from(format!("Store:       {store_number}")));
+    }
     if let Some(analysis) = &app.analysis {
         lines.push(Line::from(format!("Eligible:    {}", analysis.eligible)));
         lines.push(Line::from(format!("Excluded:    {}", analysis.excluded)));
@@ -732,6 +755,18 @@ fn render_readiness_details(app: &TerminalApp, width: u16) -> Vec<Line<'static>>
         lines.push(heading_line("Reason:"));
         lines.push(Line::from(error.clone()));
     }
+    lines.push(Line::from(""));
+    lines.push(heading_line("Stores:"));
+    if let Some(error) = &summary.store_error {
+        lines.push(Line::from(format!("ERROR {error}")));
+    } else {
+        lines.extend(
+            summary
+                .available_stores
+                .iter()
+                .map(|store| Line::from(store.label())),
+        );
+    }
     if let Ok(config) = AppConfig::load(Path::new("config.toml")) {
         lines.extend([
             Line::from(""),
@@ -876,7 +911,7 @@ fn body_area(area: Rect) -> Rect {
 
 fn render_menu(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TerminalApp) {
     let items = app
-        .visible_items()
+        .menu_items()
         .into_iter()
         .enumerate()
         .map(|(index, item)| {

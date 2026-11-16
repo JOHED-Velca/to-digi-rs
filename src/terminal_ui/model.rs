@@ -1,4 +1,5 @@
 use crate::digiweb::preflight::{AuthenticationReadinessStatus, ReadinessResult};
+use crate::digiweb::store::DigiwebStore;
 use crate::selection::SelectionCriteria;
 pub const CANONICAL_MDB_DISPLAY_PATH: &str = "~/digi/plu.mdb";
 
@@ -17,6 +18,7 @@ pub enum Screen {
     Diagnostics,
     References,
     ReadinessReady,
+    StoreSelection,
     DryRun,
     SinglePlu,
     FullImportErrorHandling,
@@ -39,6 +41,7 @@ impl Screen {
             Self::Diagnostics => "Diagnostics",
             Self::References => "Required DIGIweb References",
             Self::ReadinessReady => "Readiness",
+            Self::StoreSelection => "Destination Store",
             Self::DryRun => "Dry Run",
             Self::SinglePlu => "Single PLU Test",
             Self::FullImportErrorHandling => "Full Import Error Handling",
@@ -129,6 +132,11 @@ pub struct ReadinessSummaryView {
     pub eligible: usize,
     pub excluded: usize,
     pub unverified_references: usize,
+    pub available_stores: Vec<DigiwebStore>,
+    pub selected_store_number: Option<u32>,
+    pub store_selection_required: bool,
+    pub preferred_store_index: usize,
+    pub store_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

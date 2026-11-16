@@ -33,7 +33,7 @@ impl TerminalApp {
     }
 
     pub(super) fn move_selection(&mut self, delta: isize) {
-        let len = self.visible_items().len();
+        let len = self.menu_items().len();
         if len == 0 {
             return;
         }
@@ -51,7 +51,7 @@ impl TerminalApp {
         } else if self.screen == Screen::Main {
             self.selected_index = self
                 .selected_index
-                .min(self.visible_items().len().saturating_sub(1));
+                .min(self.menu_items().len().saturating_sub(1));
         } else {
             self.screen = Screen::Main;
             self.selected_index = 0;
@@ -143,12 +143,39 @@ impl TerminalApp {
                     .is_some_and(|summary| summary.readiness != ReadinessResult::NotReady) =>
                 {
                     self.dry_run = None;
-                    self.push_screen(Screen::DryRun)
+                    if self
+                        .readiness
+                        .as_ref()
+                        .is_some_and(|summary| summary.store_selection_required)
+                    {
+                        let preferred = self
+                            .readiness
+                            .as_ref()
+                            .map(|summary| summary.preferred_store_index)
+                            .unwrap_or(0);
+                        self.push_screen(Screen::StoreSelection);
+                        self.selected_index = preferred;
+                    } else {
+                        self.push_screen(Screen::DryRun)
+                    }
                 }
                 0 => self.pending_operation = Some(UiOperation::Verify),
                 1 => self.push_details(DetailsContext::Readiness),
                 _ => self.go_back(),
             },
+            Screen::StoreSelection => {
+                let stores = self
+                    .readiness
+                    .as_ref()
+                    .map(|summary| summary.available_stores.as_slice())
+                    .unwrap_or_default();
+                if let Some(store) = stores.get(self.selected_index) {
+                    self.selected_store_number = Some(store.number);
+                    self.push_screen(Screen::DryRun);
+                } else {
+                    self.go_back();
+                }
+            }
             Screen::DryRun => {
                 if self.dry_run.is_some() {
                     match self.selected_index {
